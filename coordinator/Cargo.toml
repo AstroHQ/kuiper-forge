@@ -1,0 +1,12 @@
+[package]
+name = "ci-runner-coordinator"
+version = "0.1.0"
+edition = "2021"
+description = "CI runner coordinator for ephemeral VMs"
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+octocrab = "0.38.0"
