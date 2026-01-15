@@ -1,0 +1,12 @@
+[package]
+name = "agent-proto"
+version = "0.1.0"
+edition = "2021"
+description = "gRPC protocol definitions for CI runner agents"
+
+[dependencies]
+prost = "0.13"
+tonic = { version = "0.12", features = ["tls"] }
+
+[build-dependencies]
+tonic-build = "0.12"

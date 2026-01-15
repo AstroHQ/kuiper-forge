@@ -1,0 +1,30 @@
+[package]
+name = "tart-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Tart VM agent for CI runner coordination (macOS)"
+
+[[bin]]
+name = "tart-agent"
+path = "src/main.rs"
+
+[dependencies]
+agent-proto = { path = "../agent-proto" }
+agent-lib = { path = "../agent-lib" }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+toml = "0.8"
+uuid = { workspace = true }
+gethostname = "0.5"
+url = "2"

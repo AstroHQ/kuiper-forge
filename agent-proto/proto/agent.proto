@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package cirunner.agent;
+
+// ============================================================================
+// Registration Service
+// - Uses server-side TLS (encrypted) but no client certificate required
+// - Registration tokens are SINGLE-USE: consumed immediately on success
+// - Token validity window is short (default 1 hour)
+// - A leaked token can only be used once before it becomes invalid
+// ============================================================================
+
+service RegistrationService {
+    // Exchange registration token for client certificate
+    // Token is invalidated after successful registration
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+}
+
+message RegisterRequest {
+    string registration_token = 1;
+    string hostname = 2;
+    string agent_type = 3;  // "tart" or "proxmox"
+    repeated string labels = 4;
+    uint32 max_vms = 5;
+}
+
+message RegisterResponse {
+    string agent_id = 1;
+    string client_cert_pem = 2;  // X.509 certificate signed by coordinator CA
+    string client_key_pem = 3;   // Private key (transmitted over TLS, returned only once)
+    string expires_at = 4;       // Certificate expiry (ISO 8601)
+}
+
+// ============================================================================
+// Agent Service (requires mTLS - agent identity from certificate)
+// ============================================================================
+
+service AgentService {
+    // Bidirectional streaming for agent-coordinator communication
+    rpc AgentStream(stream AgentMessage) returns (stream CoordinatorMessage);
+}
+
+// Messages FROM agent TO coordinator
+message AgentMessage {
+    oneof payload {
+        AgentStatus status = 1;
+        CommandResult result = 2;
+        Pong pong = 3;
+    }
+}
+
+message AgentStatus {
+    uint32 active_vms = 1;
+    uint32 available_slots = 2;
+    repeated VmInfo vms = 3;
+    // Identity fields - only required in first message when mTLS is disabled
+    // When mTLS is enabled, agent_id is extracted from certificate CN
+    string agent_id = 4;      // Agent ID from registration
+    string hostname = 5;      // Hostname for display
+    string agent_type = 6;    // "tart" or "proxmox"
+    repeated string labels = 7;  // Agent labels for matching
+    uint32 max_vms = 8;       // Maximum VMs this agent can handle
+}
+
+message VmInfo {
+    string vm_id = 1;
+    string name = 2;
+    string state = 3;  // "creating", "running", "stopping"
+    string ip_address = 4;
+}
+
+message CommandResult {
+    string command_id = 1;
+    bool success = 2;
+    string error = 3;
+    oneof result {
+        CreateRunnerResult create_runner = 4;
+        DestroyRunnerResult destroy_runner = 5;
+    }
+}
+
+message CreateRunnerResult {
+    string vm_id = 1;
+    string ip_address = 2;
+}
+
+message DestroyRunnerResult {
+    // Empty - just indicates success
+}
+
+message Pong {}
+
+// Messages FROM coordinator TO agent
+message CoordinatorMessage {
+    oneof payload {
+        CreateRunnerCommand create_runner = 1;
+        DestroyRunnerCommand destroy_runner = 2;
+        Ping ping = 3;
+    }
+}
+
+message CreateRunnerCommand {
+    string command_id = 1;
+    string vm_name = 2;
+    string template = 3;
+    string registration_token = 4;  // GitHub runner registration token
+    repeated string labels = 5;
+    string runner_scope_url = 6;    // GitHub org/repo URL
+}
+
+message DestroyRunnerCommand {
+    string command_id = 1;
+    string vm_id = 2;
+}
+
+message Ping {}

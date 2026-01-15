@@ -1,0 +1,467 @@
+//! Proxmox Agent - manages Windows/Linux VMs via Proxmox API for CI runners.
+//!
+//! This daemon:
+//! - Connects to the coordinator via gRPC + mTLS
+//! - Receives commands to create/destroy runner VMs
+//! - Manages the full VM lifecycle (clone, start, configure runner, wait, destroy)
+//! - Reports status back to the coordinator
+
+mod config;
+mod error;
+mod ssh;
+mod vm_manager;
+
+use agent_lib::{AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector};
+use agent_proto::{
+    AgentMessage, AgentPayload, AgentStatus, CommandResult, CommandResultPayload,
+    CoordinatorPayload, CreateRunnerResult, DestroyRunnerResult, Ping, Pong, VmInfo,
+};
+use clap::Parser;
+use config::Config;
+use error::{Error, Result};
+use proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::{debug, error, info};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use vm_manager::VmManager;
+
+/// Proxmox Agent for CI Runner Coordination
+#[derive(Parser, Debug)]
+#[command(name = "proxmox-agent")]
+#[command(about = "Proxmox VE agent for ephemeral CI runner VMs")]
+struct Args {
+    /// Path to configuration file
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+
+    /// Registration token from coordinator (single-use, for first-time registration)
+    #[arg(long)]
+    token: Option<String>,
+
+    /// Enable verbose logging
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // Initialize logging with file output
+    let data_dir = Config::default_data_dir();
+    init_logging(&data_dir, args.verbose)?;
+
+    info!("Starting proxmox-agent");
+
+    // Load configuration
+    let config = match &args.config {
+        Some(path) => Config::load(path)?,
+        None => Config::load_default()?,
+    };
+
+    info!("Loaded configuration");
+    debug!("Coordinator URL: {}", config.coordinator.url);
+    debug!("Proxmox node: {}", config.proxmox.node);
+    debug!("Template VMID: {}", config.vm.template_vmid);
+    debug!("Max concurrent VMs: {}", config.vm.concurrent_vms);
+
+    // Create Proxmox API client
+    let proxmox = create_proxmox_client(&config)?;
+    let proxmox = Arc::new(proxmox);
+
+    // Create VM manager
+    let vm_manager = Arc::new(VmManager::new(
+        proxmox,
+        config.vm.clone(),
+        config.ssh.clone(),
+    ));
+
+    // Spawn cleanup task
+    let cleanup_vm_manager = vm_manager.clone();
+    let cleanup_config = config.cleanup.clone();
+    tokio::spawn(async move {
+        let interval = Duration::from_secs(cleanup_config.cleanup_interval_mins as u64 * 60);
+        let max_age = Duration::from_secs(cleanup_config.max_vm_age_hours as u64 * 3600);
+        let mut ticker = tokio::time::interval(interval);
+
+        loop {
+            ticker.tick().await;
+            info!("Running stale VM cleanup");
+            cleanup_vm_manager.cleanup_stale_vms(max_age).await;
+        }
+    });
+
+    // Initialize certificate store
+    let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
+
+    // Copy CA cert to certs_dir if it doesn't exist there
+    let ca_dest = config.tls.certs_dir.join("ca.crt");
+    if !ca_dest.exists() && config.tls.ca_cert.exists() {
+        std::fs::create_dir_all(&config.tls.certs_dir)?;
+        std::fs::copy(&config.tls.ca_cert, &ca_dest)?;
+        info!("Copied CA certificate to {:?}", ca_dest);
+    }
+
+    // Create agent runner
+    let agent = ProxmoxAgent::new(config, vm_manager, cert_store, args.token);
+
+    // Run the agent (loops forever with reconnection)
+    agent.run().await?;
+
+    Ok(())
+}
+
+/// Create the Proxmox API client from configuration.
+fn create_proxmox_client(config: &Config) -> Result<ProxmoxVEAPI> {
+    let auth = ProxmoxAuth::api_token(&config.proxmox.token_id, &config.proxmox.token_secret);
+
+    // The username is derived from token_id (format: user@realm!tokenname)
+    let username = config.proxmox.token_id
+        .split('!')
+        .next()
+        .unwrap_or(&config.proxmox.token_id);
+
+    ProxmoxVEAPI::with_node(
+        username,
+        auth,
+        &config.proxmox.api_url,
+        &config.proxmox.node,
+        config.proxmox.accept_invalid_certs,
+    ).map_err(|e| Error::Vm(format!("Failed to create Proxmox client: {}", e)))
+}
+
+/// The main Proxmox agent.
+struct ProxmoxAgent {
+    config: Config,
+    vm_manager: Arc<VmManager>,
+    cert_store: AgentCertStore,
+    /// Registration token from CLI (for first-time registration)
+    registration_token: Option<String>,
+}
+
+impl ProxmoxAgent {
+    /// Create a new Proxmox agent.
+    fn new(
+        config: Config,
+        vm_manager: Arc<VmManager>,
+        cert_store: AgentCertStore,
+        registration_token: Option<String>,
+    ) -> Self {
+        Self {
+            config,
+            vm_manager,
+            cert_store,
+            registration_token,
+        }
+    }
+
+    /// Run the agent, handling reconnection.
+    async fn run(&self) -> Result<()> {
+        loop {
+            match self.connect_and_run().await {
+                Ok(_) => {
+                    info!("Connection closed, reconnecting...");
+                }
+                Err(e) => {
+                    error!("Agent error: {}", e);
+                }
+            }
+
+            // Wait before reconnecting
+            info!("Reconnecting in 5 seconds...");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// Connect to coordinator and run the agent loop.
+    async fn connect_and_run(&self) -> Result<()> {
+        // Create agent config for connector
+        // Use registration token from CLI args (for first-time registration)
+        let agent_config = LibAgentConfig {
+            coordinator_url: self.config.coordinator.url.clone(),
+            coordinator_hostname: self.config.coordinator.hostname.clone(),
+            registration_token: self.registration_token.clone(),
+            agent_type: "proxmox".to_string(),
+            labels: self.config.agent.labels.clone(),
+            max_vms: self.config.vm.concurrent_vms,
+        };
+
+        // Connect to coordinator using stored cert_store
+        let mut connector = AgentConnector::new(agent_config, self.cert_store.clone());
+        let client = connector.connect().await?;
+
+        info!("Connected to coordinator");
+        if let Some(agent_id) = connector.agent_id() {
+            info!("Agent ID: {}", agent_id);
+        }
+
+        // Run the agent stream
+        self.run_stream(client).await
+    }
+
+    /// Run the bidirectional gRPC stream.
+    async fn run_stream(
+        &self,
+        mut client: agent_proto::AgentServiceClient<tonic::transport::Channel>,
+    ) -> Result<()> {
+        // Create channels for sending/receiving
+        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
+
+        // Start the bidirectional stream
+        let response = client
+            .agent_stream(ReceiverStream::new(rx))
+            .await
+            .map_err(|e| Error::Grpc(e))?;
+
+        let mut inbound = response.into_inner();
+
+        // Send initial status
+        let status = self.build_status().await;
+        tx.send(AgentMessage {
+            payload: Some(AgentPayload::Status(status)),
+        })
+        .await
+        .map_err(|_| Error::ChannelSend)?;
+
+        info!("Sent initial status to coordinator");
+
+        // Process messages from coordinator
+        loop {
+            tokio::select! {
+                msg = inbound.message() => {
+                    match msg {
+                        Ok(Some(coordinator_msg)) => {
+                            self.handle_coordinator_message(coordinator_msg, &tx).await?;
+                        }
+                        Ok(None) => {
+                            info!("Stream closed by coordinator");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Stream error: {}", e);
+                            return Err(Error::Grpc(e));
+                        }
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received shutdown signal");
+                    return Err(Error::Shutdown);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a message from the coordinator.
+    async fn handle_coordinator_message(
+        &self,
+        msg: agent_proto::CoordinatorMessage,
+        tx: &mpsc::Sender<AgentMessage>,
+    ) -> Result<()> {
+        let payload = match msg.payload {
+            Some(p) => p,
+            None => {
+                debug!("Received empty message from coordinator");
+                return Ok(());
+            }
+        };
+
+        match payload {
+            CoordinatorPayload::CreateRunner(cmd) => {
+                info!(
+                    "Received CreateRunner command: {} ({})",
+                    cmd.command_id, cmd.vm_name
+                );
+                self.handle_create_runner(cmd, tx.clone()).await;
+            }
+            CoordinatorPayload::DestroyRunner(cmd) => {
+                info!(
+                    "Received DestroyRunner command: {} ({})",
+                    cmd.command_id, cmd.vm_id
+                );
+                self.handle_destroy_runner(cmd, tx.clone()).await;
+            }
+            CoordinatorPayload::Ping(Ping {}) => {
+                debug!("Received ping from coordinator");
+                tx.send(AgentMessage {
+                    payload: Some(AgentPayload::Pong(Pong {})),
+                })
+                .await
+                .map_err(|_| Error::ChannelSend)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a CreateRunner command.
+    async fn handle_create_runner(
+        &self,
+        cmd: agent_proto::CreateRunnerCommand,
+        tx: mpsc::Sender<AgentMessage>,
+    ) {
+        let vm_manager = self.vm_manager.clone();
+        let command_id = cmd.command_id.clone();
+
+        // Spawn task to handle the runner lifecycle
+        tokio::spawn(async move {
+            let result = vm_manager
+                .run_complete_lifecycle(
+                    &cmd.vm_name,
+                    &cmd.registration_token,
+                    &cmd.labels,
+                    &cmd.runner_scope_url,
+                )
+                .await;
+
+            let response = match result {
+                Ok((vmid, ip)) => {
+                    info!("Runner {} completed successfully", command_id);
+                    CommandResult {
+                        command_id: command_id.clone(),
+                        success: true,
+                        error: String::new(),
+                        result: Some(CommandResultPayload::CreateRunner(CreateRunnerResult {
+                            vm_id: vmid.to_string(),
+                            ip_address: ip,
+                        })),
+                    }
+                }
+                Err(e) => {
+                    error!("Runner {} failed: {}", command_id, e);
+                    CommandResult {
+                        command_id: command_id.clone(),
+                        success: false,
+                        error: e.to_string(),
+                        result: None,
+                    }
+                }
+            };
+
+            if let Err(e) = tx
+                .send(AgentMessage {
+                    payload: Some(AgentPayload::Result(response)),
+                })
+                .await
+            {
+                error!("Failed to send result: {}", e);
+            }
+        });
+    }
+
+    /// Handle a DestroyRunner command.
+    async fn handle_destroy_runner(
+        &self,
+        cmd: agent_proto::DestroyRunnerCommand,
+        tx: mpsc::Sender<AgentMessage>,
+    ) {
+        let vm_manager = self.vm_manager.clone();
+        let command_id = cmd.command_id.clone();
+        let vm_id = cmd.vm_id.clone();
+
+        // Spawn task to handle destruction
+        tokio::spawn(async move {
+            let result = vm_manager.force_destroy(&vm_id).await;
+
+            let response = match result {
+                Ok(()) => {
+                    info!("VM {} destroyed successfully", vm_id);
+                    CommandResult {
+                        command_id: command_id.clone(),
+                        success: true,
+                        error: String::new(),
+                        result: Some(CommandResultPayload::DestroyRunner(DestroyRunnerResult {})),
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to destroy VM {}: {}", vm_id, e);
+                    CommandResult {
+                        command_id: command_id.clone(),
+                        success: false,
+                        error: e.to_string(),
+                        result: None,
+                    }
+                }
+            };
+
+            if let Err(e) = tx
+                .send(AgentMessage {
+                    payload: Some(AgentPayload::Result(response)),
+                })
+                .await
+            {
+                error!("Failed to send result: {}", e);
+            }
+        });
+    }
+
+    /// Build current agent status.
+    async fn build_status(&self) -> AgentStatus {
+        let vms = self.vm_manager.list_vms().await;
+        let active_count = vms.len() as u32;
+        let available = self.config.vm.concurrent_vms.saturating_sub(active_count);
+        let hostname = gethostname::gethostname()
+            .to_string_lossy()
+            .to_string();
+
+        AgentStatus {
+            active_vms: active_count,
+            available_slots: available,
+            vms: vms
+                .into_iter()
+                .map(|vm| VmInfo {
+                    vm_id: vm.vmid.to_string(),
+                    name: vm.name,
+                    state: vm.state.as_str().to_string(),
+                    ip_address: vm.ip_address.unwrap_or_default(),
+                })
+                .collect(),
+            // Identity fields - required for first message
+            agent_id: self.cert_store.get_agent_id().unwrap_or_default(),
+            hostname,
+            agent_type: "proxmox".to_string(),
+            labels: self.config.agent.labels.clone(),
+            max_vms: self.config.vm.concurrent_vms,
+        }
+    }
+}
+
+/// Initialize logging with file output and stdout.
+fn init_logging(data_dir: &PathBuf, verbose: bool) -> anyhow::Result<()> {
+    let log_dir = data_dir.join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // Create a daily rotating file appender (e.g., proxmox-agent.2026-01-15.log)
+    let file_appender = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("proxmox-agent")
+        .filename_suffix("log")
+        .build(&log_dir)?;
+
+    // Non-blocking writer for the file
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Leak the guard to keep the writer alive for the lifetime of the program
+    std::mem::forget(_guard);
+
+    let filter = if verbose {
+        EnvFilter::try_new("debug,russh=info,hyper=info,reqwest=info")?
+    } else {
+        EnvFilter::try_new("info,russh=warn")?
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_target(false)) // stdout
+        .with(fmt::layer().with_target(true).with_ansi(false).with_writer(non_blocking)) // file
+        .init();
+
+    info!("Logging to: {}", log_dir.display());
+    Ok(())
+}

@@ -1,0 +1,47 @@
+# Example proxmox-agent configuration
+#
+# Unlike tart-agent, proxmox-agent requires a config file for Proxmox
+# credentials and VM settings. However, the registration token should
+# be passed via CLI:
+#
+#   proxmox-agent --config /path/to/config.toml --token REG_TOKEN
+#
+# After initial registration, subsequent runs don't need --token:
+#   proxmox-agent --config /path/to/config.toml
+
+[coordinator]
+url = "https://localhost:9443"
+hostname = "localhost"
+
+[tls]
+ca_cert = "~/.config/proxmox-agent/certs/ca.crt"
+certs_dir = "~/.config/proxmox-agent/certs"
+
+[agent]
+labels = ["self-hosted", "linux", "x64"]
+
+[proxmox]
+api_url = "https://proxmox.local:8006"
+node = "pve"
+token_id = "ci-runner@pve!runner"
+token_secret = "your-token-secret-here"
+accept_invalid_certs = true  # For self-signed Proxmox certs
+
+[vm]
+template_vmid = 9000
+storage = "local-lvm"
+linked_clone = true
+concurrent_vms = 4
+ip_timeout_secs = 120
+clone_timeout_secs = 300
+
+[ssh]
+private_key_path = "~/.ssh/id_ed25519"
+username = "ci"
+port = 22
+timeout_secs = 30
+retries = 10
+
+[cleanup]
+max_vm_age_hours = 2
+cleanup_interval_mins = 15

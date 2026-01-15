@@ -1,0 +1,35 @@
+# Example coordinator configuration for local testing
+#
+# Before using:
+# 1. Run: cargo run --bin coordinator -- ca init --org "Test Org"
+# 2. Run: cargo run --bin coordinator -- ca server-cert --hostname localhost
+#
+# Then start the coordinator:
+#   cargo run --bin coordinator -- -c examples/coordinator-config.toml serve
+
+[github]
+# For testing without GitHub, use placeholder values
+# The coordinator will fail to get runner tokens but agent registration will work
+app_id = "123456"
+private_key_path = "/tmp/fake-github-key.pem"  # Won't be used for registration testing
+installation_id = "12345678"
+
+[grpc]
+listen_addr = "0.0.0.0:9443"
+
+[tls]
+# UPDATE THESE PATHS for your system!
+# macOS: ~/Library/Application Support/ci-runner-coordinator/
+# Linux: ~/.local/share/ci-runner-coordinator/
+#
+# Example for macOS (replace YOUR_USERNAME):
+# ca_cert = "/Users/YOUR_USERNAME/Library/Application Support/ci-runner-coordinator/ca.crt"
+#
+# Or use the output from: cargo run --bin coordinator -- init-config
+ca_cert = "UPDATE_THIS_PATH/ca.crt"
+ca_key = "UPDATE_THIS_PATH/ca.key"
+server_cert = "UPDATE_THIS_PATH/server.crt"
+server_key = "UPDATE_THIS_PATH/server.key"
+
+# No runners configured for basic registration testing
+# Add runner configs when you have a working GitHub App

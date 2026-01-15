@@ -1,0 +1,21 @@
+[package]
+name = "agent-lib"
+version = "0.1.0"
+edition = "2021"
+description = "Shared library for CI runner agents (connection, certificates)"
+
+[dependencies]
+agent-proto = { path = "../agent-proto" }
+
+tonic = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

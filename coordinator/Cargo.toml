@@ -5,8 +5,50 @@ edition = "2021"
 description = "CI runner coordinator for ephemeral VMs"
 
 [dependencies]
+# CLI
 clap = { workspace = true }
+
+# Error handling
 anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-octocrab = "0.38.0"
+toml = "0.8"
+
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+async-trait = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+agent-proto = { path = "../agent-proto" }
+
+# TLS/Certificates
+rcgen = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = "0.26"
+x509-parser = "0.16"
+
+# Time and IDs
+chrono = { workspace = true }
+uuid = { workspace = true }
+time = "0.3"
+
+# GitHub API
+reqwest = { workspace = true }
+jsonwebtoken = "9"
+base64 = "0.22"
+
+# Utilities
+rand = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
