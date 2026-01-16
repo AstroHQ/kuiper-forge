@@ -53,6 +53,10 @@ enum Commands {
         /// Address to listen on (overrides config)
         #[arg(long)]
         listen: Option<SocketAddr>,
+
+        /// Dry-run mode: skip GitHub integration (for testing agent registration)
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Certificate Authority management
@@ -148,10 +152,10 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Serve { listen } => {
+        Commands::Serve { listen, dry_run } => {
             // For daemon mode: log to both stdout and file with rotation
             init_daemon_logging(&cli.data_dir, filter)?;
-            serve(&cli.config, &cli.data_dir, listen).await
+            serve(&cli.config, &cli.data_dir, listen, dry_run).await
         }
         Commands::Ca { command } => {
             init_cli_logging(filter);
@@ -212,11 +216,15 @@ fn init_daemon_logging(data_dir: &PathBuf, filter: EnvFilter) -> Result<()> {
 }
 
 /// Run the coordinator daemon
-async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Option<SocketAddr>) -> Result<()> {
+async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Option<SocketAddr>, dry_run: bool) -> Result<()> {
     ensure_data_dir(data_dir)?;
 
-    // Load configuration
-    let config = Config::load(config_path)?;
+    // Load configuration (with relaxed validation in dry-run mode)
+    let config = if dry_run {
+        Config::load_or_default(config_path, data_dir)?
+    } else {
+        Config::load(config_path)?
+    };
 
     // Determine listen address
     let listen_addr: SocketAddr = listen_override
@@ -236,21 +244,28 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Initialize agent registry
     let agent_registry = Arc::new(AgentRegistry::new());
 
-    // Initialize GitHub client
-    let github_client = github::GitHubClient::new(
-        config.github.app_id.clone(),
-        &config.github.private_key_path,
-        config.github.installation_id.clone(),
-    )?;
+    // Initialize GitHub client and fleet manager (skip in dry-run mode)
+    let fleet_manager = if dry_run {
+        warn!("DRY-RUN MODE: GitHub integration disabled, fleet manager not started");
+        None
+    } else {
+        let github_client = github::GitHubClient::new(
+            config.github.app_id.clone(),
+            &config.github.private_key_path,
+            config.github.installation_id.clone(),
+        )?;
 
-    // Initialize fleet manager
-    let fleet_manager = fleet::FleetManager::new(
-        config.clone(),
-        github_client,
-        agent_registry.clone(),
-    );
+        Some(fleet::FleetManager::new(
+            config.clone(),
+            github_client,
+            agent_registry.clone(),
+        ))
+    };
 
     info!("CI Runner Coordinator starting...");
+    if dry_run {
+        info!("MODE: dry-run (agent registration only, no GitHub integration)");
+    }
     info!("Listening on: {}", listen_addr);
     info!("Managing {} runner configurations", config.runners.len());
 
@@ -304,15 +319,20 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         }
     });
 
-    // Run fleet manager and server concurrently
-    tokio::select! {
-        result = run_server(server_config, auth_manager, agent_registry) => {
-            result
+    // Run fleet manager (if enabled) and server concurrently
+    if let Some(fm) = fleet_manager {
+        tokio::select! {
+            result = run_server(server_config, auth_manager, agent_registry) => {
+                result
+            }
+            _ = fm.run() => {
+                // Fleet manager runs forever, shouldn't exit
+                Ok(())
+            }
         }
-        _ = fleet_manager.run() => {
-            // Fleet manager runs forever, shouldn't exit
-            Ok(())
-        }
+    } else {
+        // Dry-run mode: just run the server
+        run_server(server_config, auth_manager, agent_registry).await
     }
 }
 

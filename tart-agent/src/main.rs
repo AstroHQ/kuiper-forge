@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_lib::{AgentCertStore, AgentConfig, AgentConnector};
+use agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationTlsMode};
 use agent_proto::{
     AgentMessage, AgentPayload, AgentStatus, CommandResult, CommandResultPayload,
     CoordinatorPayload, CreateRunnerResult, DestroyRunnerResult, Pong,
@@ -96,24 +96,27 @@ async fn main() -> anyhow::Result<()> {
     init_logging(&data_dir)?;
 
     // Determine if we're in bootstrap mode or normal mode
-    let (config, registration_token) = if let Some(coordinator_url) = args.coordinator_url {
+    let (config, registration_token, use_provided_ca) = if let Some(coordinator_url) = args.coordinator_url {
         // Bootstrap mode: create config from CLI arguments
-        let ca_cert = args.ca_cert.ok_or_else(|| {
-            anyhow::anyhow!("--ca-cert is required for bootstrap (get it from coordinator)")
-        })?;
+        // CA cert is optional - if not provided, use TOFU (insecure) mode
+        let ca_cert = args.ca_cert.clone();
 
-        if !ca_cert.exists() {
-            anyhow::bail!("CA certificate not found: {}", ca_cert.display());
+        if let Some(ref ca) = ca_cert {
+            if !ca.exists() {
+                anyhow::bail!("CA certificate not found: {}", ca.display());
+            }
+            info!("Bootstrap mode: registering with coordinator (using provided CA)");
+        } else {
+            info!("Bootstrap mode: registering with coordinator (TOFU mode - no CA verification)");
         }
 
-        info!("Bootstrap mode: registering with coordinator");
         info!("  Coordinator: {}", coordinator_url);
         info!("  Labels: {:?}", args.labels);
         info!("  Base image: {}", args.base_image);
 
         let config = Config::from_bootstrap(
             coordinator_url,
-            ca_cert,
+            ca_cert.clone(),
             args.labels,
             args.base_image,
             args.max_vms,
@@ -123,12 +126,13 @@ async fn main() -> anyhow::Result<()> {
         config.save(&config_path)?;
         info!("Saved config to: {}", config_path.display());
 
-        (config, args.token)
+        (config, args.token, ca_cert.is_some())
     } else if config_path.exists() {
         // Normal mode: load existing config
         info!("Loading config from: {}", config_path.display());
         let config = Config::load(&config_path)?;
-        (config, None)
+        let has_ca = config.tls.ca_cert.is_some();
+        (config, None, has_ca)
     } else {
         // No config and no bootstrap args
         eprintln!("No configuration found at: {}", config_path.display());
@@ -137,11 +141,10 @@ async fn main() -> anyhow::Result<()> {
         eprintln!();
         eprintln!("  tart-agent --coordinator-url https://YOUR_COORDINATOR:9443 \\");
         eprintln!("             --token REG_TOKEN_FROM_COORDINATOR \\");
-        eprintln!("             --ca-cert /path/to/ca.crt \\");
         eprintln!("             --labels macos,arm64");
         eprintln!();
+        eprintln!("Optionally provide --ca-cert for stricter TLS verification.");
         eprintln!("Get the registration token with: coordinator token create --labels macos,arm64");
-        eprintln!("Get the CA cert with: coordinator ca export > ca.crt");
         std::process::exit(1);
     };
 
@@ -158,13 +161,22 @@ async fn main() -> anyhow::Result<()> {
     // Initialize certificate store
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
 
-    // Copy CA cert to certs_dir if not already there
-    let ca_dest = config.tls.certs_dir.join("ca.crt");
-    if !ca_dest.exists() && config.tls.ca_cert.exists() {
-        std::fs::create_dir_all(&config.tls.certs_dir)?;
-        std::fs::copy(&config.tls.ca_cert, &ca_dest)?;
-        info!("Copied CA certificate to {}", ca_dest.display());
+    // Copy CA cert to certs_dir if provided
+    if let Some(ref ca_cert_path) = config.tls.ca_cert {
+        let ca_dest = config.tls.certs_dir.join("ca.crt");
+        if !ca_dest.exists() && ca_cert_path.exists() {
+            std::fs::create_dir_all(&config.tls.certs_dir)?;
+            std::fs::copy(ca_cert_path, &ca_dest)?;
+            info!("Copied CA certificate to {}", ca_dest.display());
+        }
     }
+
+    // Determine TLS mode based on whether CA cert was provided
+    let registration_tls_mode = if use_provided_ca {
+        RegistrationTlsMode::ProvidedCa
+    } else {
+        RegistrationTlsMode::Insecure
+    };
 
     // Build agent connector config
     let agent_config = AgentConfig {
@@ -174,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         agent_type: "tart".to_string(),
         labels: config.agent.labels.clone(),
         max_vms: config.tart.max_concurrent_vms,
+        registration_tls_mode,
     };
 
     // Create agent instance

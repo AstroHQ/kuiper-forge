@@ -11,7 +11,7 @@ mod connector;
 mod error;
 
 pub use certs::AgentCertStore;
-pub use connector::{AgentConfig, AgentConnector};
+pub use connector::{AgentConfig, AgentConnector, RegistrationTlsMode};
 pub use error::Error;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

@@ -78,6 +78,7 @@ impl RegistrationService for RegistrationServiceImpl {
             client_cert_pem: cert.cert_pem,
             client_key_pem: cert.key_pem,
             expires_at: cert.expires_at.to_rfc3339(),
+            ca_cert_pem: self.auth_manager.ca_cert_pem().to_string(),
         }))
     }
 }

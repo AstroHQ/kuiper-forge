@@ -29,6 +29,7 @@ message RegisterResponse {
     string client_cert_pem = 2;  // X.509 certificate signed by coordinator CA
     string client_key_pem = 3;   // Private key (transmitted over TLS, returned only once)
     string expires_at = 4;       // Certificate expiry (ISO 8601)
+    string ca_cert_pem = 5;      // CA certificate for verifying coordinator on future connections
 }
 
 // ============================================================================

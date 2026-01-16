@@ -189,6 +189,7 @@ impl ProxmoxAgent {
             agent_type: "proxmox".to_string(),
             labels: self.config.agent.labels.clone(),
             max_vms: self.config.vm.concurrent_vms,
+            registration_tls_mode: Default::default(), // Insecure (TOFU)
         };
 
         // Connect to coordinator using stored cert_store

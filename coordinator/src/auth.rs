@@ -246,7 +246,6 @@ impl AuthManager {
     }
 
     /// Get the CA certificate PEM (the original one from disk)
-    #[allow(dead_code)]
     pub fn ca_cert_pem(&self) -> &str {
         &self.ca_cert_pem
     }

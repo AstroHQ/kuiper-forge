@@ -165,6 +165,35 @@ impl Config {
         Ok(config)
     }
 
+    /// Load configuration or create a minimal default for dry-run mode.
+    ///
+    /// In dry-run mode, we don't need GitHub credentials, so we can create
+    /// a minimal config that just has TLS paths.
+    pub fn load_or_default(path: &Path, data_dir: &Path) -> Result<Self> {
+        if path.exists() {
+            // Try to load the existing config
+            match Self::load(path) {
+                Ok(config) => return Ok(config),
+                Err(e) => {
+                    tracing::warn!("Failed to load config (using defaults for dry-run): {}", e);
+                }
+            }
+        }
+
+        // Create minimal config for dry-run mode
+        tracing::info!("Using default configuration for dry-run mode");
+        Ok(Config {
+            github: GitHubConfig {
+                app_id: "dry-run".to_string(),
+                private_key_path: PathBuf::from("/dev/null"),
+                installation_id: "dry-run".to_string(),
+            },
+            grpc: GrpcConfig::default(),
+            tls: TlsConfig::with_defaults(data_dir),
+            runners: vec![],
+        })
+    }
+
     /// Get the default config file path
     /// - macOS: ~/Library/Application Support/ci-runner-coordinator/config.toml
     /// - Linux: ~/.config/ci-runner-coordinator/config.toml

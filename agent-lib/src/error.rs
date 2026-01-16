@@ -26,6 +26,9 @@ pub enum Error {
     #[error("Registration failed: {0}")]
     RegistrationFailed(String),
 
+    #[error("Connection error: {0}")]
+    Connection(String),
+
     #[error("Connection lost")]
     ConnectionLost,
 }

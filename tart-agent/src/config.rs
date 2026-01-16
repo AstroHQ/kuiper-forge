@@ -36,8 +36,9 @@ pub struct CoordinatorConfig {
 /// TLS/Certificate configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {
-    /// Path to CA certificate file
-    pub ca_cert: PathBuf,
+    /// Path to CA certificate file (optional - not needed with TOFU mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<PathBuf>,
     /// Directory for client certificates
     pub certs_dir: PathBuf,
 }
@@ -134,7 +135,7 @@ impl Config {
         })?;
 
         // Expand ~ in paths
-        config.tls.ca_cert = expand_tilde(&config.tls.ca_cert);
+        config.tls.ca_cert = config.tls.ca_cert.map(|p| expand_tilde(&p));
         config.tls.certs_dir = expand_tilde(&config.tls.certs_dir);
         if let Some(ref cache_dir) = config.tart.shared_cache_dir {
             config.tart.shared_cache_dir = Some(expand_tilde(cache_dir));
@@ -146,7 +147,7 @@ impl Config {
     /// Create a config from bootstrap arguments.
     pub fn from_bootstrap(
         coordinator_url: String,
-        ca_cert: PathBuf,
+        ca_cert: Option<PathBuf>,
         labels: Vec<String>,
         base_image: String,
         max_vms: Option<u32>,
