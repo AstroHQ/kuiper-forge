@@ -61,6 +61,49 @@ pub struct TartConfig {
     pub max_concurrent_vms: u32,
     /// Shared cache directory for VMs
     pub shared_cache_dir: Option<PathBuf>,
+    /// SSH configuration for connecting to VMs
+    #[serde(default)]
+    pub ssh: SshAuthConfig,
+    /// GitHub Actions runner version to install (e.g., "2.321.0")
+    /// See: https://github.com/actions/runner/releases
+    #[serde(default = "default_runner_version")]
+    pub runner_version: String,
+}
+
+fn default_runner_version() -> String {
+    "latest".to_string()
+}
+
+/// SSH authentication configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SshAuthConfig {
+    /// SSH username (default: "admin")
+    #[serde(default = "default_ssh_username")]
+    pub username: String,
+    /// Authentication method: "password", "key", or "default" (try default keys)
+    #[serde(default = "default_ssh_auth_method")]
+    pub auth_method: String,
+    /// Password for password authentication
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Path to private key for key-based authentication
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<PathBuf>,
+    /// SSH connection timeout in seconds
+    #[serde(default = "default_ssh_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_ssh_username() -> String {
+    "admin".to_string()
+}
+
+fn default_ssh_auth_method() -> String {
+    "default".to_string()
+}
+
+fn default_ssh_timeout() -> u64 {
+    30
 }
 
 fn default_max_concurrent_vms() -> u32 {
@@ -140,6 +183,9 @@ impl Config {
         if let Some(ref cache_dir) = config.tart.shared_cache_dir {
             config.tart.shared_cache_dir = Some(expand_tilde(cache_dir));
         }
+        if let Some(ref key_path) = config.tart.ssh.private_key {
+            config.tart.ssh.private_key = Some(expand_tilde(key_path));
+        }
 
         Ok(config)
     }
@@ -175,6 +221,8 @@ impl Config {
                 base_image,
                 max_concurrent_vms: max_vms.unwrap_or(2),
                 shared_cache_dir: None,
+                ssh: SshAuthConfig::default(),
+                runner_version: default_runner_version(),
             },
             cleanup: CleanupConfig::default(),
             reconnect: ReconnectConfig::default(),

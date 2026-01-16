@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use agent_proto::{AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand};
@@ -137,9 +137,14 @@ impl FleetManager {
 
         let target = runner_config.count;
 
+        info!(
+            "Pool {:?}: checking - pending={}, target={}",
+            runner_config.labels, pending, target
+        );
+
         if pending >= target {
-            debug!(
-                "Pool {:?}: {}/{} pending (target met)",
+            info!(
+                "Pool {:?}: {}/{} pending (target met, nothing to do)",
                 runner_config.labels, pending, target
             );
             return Ok(());
@@ -153,22 +158,30 @@ impl FleetManager {
             .available_capacity(&runner_config.labels)
             .await;
 
-        if capacity == 0 {
+        // Log all agents for debugging
+        let all_agents = self.agent_registry.list_all().await;
+        info!(
+            "Pool {:?}: need {} runners, found {} agents, total capacity={}",
+            runner_config.labels, needed, all_agents.len(), capacity
+        );
+        for agent in &all_agents {
             info!(
+                "  Agent {}: labels={:?}, active={}/{}, matches={}",
+                agent.agent_id,
+                agent.labels,
+                agent.active_vms,
+                agent.max_vms,
+                runner_config.labels.iter().all(|l|
+                    agent.labels.iter().any(|al| al.eq_ignore_ascii_case(l))
+                )
+            );
+        }
+
+        if capacity == 0 {
+            warn!(
                 "Pool {:?}: need {} more runners but no agent capacity available",
                 runner_config.labels, needed
             );
-            // Log all connected agents for debugging
-            let all_agents = self.agent_registry.list_all().await;
-            if all_agents.is_empty() {
-                info!("  No agents connected");
-            }
-            for agent in &all_agents {
-                info!(
-                    "  Agent {}: labels={:?}, capacity={}/{}",
-                    agent.agent_id, agent.labels, agent.max_vms - agent.active_vms, agent.max_vms
-                );
-            }
             return Ok(());
         }
 
@@ -176,27 +189,46 @@ impl FleetManager {
         let to_create = std::cmp::min(needed as usize, capacity) as u32;
 
         info!(
-            "Pool {:?}: {}/{} pending, need {} more, capacity for {}",
-            runner_config.labels, pending, target, needed, to_create
+            "Pool {:?}: {}/{} pending, need {} more, capacity for {}, will try to create {}",
+            runner_config.labels, pending, target, needed, capacity, to_create
         );
 
         // Try to create runners up to the available capacity
-        for _ in 0..to_create {
+        for i in 0..to_create {
+            info!(
+                "Pool {:?}: creating runner {}/{}",
+                runner_config.labels, i + 1, to_create
+            );
+
             // Find an available agent with matching labels
             let agent_id = match self
                 .agent_registry
                 .find_available_agent(&runner_config.labels)
                 .await
             {
-                Some(id) => id,
+                Some(id) => {
+                    info!("Found available agent: {}", id);
+                    id
+                }
                 None => {
-                    debug!(
-                        "No available agent for labels {:?}",
-                        runner_config.labels
+                    warn!(
+                        "No available agent for labels {:?} on iteration {}/{}",
+                        runner_config.labels, i + 1, to_create
                     );
                     break;
                 }
             };
+
+            // Reserve a slot on the agent to prevent over-scheduling
+            // This is important because we send commands in parallel
+            if !self.agent_registry.reserve_slot(&agent_id).await {
+                warn!(
+                    "Failed to reserve slot on agent {} (might be at capacity now)",
+                    agent_id
+                );
+                continue;
+            }
+            info!("Reserved slot on agent {}", agent_id);
 
             // Get registration token from provider (GitHub API or mock)
             let token = match self
@@ -207,6 +239,8 @@ impl FleetManager {
                 Ok(t) => t,
                 Err(e) => {
                     error!("Failed to get registration token: {}", e);
+                    // Release the reserved slot since we won't use it
+                    self.agent_registry.release_slot(&agent_id).await;
                     break;
                 }
             };
@@ -244,6 +278,9 @@ impl FleetManager {
             let config_idx_copy = config_idx;
             let agent_registry = self.agent_registry.clone();
             let agent_id_clone = agent_id.clone();
+            let token_provider = self.token_provider.clone();
+            let runner_scope = runner_config.runner_scope.clone();
+            let runner_name_clone = runner_name.clone();
 
             // Spawn task to send command and handle response
             // This allows us to continue creating other runners while waiting
@@ -256,25 +293,69 @@ impl FleetManager {
                 {
                     Ok(response) => {
                         // Decrement pending when done
-                        let mut pool = pool.write().await;
-                        if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
-                            *p = p.saturating_sub(1);
+                        {
+                            let mut pool = pool.write().await;
+                            if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
+                                *p = p.saturating_sub(1);
+                            }
                         }
+
+                        // Release the reserved slot (agent will report actual active_vms in next status)
+                        agent_registry.release_slot(&agent_id_clone).await;
 
                         // Check if success
                         if let Some(AgentPayload::Result(result)) = response.payload {
                             if result.success {
-                                info!("Runner completed successfully");
+                                info!("Runner {} completed successfully", runner_name_clone);
                             } else {
-                                warn!("Runner failed: {}", result.error);
+                                warn!("Runner {} failed: {}", runner_name_clone, result.error);
                             }
+                        }
+
+                        // Remove the runner from GitHub (regardless of success/failure)
+                        // The runner lifecycle is over, so we need to clean up
+                        // Note: For ephemeral runners, GitHub usually auto-removes them,
+                        // but we call this anyway as a safety net
+                        info!(
+                            "Cleaning up runner '{}' from GitHub after lifecycle complete",
+                            runner_name_clone
+                        );
+                        if let Err(e) = token_provider
+                            .remove_runner(&runner_scope, &runner_name_clone)
+                            .await
+                        {
+                            // This is often expected - ephemeral runners self-remove
+                            warn!(
+                                "Could not remove runner '{}' from GitHub (may have self-removed): {}",
+                                runner_name_clone, e
+                            );
                         }
                     }
                     Err(e) => {
                         error!("CreateRunner command failed: {}", e);
-                        let mut pool = pool.write().await;
-                        if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
-                            *p = p.saturating_sub(1);
+                        {
+                            let mut pool = pool.write().await;
+                            if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
+                                *p = p.saturating_sub(1);
+                            }
+                        }
+                        // Release the reserved slot on failure
+                        agent_registry.release_slot(&agent_id_clone).await;
+
+                        // Also try to remove runner from GitHub in case it was partially registered
+                        info!(
+                            "Cleaning up runner '{}' from GitHub after command failure",
+                            runner_name_clone
+                        );
+                        if let Err(e) = token_provider
+                            .remove_runner(&runner_scope, &runner_name_clone)
+                            .await
+                        {
+                            // Log at warn level - cleanup failed but not critical
+                            warn!(
+                                "Could not remove runner '{}' from GitHub: {}",
+                                runner_name_clone, e
+                            );
                         }
                     }
                 }

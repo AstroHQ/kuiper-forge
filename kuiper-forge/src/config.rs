@@ -34,9 +34,6 @@ pub struct GitHubConfig {
 
     /// Path to the GitHub App private key PEM file
     pub private_key_path: PathBuf,
-
-    /// GitHub App installation ID
-    pub installation_id: String,
 }
 
 /// gRPC server configuration.
@@ -148,6 +145,30 @@ impl RunnerScope {
             }
         }
     }
+
+    /// Get the API path for listing runners
+    pub fn runners_list_path(&self) -> String {
+        match self {
+            RunnerScope::Organization { name } => {
+                format!("/orgs/{}/actions/runners", name)
+            }
+            RunnerScope::Repository { owner, repo } => {
+                format!("/repos/{}/{}/actions/runners", owner, repo)
+            }
+        }
+    }
+
+    /// Get the API path for deleting a specific runner
+    pub fn runner_delete_path(&self, runner_id: u64) -> String {
+        match self {
+            RunnerScope::Organization { name } => {
+                format!("/orgs/{}/actions/runners/{}", name, runner_id)
+            }
+            RunnerScope::Repository { owner, repo } => {
+                format!("/repos/{}/{}/actions/runners/{}", owner, repo, runner_id)
+            }
+        }
+    }
 }
 
 impl Config {
@@ -184,7 +205,6 @@ impl Config {
             github: GitHubConfig {
                 app_id: "dry-run".to_string(),
                 private_key_path: PathBuf::from("/dev/null"),
-                installation_id: "dry-run".to_string(),
             },
             grpc: GrpcConfig::default(),
             tls: TlsConfig::with_defaults(data_dir),
@@ -238,13 +258,13 @@ pub fn default_config_template() -> String {
     let data_dir_str = data_dir.display();
 
     format!(
-        r#"# CI Runner Coordinator Configuration
+        r#"# KuiperForge Coordinator Configuration
 # Data directory: {data_dir_str}
 
 [github]
 app_id = "123456"
 private_key_path = "{data_dir_str}/github-app.pem"
-installation_id = "12345678"
+# Note: installation_id is auto-discovered from your GitHub App installations
 
 [grpc]
 listen_addr = "0.0.0.0:9443"
@@ -296,7 +316,6 @@ mod tests {
 [github]
 app_id = "123456"
 private_key_path = "/etc/ci-runner/github-app.pem"
-installation_id = "12345678"
 
 [grpc]
 listen_addr = "0.0.0.0:9443"

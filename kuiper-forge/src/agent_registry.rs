@@ -56,8 +56,12 @@ pub struct ConnectedAgent {
     /// Maximum VMs this agent can manage
     pub max_vms: usize,
 
-    /// Currently active VMs
+    /// Currently active VMs (as reported by agent)
     pub active_vms: usize,
+
+    /// Reserved slots (commands sent but not yet reflected in active_vms)
+    /// This prevents over-scheduling when sending multiple commands quickly
+    reserved_slots: usize,
 
     /// Labels this agent supports (e.g., ["macos", "arm64"])
     pub labels: Vec<String>,
@@ -88,6 +92,7 @@ impl ConnectedAgent {
             hostname,
             max_vms,
             active_vms: 0,
+            reserved_slots: 0,
             labels,
             command_tx,
             pending_commands: RwLock::new(HashMap::new()),
@@ -96,13 +101,31 @@ impl ConnectedAgent {
     }
 
     /// Check if this agent has capacity for more VMs
+    /// Takes into account both active VMs and reserved slots
     pub fn has_capacity(&self) -> bool {
-        self.active_vms < self.max_vms
+        self.active_vms + self.reserved_slots < self.max_vms
     }
 
     /// Get available capacity (number of VMs that can still be created)
+    /// Takes into account both active VMs and reserved slots
     pub fn available_capacity(&self) -> usize {
-        self.max_vms.saturating_sub(self.active_vms)
+        self.max_vms.saturating_sub(self.active_vms + self.reserved_slots)
+    }
+
+    /// Reserve a slot for an upcoming VM creation
+    /// Returns true if reservation succeeded, false if no capacity
+    pub fn reserve_slot(&mut self) -> bool {
+        if self.has_capacity() {
+            self.reserved_slots += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Release a reserved slot (call when command completes or fails)
+    pub fn release_slot(&mut self) {
+        self.reserved_slots = self.reserved_slots.saturating_sub(1);
     }
 
     /// Check if this agent matches all required labels (case-insensitive)
@@ -188,10 +211,35 @@ impl AgentRegistry {
     }
 
     /// Unregister an agent (on disconnect)
+    ///
+    /// This cancels all pending commands for the agent, which will cause
+    /// the fleet manager to clean up any runners that were being created.
     pub async fn unregister(&self, agent_id: &str) {
-        let mut agents = self.agents.write().await;
-        if agents.remove(agent_id).is_some() {
-            info!(agent_id = %agent_id, "Agent unregistered");
+        let agent = {
+            let mut agents = self.agents.write().await;
+            agents.remove(agent_id)
+        };
+
+        if let Some(agent) = agent {
+            // Cancel all pending commands to unblock waiters
+            // This causes send_command to return an error, triggering runner cleanup
+            let pending_count = {
+                let agent = agent.read().await;
+                let mut pending = agent.pending_commands.write().await;
+                let count = pending.len();
+                pending.clear(); // Dropping senders causes receivers to error
+                count
+            };
+
+            if pending_count > 0 {
+                info!(
+                    agent_id = %agent_id,
+                    pending_commands = pending_count,
+                    "Agent unregistered, cancelled pending commands"
+                );
+            } else {
+                info!(agent_id = %agent_id, "Agent unregistered");
+            }
         }
     }
 
@@ -206,7 +254,13 @@ impl AgentRegistry {
         let agents = self.agents.read().await;
         for (id, agent) in agents.iter() {
             let agent = agent.read().await;
-            if agent.has_capacity() && agent.matches_labels(labels) {
+            let has_cap = agent.has_capacity();
+            let matches = agent.matches_labels(labels);
+            debug!(
+                "Checking agent {}: has_capacity={} (active={}, reserved={}, max={}), matches_labels={:?}={}",
+                id, has_cap, agent.active_vms, agent.reserved_slots, agent.max_vms, labels, matches
+            );
+            if has_cap && matches {
                 return Some(id.clone());
             }
         }
@@ -307,11 +361,54 @@ impl AgentRegistry {
         if let Some(agent) = self.get(agent_id).await {
             let mut agent = agent.write().await;
             agent.active_vms = active_vms;
+            // Clear reserved slots when we get a status update since active_vms is authoritative
+            agent.reserved_slots = 0;
             agent.touch();
             debug!(
                 agent_id = %agent_id,
                 active_vms = active_vms,
                 "Agent status updated"
+            );
+        }
+    }
+
+    /// Update agent's last_seen timestamp without changing VM counts.
+    /// Used for heartbeat/pong responses.
+    pub async fn touch(&self, agent_id: &str) {
+        if let Some(agent) = self.get(agent_id).await {
+            let mut agent = agent.write().await;
+            agent.touch();
+        }
+    }
+
+    /// Reserve a slot on an agent for an upcoming VM creation
+    /// Returns true if reservation succeeded
+    pub async fn reserve_slot(&self, agent_id: &str) -> bool {
+        if let Some(agent) = self.get(agent_id).await {
+            let mut agent = agent.write().await;
+            let reserved = agent.reserve_slot();
+            if reserved {
+                debug!(
+                    agent_id = %agent_id,
+                    reserved_slots = agent.reserved_slots,
+                    "Slot reserved"
+                );
+            }
+            reserved
+        } else {
+            false
+        }
+    }
+
+    /// Release a reserved slot on an agent
+    pub async fn release_slot(&self, agent_id: &str) {
+        if let Some(agent) = self.get(agent_id).await {
+            let mut agent = agent.write().await;
+            agent.release_slot();
+            debug!(
+                agent_id = %agent_id,
+                reserved_slots = agent.reserved_slots,
+                "Slot released"
             );
         }
     }

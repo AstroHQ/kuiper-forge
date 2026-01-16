@@ -26,5 +26,9 @@ anyhow = { workspace = true }
 dirs = { workspace = true }
 toml = "0.8"
 uuid = { workspace = true }
+chrono = { workspace = true }
 gethostname = "0.5"
 url = "2"
+
+# SSH
+russh = "0.56"

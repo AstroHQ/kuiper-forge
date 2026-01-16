@@ -330,8 +330,8 @@ async fn handle_agent_message(registry: &AgentRegistry, agent_id: &str, msg: Age
         }
         Some(AgentPayload::Pong(_)) => {
             debug!(agent_id = %agent_id, "Pong received");
-            // Just update last_seen
-            registry.update_status(agent_id, 0).await;
+            // Just update last_seen, don't change VM counts
+            registry.touch(agent_id).await;
         }
         None => {
             warn!(agent_id = %agent_id, "Empty message received");

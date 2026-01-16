@@ -38,6 +38,7 @@ use agent_proto::{
     CoordinatorPayload, CreateRunnerResult, DestroyRunnerResult, Pong,
 };
 use clap::Parser;
+use tokio::signal;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
@@ -153,10 +154,11 @@ async fn main() -> anyhow::Result<()> {
     info!("Max concurrent VMs: {}", config.tart.max_concurrent_vms);
     info!("Labels: {:?}", config.agent.labels);
 
-    // Initialize VM manager
+    // Initialize VM manager with SSH config from file
     let tart_config = config.tart.clone();
-    let ssh_config = SshConfig::default();
-    let vm_manager = Arc::new(VmManager::new(tart_config, ssh_config));
+    let ssh_config = SshConfig::from_config(&config.tart.ssh);
+    let log_dir = data_dir.join("logs");
+    let vm_manager = Arc::new(VmManager::new(tart_config, ssh_config, log_dir));
 
     // Initialize certificate store
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
@@ -207,8 +209,21 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Run the agent (with automatic reconnection)
-    agent.run().await?;
+    // Clone vm_manager for shutdown cleanup
+    let shutdown_vm_manager = vm_manager.clone();
+
+    // Run the agent with graceful shutdown handling
+    tokio::select! {
+        result = agent.run() => {
+            // Agent loop exited (shouldn't happen normally)
+            result?;
+        }
+        _ = shutdown_signal() => {
+            info!("Shutdown signal received, cleaning up VMs...");
+            shutdown_vm_manager.destroy_all_vms().await;
+            info!("Graceful shutdown complete");
+        }
+    }
 
     Ok(())
 }
@@ -227,17 +242,17 @@ impl TartAgent {
         cert_store: AgentCertStore,
         vm_manager: Arc<VmManager>,
         config: Config,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             agent_config,
             cert_store,
             vm_manager,
             config,
-        }
+        })
     }
 
     /// Run the agent, automatically reconnecting on disconnect.
-    async fn run(&self) -> Result<()> {
+    async fn run(self: &Arc<Self>) -> Result<()> {
         let mut reconnect_delay = Duration::from_secs(self.config.reconnect.initial_delay_secs);
         let max_delay = Duration::from_secs(self.config.reconnect.max_delay_secs);
 
@@ -271,7 +286,7 @@ impl TartAgent {
 
     /// Run the bidirectional gRPC stream.
     async fn run_stream(
-        &self,
+        self: &Arc<Self>,
         mut client: agent_proto::AgentServiceClient<tonic::transport::Channel>,
     ) -> Result<()> {
         // Create channels for sending messages to coordinator
@@ -300,7 +315,8 @@ impl TartAgent {
             match msg_result {
                 Ok(msg) => {
                     if let Some(payload) = msg.payload {
-                        self.handle_coordinator_message(payload, &tx).await;
+                        // This spawns tasks for long-running commands, doesn't block
+                        self.handle_coordinator_message(payload, &tx);
                     }
                 }
                 Err(e) => {
@@ -315,8 +331,11 @@ impl TartAgent {
     }
 
     /// Handle a message from the coordinator.
-    async fn handle_coordinator_message(
-        &self,
+    ///
+    /// Long-running commands (CreateRunner, DestroyRunner) are spawned as separate tasks
+    /// so we can continue processing messages (like Ping) without blocking.
+    fn handle_coordinator_message(
+        self: &Arc<Self>,
         payload: CoordinatorPayload,
         tx: &mpsc::Sender<AgentMessage>,
     ) {
@@ -324,42 +343,56 @@ impl TartAgent {
             CoordinatorPayload::CreateRunner(cmd) => {
                 info!("Received CreateRunner command: vm={}", cmd.vm_name);
 
-                let result = self.handle_create_runner(&cmd).await;
+                // Spawn as a separate task so we don't block the message loop
+                let agent = Arc::clone(self);
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = agent.handle_create_runner(&cmd).await;
 
-                if let Err(e) = tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Result(result)),
-                    })
-                    .await
-                {
-                    error!("Failed to send result: {}", e);
-                }
+                    if let Err(e) = tx
+                        .send(AgentMessage {
+                            payload: Some(AgentPayload::Result(result)),
+                        })
+                        .await
+                    {
+                        error!("Failed to send result: {}", e);
+                    }
+                });
             }
 
             CoordinatorPayload::DestroyRunner(cmd) => {
                 info!("Received DestroyRunner command: vm={}", cmd.vm_id);
 
-                let result = self.handle_destroy_runner(&cmd).await;
+                // Spawn as a separate task
+                let agent = Arc::clone(self);
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = agent.handle_destroy_runner(&cmd).await;
 
-                if let Err(e) = tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Result(result)),
-                    })
-                    .await
-                {
-                    error!("Failed to send result: {}", e);
-                }
+                    if let Err(e) = tx
+                        .send(AgentMessage {
+                            payload: Some(AgentPayload::Result(result)),
+                        })
+                        .await
+                    {
+                        error!("Failed to send result: {}", e);
+                    }
+                });
             }
 
             CoordinatorPayload::Ping(_) => {
-                if let Err(e) = tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Pong(Pong {})),
-                    })
-                    .await
-                {
-                    error!("Failed to send pong: {}", e);
-                }
+                // Pings are quick, handle inline
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = tx
+                        .send(AgentMessage {
+                            payload: Some(AgentPayload::Pong(Pong {})),
+                        })
+                        .await
+                    {
+                        error!("Failed to send pong: {}", e);
+                    }
+                });
             }
         }
     }
@@ -372,30 +405,78 @@ impl TartAgent {
         let command_id = cmd.command_id.clone();
         let vm_name = cmd.vm_name.clone();
 
+        // Validate inputs early and warn about suspicious values
+        if cmd.registration_token.is_empty() {
+            warn!(
+                "CreateRunner called with empty registration token - \
+                 runner configuration will fail. Is the coordinator in dry-run mode?"
+            );
+        }
+        if cmd.runner_scope_url.is_empty() {
+            warn!("CreateRunner called with empty runner_scope_url");
+        }
+
+        info!(
+            "CreateRunner starting: vm={}, labels={:?}, scope={}",
+            vm_name,
+            cmd.labels,
+            if cmd.runner_scope_url.is_empty() {
+                "(empty)"
+            } else {
+                &cmd.runner_scope_url
+            }
+        );
+
         let result: std::result::Result<(String, String), Error> = async {
             // 1. Clone and start VM (using agent's configured base_image)
-            let vm_id = self.vm_manager.create_vm(&vm_name, &self.config.tart.base_image).await?;
+            info!("[{}] Step 1/5: Creating VM from template...", vm_name);
+            let vm_id = self
+                .vm_manager
+                .create_vm(&vm_name, &self.config.tart.base_image)
+                .await
+                .map_err(|e| {
+                    error!("[{}] VM creation failed: {}", vm_name, e);
+                    e
+                })?;
 
             // 2. Wait for IP and SSH
+            info!("[{}] Step 2/5: Waiting for VM to be ready...", vm_name);
             let ip = self
                 .vm_manager
                 .wait_for_ready(&vm_id, Duration::from_secs(120))
-                .await?;
+                .await
+                .map_err(|e| {
+                    error!("[{}] VM failed to become ready: {}", vm_name, e);
+                    e
+                })?;
+            info!("[{}] VM ready at IP {}", vm_name, ip);
 
             // 3. Configure GitHub runner
+            info!("[{}] Step 3/5: Configuring GitHub runner...", vm_name);
             self.vm_manager
-                .configure_runner(
-                    &vm_id,
-                    &cmd.registration_token,
-                    &cmd.labels,
-                    &cmd.runner_scope_url,
-                )
-                .await?;
+                .configure_runner(&vm_id, &cmd.registration_token, &cmd.labels, &cmd.runner_scope_url)
+                .await
+                .map_err(|e| {
+                    error!(
+                        "[{}] Runner configuration failed: {}. \
+                         This typically indicates an invalid GitHub registration token.",
+                        vm_name, e
+                    );
+                    e
+                })?;
 
             // 4. Wait for runner to complete (this blocks until the job finishes)
-            self.vm_manager.wait_for_runner_exit(&vm_id).await?;
+            info!(
+                "[{}] Step 4/5: Runner configured, waiting for job completion...",
+                vm_name
+            );
+            self.vm_manager.wait_for_runner_exit(&vm_id).await.map_err(|e| {
+                error!("[{}] Runner execution failed: {}", vm_name, e);
+                e
+            })?;
 
             // 5. Cleanup
+            info!("[{}] Step 5/5: Cleaning up VM...", vm_name);
             self.vm_manager.destroy_vm(&vm_id).await?;
 
             Ok((vm_id, ip.to_string()))
@@ -404,7 +485,10 @@ impl TartAgent {
 
         match result {
             Ok((vm_id, ip)) => {
-                info!("CreateRunner completed: vm={}, ip={}", vm_id, ip);
+                info!(
+                    "CreateRunner completed successfully: vm={}, ip={}",
+                    vm_id, ip
+                );
                 CommandResult {
                     command_id,
                     success: true,
@@ -416,9 +500,19 @@ impl TartAgent {
                 }
             }
             Err(e) => {
-                error!("CreateRunner failed: {}", e);
+                error!(
+                    "CreateRunner FAILED for vm={}: {}",
+                    vm_name,
+                    e
+                );
                 // Attempt cleanup on failure
-                let _ = self.vm_manager.destroy_vm(&vm_name).await;
+                info!("[{}] Attempting cleanup after failure...", vm_name);
+                if let Err(cleanup_err) = self.vm_manager.destroy_vm(&vm_name).await {
+                    warn!(
+                        "[{}] Cleanup after failure also failed: {}",
+                        vm_name, cleanup_err
+                    );
+                }
 
                 CommandResult {
                     command_id,
@@ -509,4 +603,33 @@ fn init_logging(data_dir: &PathBuf) -> anyhow::Result<()> {
 
     info!("Logging to: {}", log_dir.display());
     Ok(())
+}
+
+/// Wait for a shutdown signal (SIGTERM or SIGINT/Ctrl-C).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("Received Ctrl-C");
+        }
+        _ = terminate => {
+            info!("Received SIGTERM");
+        }
+    }
 }

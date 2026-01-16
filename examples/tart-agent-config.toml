@@ -30,6 +30,27 @@ labels = ["self-hosted", "macos", "arm64", "test-sequoia"]
 base_image = "ghcr.io/cirruslabs/macos-sequoia-base:latest"
 # Max concurrent VMs (Apple Virtualization limit is 2)
 max_concurrent_vms = 2
+# GitHub Actions runner version to install (default: "latest")
+# Use "latest" to auto-fetch from GitHub API, or pin a specific version
+# See https://github.com/actions/runner/releases for available versions
+# runner_version = "latest"
+# runner_version = "2.321.0"  # pin to specific version
+
+# SSH configuration for connecting to VMs
+[tart.ssh]
+# SSH username (default: "admin")
+username = "admin"
+# Authentication method: "password", "key", or "default"
+# - "password": use password field below
+# - "key": use private_key path below
+# - "default": try ~/.ssh/id_ed25519 or ~/.ssh/id_rsa
+auth_method = "default"
+# Password for password auth (only used if auth_method = "password")
+# password = "admin"
+# Path to private key (only used if auth_method = "key")
+# private_key = "~/.ssh/id_ed25519"
+# SSH connection timeout in seconds
+timeout_secs = 30
 
 [cleanup]
 # Cleanup stale VMs older than this (hours)

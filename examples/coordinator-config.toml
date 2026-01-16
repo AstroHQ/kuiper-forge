@@ -12,7 +12,7 @@
 # The coordinator will fail to get runner tokens but agent registration will work
 app_id = "123456"
 private_key_path = "/tmp/fake-github-key.pem"  # Won't be used for registration testing
-installation_id = "12345678"
+# Note: installation_id is auto-discovered from your GitHub App installations
 
 [grpc]
 listen_addr = "0.0.0.0:9443"

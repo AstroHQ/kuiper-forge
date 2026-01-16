@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,17 +83,20 @@ pub struct VmManager {
     max_concurrent: u32,
     /// Active VMs tracked by ID
     active_vms: Arc<RwLock<HashMap<String, VmState>>>,
+    /// Directory for runner log files
+    log_dir: PathBuf,
 }
 
 impl VmManager {
     /// Create a new VM manager.
-    pub fn new(config: TartConfig, ssh_config: SshConfig) -> Self {
+    pub fn new(config: TartConfig, ssh_config: SshConfig, log_dir: PathBuf) -> Self {
         let max_concurrent = config.max_concurrent_vms;
         Self {
             config,
             ssh_config,
             max_concurrent,
             active_vms: Arc::new(RwLock::new(HashMap::new())),
+            log_dir,
         }
     }
 
@@ -246,6 +250,7 @@ impl VmManager {
             labels,
             runner_scope_url,
             vm_id,
+            &self.config.runner_version,
         )
         .await?;
 
@@ -265,10 +270,14 @@ impl VmManager {
 
         info!("Starting runner and waiting for completion on VM {}", vm_id);
 
-        // Start the runner and wait for it to complete
-        ssh::start_runner_and_wait(ip, &self.ssh_config).await?;
+        // Create log file path for this runner with date
+        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
+        let log_file = self.log_dir.join(format!("runner-{}-{}.log", vm_id, timestamp));
 
-        info!("Runner completed on VM {}", vm_id);
+        // Start the runner and wait for it to complete, streaming output to log file
+        ssh::start_runner_and_wait(ip, &self.ssh_config, &log_file).await?;
+
+        info!("Runner completed on VM {} (log: {})", vm_id, log_file.display());
         Ok(())
     }
 
@@ -314,6 +323,33 @@ impl VmManager {
                 error!("Failed to cleanup stale VM {}: {}", vm_id, e);
             }
         }
+    }
+
+    /// Destroy all active VMs (for graceful shutdown).
+    ///
+    /// This stops and deletes all VMs currently tracked by this manager.
+    /// Used during agent shutdown to clean up resources.
+    pub async fn destroy_all_vms(&self) {
+        let vm_ids: Vec<String> = {
+            let vms = self.active_vms.read().await;
+            vms.keys().cloned().collect()
+        };
+
+        if vm_ids.is_empty() {
+            info!("No active VMs to cleanup");
+            return;
+        }
+
+        info!("Destroying {} active VMs for shutdown...", vm_ids.len());
+
+        for vm_id in vm_ids {
+            info!("Destroying VM: {}", vm_id);
+            if let Err(e) = self.destroy_vm(&vm_id).await {
+                error!("Failed to destroy VM {} during shutdown: {}", vm_id, e);
+            }
+        }
+
+        info!("All VMs destroyed");
     }
 
     /// Update VM state.
@@ -433,8 +469,11 @@ mod tests {
             base_image: "test".to_string(),
             max_concurrent_vms: 2,
             shared_cache_dir: None,
+            ssh: Default::default(),
+            runner_version: "latest".to_string(),
         };
-        let manager = VmManager::new(config, SshConfig::default());
+        let log_dir = std::env::temp_dir().join("tart-agent-test-logs");
+        let manager = VmManager::new(config, SshConfig::default(), log_dir);
 
         assert_eq!(manager.max_vms(), 2);
         assert_eq!(manager.available_slots().await, 2);

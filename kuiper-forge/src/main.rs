@@ -259,8 +259,14 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         let github_client = github::GitHubClient::new(
             config.github.app_id.clone(),
             &config.github.private_key_path,
-            config.github.installation_id.clone(),
         )?;
+
+        // Validate GitHub API access before starting
+        // This catches configuration issues early rather than failing later
+        github_client.validate().await.context(
+            "GitHub API validation failed. Fix the configuration or use --dry-run to skip GitHub integration."
+        )?;
+
         let token_provider: Arc<dyn github::RunnerTokenProvider> = Arc::new(github_client);
 
         let (fm, notifier) = fleet::FleetManager::new(
