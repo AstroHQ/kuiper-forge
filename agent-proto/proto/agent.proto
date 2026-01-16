@@ -102,11 +102,10 @@ message CoordinatorMessage {
 
 message CreateRunnerCommand {
     string command_id = 1;
-    string vm_name = 2;
-    string template = 3;
-    string registration_token = 4;  // GitHub runner registration token
-    repeated string labels = 5;
-    string runner_scope_url = 6;    // GitHub org/repo URL
+    string vm_name = 2;             // Runner/VM name (coordinator assigns for global numbering)
+    string registration_token = 3;  // GitHub runner registration token
+    repeated string labels = 4;     // Labels for GitHub runner registration
+    string runner_scope_url = 5;    // GitHub org/repo URL for runner registration
 }
 
 message DestroyRunnerCommand {

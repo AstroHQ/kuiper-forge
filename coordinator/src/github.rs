@@ -5,8 +5,8 @@
 //! - Installation access token retrieval
 //! - Runner registration token generation
 
-
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::Client;
@@ -14,8 +14,38 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::info;
 
 use crate::config::RunnerScope;
+
+/// Trait for obtaining runner registration tokens.
+///
+/// This abstracts the token source so we can use either:
+/// - Real GitHub API (production)
+/// - Mock tokens (dry-run/testing)
+#[async_trait]
+pub trait RunnerTokenProvider: Send + Sync {
+    /// Get a registration token for the given runner scope.
+    async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String>;
+}
+
+/// Mock token provider for dry-run/testing mode.
+///
+/// Returns fake tokens that won't work with GitHub but allow testing
+/// the full agent VM lifecycle.
+pub struct MockTokenProvider;
+
+#[async_trait]
+impl RunnerTokenProvider for MockTokenProvider {
+    async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
+        let fake_token = format!("dry-run-token-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        info!(
+            "DRY-RUN: Generated fake registration token for {:?}: {}",
+            scope, fake_token
+        );
+        Ok(fake_token)
+    }
+}
 
 /// GitHub API base URL
 const GITHUB_API_URL: &str = "https://api.github.com";
@@ -219,6 +249,14 @@ impl GitHubClient {
             .context("Failed to parse registration token response")?;
 
         Ok(token_response.token)
+    }
+}
+
+#[async_trait]
+impl RunnerTokenProvider for GitHubClient {
+    async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
+        // Delegate to the inherent method
+        GitHubClient::get_registration_token(self, scope).await
     }
 }
 

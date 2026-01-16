@@ -244,27 +244,36 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Initialize agent registry
     let agent_registry = Arc::new(AgentRegistry::new());
 
-    // Initialize GitHub client and fleet manager (skip in dry-run mode)
-    let fleet_manager = if dry_run {
-        warn!("DRY-RUN MODE: GitHub integration disabled, fleet manager not started");
-        None
+    // Initialize token provider and fleet manager
+    // In dry-run mode, use mock tokens instead of GitHub API
+    let (fleet_manager, fleet_notifier) = if dry_run {
+        warn!("DRY-RUN MODE: Using mock token provider (fake GitHub registration tokens)");
+        let token_provider: Arc<dyn github::RunnerTokenProvider> = Arc::new(github::MockTokenProvider);
+        let (fm, notifier) = fleet::FleetManager::new(
+            config.clone(),
+            token_provider,
+            agent_registry.clone(),
+        );
+        (Some(fm), Some(notifier))
     } else {
         let github_client = github::GitHubClient::new(
             config.github.app_id.clone(),
             &config.github.private_key_path,
             config.github.installation_id.clone(),
         )?;
+        let token_provider: Arc<dyn github::RunnerTokenProvider> = Arc::new(github_client);
 
-        Some(fleet::FleetManager::new(
+        let (fm, notifier) = fleet::FleetManager::new(
             config.clone(),
-            github_client,
+            token_provider,
             agent_registry.clone(),
-        ))
+        );
+        (Some(fm), Some(notifier))
     };
 
     info!("CI Runner Coordinator starting...");
     if dry_run {
-        info!("MODE: dry-run (agent registration only, no GitHub integration)");
+        info!("MODE: dry-run (fleet manager uses mock tokens, VMs will be created but runner config will fail)");
     }
     info!("Listening on: {}", listen_addr);
     info!("Managing {} runner configurations", config.runners.len());
@@ -322,7 +331,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Run fleet manager (if enabled) and server concurrently
     if let Some(fm) = fleet_manager {
         tokio::select! {
-            result = run_server(server_config, auth_manager, agent_registry) => {
+            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier) => {
                 result
             }
             _ = fm.run() => {
@@ -331,8 +340,8 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
             }
         }
     } else {
-        // Dry-run mode: just run the server
-        run_server(server_config, auth_manager, agent_registry).await
+        // No fleet manager, just run the server
+        run_server(server_config, auth_manager, agent_registry, None).await
     }
 }
 

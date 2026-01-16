@@ -105,9 +105,11 @@ impl ConnectedAgent {
         self.max_vms.saturating_sub(self.active_vms)
     }
 
-    /// Check if this agent matches all required labels
+    /// Check if this agent matches all required labels (case-insensitive)
     pub fn matches_labels(&self, required_labels: &[String]) -> bool {
-        required_labels.iter().all(|l| self.labels.contains(l))
+        required_labels.iter().all(|required| {
+            self.labels.iter().any(|label| label.eq_ignore_ascii_case(required))
+        })
     }
 
     /// Register a pending command and return the response channel

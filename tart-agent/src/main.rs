@@ -277,20 +277,21 @@ impl TartAgent {
         // Create channels for sending messages to coordinator
         let (tx, rx) = mpsc::channel::<AgentMessage>(32);
 
-        // Start the bidirectional stream
-        let response = client
-            .agent_stream(ReceiverStream::new(rx))
-            .await?;
-
-        let mut inbound = response.into_inner();
-
-        // Send initial status
+        // Build initial status message BEFORE starting stream
+        // The server expects the first message to identify the agent
         let status = self.build_status().await;
         tx.send(AgentMessage {
             payload: Some(AgentPayload::Status(status)),
         })
         .await
         .map_err(|_| Error::ChannelSend)?;
+
+        // Start the bidirectional stream (server will read our initial status)
+        let response = client
+            .agent_stream(ReceiverStream::new(rx))
+            .await?;
+
+        let mut inbound = response.into_inner();
 
         info!("Stream established, processing commands...");
 
@@ -321,10 +322,7 @@ impl TartAgent {
     ) {
         match payload {
             CoordinatorPayload::CreateRunner(cmd) => {
-                info!(
-                    "Received CreateRunner command: vm={}, template={}",
-                    cmd.vm_name, cmd.template
-                );
+                info!("Received CreateRunner command: vm={}", cmd.vm_name);
 
                 let result = self.handle_create_runner(&cmd).await;
 
@@ -373,15 +371,10 @@ impl TartAgent {
     ) -> CommandResult {
         let command_id = cmd.command_id.clone();
         let vm_name = cmd.vm_name.clone();
-        let template = if cmd.template.is_empty() {
-            &self.config.tart.base_image
-        } else {
-            &cmd.template
-        };
 
         let result: std::result::Result<(String, String), Error> = async {
-            // 1. Clone and start VM
-            let vm_id = self.vm_manager.create_vm(&vm_name, template).await?;
+            // 1. Clone and start VM (using agent's configured base_image)
+            let vm_id = self.vm_manager.create_vm(&vm_name, &self.config.tart.base_image).await?;
 
             // 2. Wait for IP and SSH
             let ip = self

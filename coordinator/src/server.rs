@@ -24,6 +24,7 @@ use tracing::{debug, error, info, warn};
 use crate::agent_registry::{AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::TlsConfig;
+use crate::fleet::FleetNotifier;
 
 /// Registration service implementation
 pub struct RegistrationServiceImpl {
@@ -87,13 +88,19 @@ impl RegistrationService for RegistrationServiceImpl {
 pub struct AgentServiceImpl {
     auth_manager: Arc<AuthManager>,
     agent_registry: Arc<AgentRegistry>,
+    fleet_notifier: Option<FleetNotifier>,
 }
 
 impl AgentServiceImpl {
-    pub fn new(auth_manager: Arc<AuthManager>, agent_registry: Arc<AgentRegistry>) -> Self {
+    pub fn new(
+        auth_manager: Arc<AuthManager>,
+        agent_registry: Arc<AgentRegistry>,
+        fleet_notifier: Option<FleetNotifier>,
+    ) -> Self {
         Self {
             auth_manager,
             agent_registry,
+            fleet_notifier,
         }
     }
 
@@ -217,6 +224,11 @@ impl AgentService for AgentServiceImpl {
                 command_tx,
             )
             .await;
+
+        // Notify fleet manager to check if runners need to be created
+        if let Some(ref notifier) = self.fleet_notifier {
+            notifier.notify().await;
+        }
 
         // Clone what we need for the task
         let agent_registry = Arc::clone(&self.agent_registry);
@@ -344,6 +356,7 @@ pub async fn run_server(
     config: ServerConfig,
     auth_manager: Arc<AuthManager>,
     agent_registry: Arc<AgentRegistry>,
+    fleet_notifier: Option<FleetNotifier>,
 ) -> Result<()> {
     // Load TLS credentials
     let server_cert = std::fs::read_to_string(&config.tls.server_cert)
@@ -368,7 +381,7 @@ pub async fn run_server(
 
     // Create services
     let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
-    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry);
+    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier);
 
     info!(addr = %config.listen_addr, "Starting gRPC server");
 
@@ -416,7 +429,7 @@ pub async fn run_dual_server(
         .identity(identity)
         .client_ca_root(Certificate::from_pem(&ca_cert));
 
-    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry);
+    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry, None);
 
     let agent_server = Server::builder()
         .tls_config(agent_tls)?

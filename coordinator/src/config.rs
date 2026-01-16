@@ -91,14 +91,11 @@ impl TlsConfig {
 /// Runner configuration for a specific set of labels.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RunnerConfig {
-    /// Labels that agents must have to run these jobs
+    /// Labels that agents must have to run these jobs (also used for GitHub runner registration)
     pub labels: Vec<String>,
 
     /// GitHub runner scope (organization or repository)
     pub runner_scope: RunnerScope,
-
-    /// VM template to use
-    pub template: String,
 
     /// Number of runners to keep ready (default: 1)
     #[serde(default = "default_runner_count")]
@@ -180,8 +177,9 @@ impl Config {
             }
         }
 
-        // Create minimal config for dry-run mode
+        // Create minimal config for dry-run mode with test runners
         tracing::info!("Using default configuration for dry-run mode");
+        tracing::info!("Adding default test runners for common label combinations");
         Ok(Config {
             github: GitHubConfig {
                 app_id: "dry-run".to_string(),
@@ -190,7 +188,27 @@ impl Config {
             },
             grpc: GrpcConfig::default(),
             tls: TlsConfig::with_defaults(data_dir),
-            runners: vec![],
+            // Default test runners for dry-run mode
+            runners: vec![
+                RunnerConfig {
+                    labels: vec!["self-hosted".into(), "macOS".into(), "ARM64".into()],
+                    runner_scope: RunnerScope::Organization { name: "test-org".into() },
+                    count: 1,
+                    runner_group: None,
+                },
+                RunnerConfig {
+                    labels: vec!["self-hosted".into(), "Linux".into(), "X64".into()],
+                    runner_scope: RunnerScope::Organization { name: "test-org".into() },
+                    count: 1,
+                    runner_group: None,
+                },
+                RunnerConfig {
+                    labels: vec!["self-hosted".into(), "Windows".into(), "X64".into()],
+                    runner_scope: RunnerScope::Organization { name: "test-org".into() },
+                    count: 1,
+                    runner_group: None,
+                },
+            ],
         })
     }
 
@@ -241,10 +259,10 @@ server_key = "{data_dir_str}/server.key"
 # Runner configurations by label
 # Agents self-register and provide their labels
 # Fleet manager matches runner requests to available agents by label
+# Agents use their own configured base images for VM creation
 
 [[runners]]
 labels = ["self-hosted", "macOS", "ARM64"]
-template = "macos-runner"
 
 [runners.runner_scope]
 type = "organization"
@@ -252,7 +270,6 @@ name = "my-org"
 
 [[runners]]
 labels = ["self-hosted", "Windows", "X64"]
-template = "windows-runner"
 
 [runners.runner_scope]
 type = "organization"
@@ -260,7 +277,6 @@ name = "my-org"
 
 [[runners]]
 labels = ["self-hosted", "Linux", "X64"]
-template = "linux-runner"
 
 [runners.runner_scope]
 type = "repository"
@@ -293,7 +309,6 @@ server_key = "/etc/ci-runner/server.key"
 
 [[runners]]
 labels = ["self-hosted", "macOS", "ARM64"]
-template = "macos-runner"
 
 [runners.runner_scope]
 type = "organization"

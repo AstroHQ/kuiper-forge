@@ -3,12 +3,12 @@
 //! The fleet manager is responsible for:
 //! - Maintaining a target number of runners per configuration
 //! - Requesting new runners from agents when below target
-//! - Getting registration tokens from GitHub for runners
+//! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -16,7 +16,23 @@ use agent_proto::{AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRu
 
 use crate::agent_registry::AgentRegistry;
 use crate::config::{Config, RunnerConfig};
-use crate::github::GitHubClient;
+use crate::github::RunnerTokenProvider;
+
+/// Handle for triggering fleet manager reconciliation.
+#[derive(Clone)]
+pub struct FleetNotifier {
+    tx: mpsc::Sender<()>,
+}
+
+impl FleetNotifier {
+    /// Notify the fleet manager to reconcile immediately.
+    ///
+    /// Called when an agent connects to check if runners need to be created.
+    pub async fn notify(&self) {
+        // Use try_send to avoid blocking - if channel is full, reconciliation is already pending
+        let _ = self.tx.try_send(());
+    }
+}
 
 /// Tracks active runners per configuration.
 #[derive(Debug, Default)]
@@ -29,41 +45,61 @@ struct RunnerPool {
 pub struct FleetManager {
     /// Configuration
     config: Config,
-    /// GitHub client for getting registration tokens
-    github: GitHubClient,
+    /// Token provider for getting registration tokens (GitHub API or mock)
+    token_provider: Arc<dyn RunnerTokenProvider>,
     /// Agent registry for sending commands
     agent_registry: Arc<AgentRegistry>,
     /// Runner pool state
     pool: Arc<RwLock<RunnerPool>>,
+    /// Channel for receiving reconciliation notifications
+    notify_rx: mpsc::Receiver<()>,
 }
 
 impl FleetManager {
-    /// Create a new fleet manager.
+    /// Create a new fleet manager and notification handle.
+    ///
+    /// Returns the fleet manager and a notifier that can be used to trigger
+    /// immediate reconciliation (e.g., when an agent connects).
     pub fn new(
         config: Config,
-        github: GitHubClient,
+        token_provider: Arc<dyn RunnerTokenProvider>,
         agent_registry: Arc<AgentRegistry>,
-    ) -> Self {
-        Self {
+    ) -> (Self, FleetNotifier) {
+        let (tx, rx) = mpsc::channel(16);
+
+        let manager = Self {
             config,
-            github,
+            token_provider,
             agent_registry,
             pool: Arc::new(RwLock::new(RunnerPool::default())),
-        }
+            notify_rx: rx,
+        };
+
+        let notifier = FleetNotifier { tx };
+
+        (manager, notifier)
     }
 
     /// Start the fleet manager loop.
     ///
     /// This runs forever, periodically checking and maintaining runner pools.
-    pub async fn run(&self) {
+    /// Also responds to notifications for immediate reconciliation.
+    pub async fn run(mut self) {
         let check_interval = Duration::from_secs(30);
         let mut ticker = tokio::time::interval(check_interval);
 
         info!("Fleet manager started with {} runner configurations", self.config.runners.len());
 
         loop {
-            ticker.tick().await;
-            self.reconcile().await;
+            tokio::select! {
+                _ = ticker.tick() => {
+                    self.reconcile().await;
+                }
+                Some(()) = self.notify_rx.recv() => {
+                    info!("Fleet manager triggered by agent connection");
+                    self.reconcile().await;
+                }
+            }
         }
     }
 
@@ -71,7 +107,12 @@ impl FleetManager {
     ///
     /// For each runner configuration, ensure we have the target number of runners.
     async fn reconcile(&self) {
-        debug!("Fleet manager reconciling runner pools");
+        let agent_count = self.agent_registry.count().await;
+        info!(
+            "Fleet manager reconciling: {} runner configs, {} connected agents",
+            self.config.runners.len(),
+            agent_count
+        );
 
         for (idx, runner_config) in self.config.runners.iter().enumerate() {
             if let Err(e) = self.reconcile_pool(idx, runner_config).await {
@@ -113,10 +154,21 @@ impl FleetManager {
             .await;
 
         if capacity == 0 {
-            debug!(
+            info!(
                 "Pool {:?}: need {} more runners but no agent capacity available",
                 runner_config.labels, needed
             );
+            // Log all connected agents for debugging
+            let all_agents = self.agent_registry.list_all().await;
+            if all_agents.is_empty() {
+                info!("  No agents connected");
+            }
+            for agent in &all_agents {
+                info!(
+                    "  Agent {}: labels={:?}, capacity={}/{}",
+                    agent.agent_id, agent.labels, agent.max_vms - agent.active_vms, agent.max_vms
+                );
+            }
             return Ok(());
         }
 
@@ -146,9 +198,9 @@ impl FleetManager {
                 }
             };
 
-            // Get registration token from GitHub
+            // Get registration token from provider (GitHub API or mock)
             let token = match self
-                .github
+                .token_provider
                 .get_registration_token(&runner_config.runner_scope)
                 .await
             {
@@ -173,7 +225,6 @@ impl FleetManager {
             let create_cmd = CreateRunnerCommand {
                 command_id: command_id.clone(),
                 vm_name: runner_name.clone(),
-                template: runner_config.template.clone(),
                 registration_token: token,
                 labels: runner_config.labels.clone(),
                 runner_scope_url: runner_config.runner_scope.to_url(),

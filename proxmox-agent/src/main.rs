@@ -213,21 +213,22 @@ impl ProxmoxAgent {
         // Create channels for sending/receiving
         let (tx, rx) = mpsc::channel::<AgentMessage>(32);
 
-        // Start the bidirectional stream
-        let response = client
-            .agent_stream(ReceiverStream::new(rx))
-            .await
-            .map_err(|e| Error::Grpc(e))?;
-
-        let mut inbound = response.into_inner();
-
-        // Send initial status
+        // Build initial status message BEFORE starting stream
+        // The server expects the first message to identify the agent
         let status = self.build_status().await;
         tx.send(AgentMessage {
             payload: Some(AgentPayload::Status(status)),
         })
         .await
         .map_err(|_| Error::ChannelSend)?;
+
+        // Start the bidirectional stream (server will read our initial status)
+        let response = client
+            .agent_stream(ReceiverStream::new(rx))
+            .await
+            .map_err(|e| Error::Grpc(e))?;
+
+        let mut inbound = response.into_inner();
 
         info!("Sent initial status to coordinator");
 

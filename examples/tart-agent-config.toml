@@ -23,7 +23,7 @@ certs_dir = "~/.config/tart-agent/certs"
 
 [agent]
 # Labels this agent advertises - used for job matching
-labels = ["self-hosted", "macos", "arm64"]
+labels = ["self-hosted", "macos", "arm64", "test-sequoia"]
 
 [tart]
 # Base VM image to clone for runners
