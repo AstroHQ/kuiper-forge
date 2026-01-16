@@ -152,7 +152,7 @@ impl AgentService for AgentServiceImpl {
         // When mTLS is enabled, agent_id would come from certificate CN
         // When mTLS is disabled (MVP), agent must self-identify in the status message
 
-        let (agent_id, hostname, agent_type, labels, max_vms) = match &first_msg.payload {
+        let (agent_id, hostname, agent_type, labels, max_vms, vm_names) = match &first_msg.payload {
             Some(AgentPayload::Status(status)) => {
                 // Extract identity from status message
                 if status.agent_id.is_empty() {
@@ -171,12 +171,16 @@ impl AgentService for AgentServiceImpl {
                     }
                 };
 
+                // Extract VM names for recovery
+                let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
+
                 (
                     status.agent_id.clone(),
                     status.hostname.clone(),
                     agent_type,
                     status.labels.clone(),
                     status.max_vms as usize,
+                    vm_names,
                 )
             }
             _ => {
@@ -226,8 +230,18 @@ impl AgentService for AgentServiceImpl {
             .await;
 
         // Notify fleet manager to check if runners need to be created
+        // If agent has VMs, also send recovery info to match against persisted runners
         if let Some(ref notifier) = self.fleet_notifier {
-            notifier.notify().await;
+            if vm_names.is_empty() {
+                notifier.notify().await;
+            } else {
+                info!(
+                    agent_id = %agent_id,
+                    vm_count = vm_names.len(),
+                    "Agent connected with existing VMs, triggering recovery check"
+                );
+                notifier.notify_with_recovery(agent_id.clone(), vm_names).await;
+            }
         }
 
         // Clone what we need for the task

@@ -8,6 +8,7 @@ mod auth;
 mod config;
 mod fleet;
 mod github;
+mod runner_state;
 mod server;
 
 use anyhow::{anyhow, Context, Result};
@@ -244,6 +245,9 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Initialize agent registry
     let agent_registry = Arc::new(AgentRegistry::new());
 
+    // Initialize persistent runner state for crash recovery
+    let runner_state = Arc::new(runner_state::RunnerStateStore::new(&data_dir));
+
     // Initialize token provider and fleet manager
     // In dry-run mode, use mock tokens instead of GitHub API
     let (fleet_manager, fleet_notifier) = if dry_run {
@@ -253,6 +257,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
             config.clone(),
             token_provider,
             agent_registry.clone(),
+            runner_state.clone(),
         );
         (Some(fm), Some(notifier))
     } else {
@@ -273,6 +278,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
             config.clone(),
             token_provider,
             agent_registry.clone(),
+            runner_state.clone(),
         );
         (Some(fm), Some(notifier))
     };

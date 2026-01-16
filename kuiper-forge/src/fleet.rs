@@ -4,6 +4,7 @@
 //! - Maintaining a target number of runners per configuration
 //! - Requesting new runners from agents when below target
 //! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
+//! - Recovering runners when agents reconnect after coordinator restart
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,11 +18,22 @@ use agent_proto::{AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRu
 use crate::agent_registry::AgentRegistry;
 use crate::config::{Config, RunnerConfig};
 use crate::github::RunnerTokenProvider;
+use crate::runner_state::RunnerStateStore;
+
+/// Information about an agent's VMs for recovery.
+#[derive(Debug, Clone)]
+pub struct AgentRecoveryInfo {
+    /// Agent ID
+    pub agent_id: String,
+    /// VM names currently running on the agent
+    pub vm_names: Vec<String>,
+}
 
 /// Handle for triggering fleet manager reconciliation.
 #[derive(Clone)]
 pub struct FleetNotifier {
-    tx: mpsc::Sender<()>,
+    notify_tx: mpsc::Sender<()>,
+    recovery_tx: mpsc::Sender<AgentRecoveryInfo>,
 }
 
 impl FleetNotifier {
@@ -30,7 +42,17 @@ impl FleetNotifier {
     /// Called when an agent connects to check if runners need to be created.
     pub async fn notify(&self) {
         // Use try_send to avoid blocking - if channel is full, reconciliation is already pending
-        let _ = self.tx.try_send(());
+        let _ = self.notify_tx.try_send(());
+    }
+
+    /// Notify with recovery info when an agent has existing VMs.
+    ///
+    /// Called when an agent connects with VMs that may match persisted runners.
+    /// The fleet manager will spawn watchers for matching runners.
+    pub async fn notify_with_recovery(&self, agent_id: String, vm_names: Vec<String>) {
+        let _ = self.recovery_tx.try_send(AgentRecoveryInfo { agent_id, vm_names });
+        // Also trigger a reconcile
+        let _ = self.notify_tx.try_send(());
     }
 }
 
@@ -51,8 +73,12 @@ pub struct FleetManager {
     agent_registry: Arc<AgentRegistry>,
     /// Runner pool state
     pool: Arc<RwLock<RunnerPool>>,
+    /// Persistent runner state for crash recovery
+    runner_state: Arc<RunnerStateStore>,
     /// Channel for receiving reconciliation notifications
     notify_rx: mpsc::Receiver<()>,
+    /// Channel for receiving recovery notifications
+    recovery_rx: mpsc::Receiver<AgentRecoveryInfo>,
 }
 
 impl FleetManager {
@@ -64,18 +90,22 @@ impl FleetManager {
         config: Config,
         token_provider: Arc<dyn RunnerTokenProvider>,
         agent_registry: Arc<AgentRegistry>,
+        runner_state: Arc<RunnerStateStore>,
     ) -> (Self, FleetNotifier) {
-        let (tx, rx) = mpsc::channel(16);
+        let (notify_tx, notify_rx) = mpsc::channel(16);
+        let (recovery_tx, recovery_rx) = mpsc::channel(16);
 
         let manager = Self {
             config,
             token_provider,
             agent_registry,
             pool: Arc::new(RwLock::new(RunnerPool::default())),
-            notify_rx: rx,
+            runner_state,
+            notify_rx,
+            recovery_rx,
         };
 
-        let notifier = FleetNotifier { tx };
+        let notifier = FleetNotifier { notify_tx, recovery_tx };
 
         (manager, notifier)
     }
@@ -83,12 +113,27 @@ impl FleetManager {
     /// Start the fleet manager loop.
     ///
     /// This runs forever, periodically checking and maintaining runner pools.
-    /// Also responds to notifications for immediate reconciliation.
+    /// Also responds to notifications for immediate reconciliation and recovery.
     pub async fn run(mut self) {
         let check_interval = Duration::from_secs(30);
         let mut ticker = tokio::time::interval(check_interval);
 
         info!("Fleet manager started with {} runner configurations", self.config.runners.len());
+
+        // On startup, log any persisted runners (from previous coordinator run)
+        let persisted = self.runner_state.get_all_runners().await;
+        if !persisted.is_empty() {
+            info!(
+                "Found {} persisted runner(s) from previous run - will recover when agents reconnect",
+                persisted.len()
+            );
+            for (name, info) in &persisted {
+                info!(
+                    "  Persisted runner '{}' on agent '{}' (created {})",
+                    name, info.agent_id, info.created_at
+                );
+            }
+        }
 
         loop {
             tokio::select! {
@@ -99,8 +144,192 @@ impl FleetManager {
                     info!("Fleet manager triggered by agent connection");
                     self.reconcile().await;
                 }
+                Some(recovery_info) = self.recovery_rx.recv() => {
+                    info!(
+                        "Fleet manager received recovery info from agent '{}' with {} VMs",
+                        recovery_info.agent_id, recovery_info.vm_names.len()
+                    );
+                    self.handle_agent_recovery(recovery_info).await;
+                }
             }
         }
+    }
+
+    /// Handle recovery when an agent reconnects with existing VMs.
+    ///
+    /// For each VM that matches a persisted runner, spawn a watcher task to
+    /// monitor the runner's completion.
+    async fn handle_agent_recovery(&self, recovery_info: AgentRecoveryInfo) {
+        let persisted_runners = self.runner_state.get_runners_for_agent(&recovery_info.agent_id).await;
+
+        if persisted_runners.is_empty() {
+            info!(
+                "Agent '{}' has {} VMs but no persisted runners to recover",
+                recovery_info.agent_id, recovery_info.vm_names.len()
+            );
+            return;
+        }
+
+        info!(
+            "Checking {} VMs from agent '{}' against {} persisted runners",
+            recovery_info.vm_names.len(),
+            recovery_info.agent_id,
+            persisted_runners.len()
+        );
+
+        for (runner_name, runner_info) in persisted_runners {
+            if recovery_info.vm_names.contains(&runner_name) {
+                info!(
+                    "Recovering runner '{}' - VM still active on agent '{}', spawning watcher",
+                    runner_name, recovery_info.agent_id
+                );
+
+                // Find which config this runner matches (for pending count tracking)
+                let config_idx = self.find_config_for_runner(&runner_info.runner_scope);
+
+                // Mark as pending (so reconcile doesn't try to create more)
+                if let Some(idx) = config_idx {
+                    let mut pool = self.pool.write().await;
+                    *pool.pending_runners.entry(idx).or_insert(0) += 1;
+                    info!(
+                        "Marked recovered runner '{}' as pending in pool idx {}",
+                        runner_name, idx
+                    );
+                }
+
+                // Spawn a watcher task for this runner
+                self.spawn_runner_watcher(
+                    runner_name.clone(),
+                    recovery_info.agent_id.clone(),
+                    runner_info.runner_scope,
+                    config_idx,
+                );
+            } else {
+                // VM is gone - the runner completed or failed while coordinator was down
+                warn!(
+                    "Persisted runner '{}' not found on agent '{}' - cleaning up from GitHub",
+                    runner_name, recovery_info.agent_id
+                );
+
+                // Clean up from GitHub
+                let token_provider = self.token_provider.clone();
+                let runner_scope = runner_info.runner_scope.clone();
+                let runner_name_clone = runner_name.clone();
+                let runner_state = self.runner_state.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = token_provider
+                        .remove_runner(&runner_scope, &runner_name_clone)
+                        .await
+                    {
+                        warn!(
+                            "Could not remove stale runner '{}' from GitHub: {}",
+                            runner_name_clone, e
+                        );
+                    }
+                    runner_state.remove_runner(&runner_name_clone).await;
+                    info!("Cleaned up stale runner '{}'", runner_name_clone);
+                });
+            }
+        }
+    }
+
+    /// Find the runner config index that matches a runner scope.
+    fn find_config_for_runner(&self, runner_scope: &crate::config::RunnerScope) -> Option<usize> {
+        self.config.runners.iter().position(|rc| rc.runner_scope == *runner_scope)
+    }
+
+    /// Spawn a watcher task for a recovered runner.
+    ///
+    /// The watcher will poll the agent's VM list until the runner completes,
+    /// then clean up from GitHub and update state.
+    fn spawn_runner_watcher(
+        &self,
+        runner_name: String,
+        agent_id: String,
+        runner_scope: crate::config::RunnerScope,
+        config_idx: Option<usize>,
+    ) {
+        let agent_registry = self.agent_registry.clone();
+        let token_provider = self.token_provider.clone();
+        let runner_state = self.runner_state.clone();
+        let pool = self.pool.clone();
+
+        tokio::spawn(async move {
+            // Poll until the runner/VM is gone (runner completed its job)
+            let poll_interval = Duration::from_secs(30);
+            let mut interval = tokio::time::interval(poll_interval);
+
+            info!(
+                "Started recovery watcher for runner '{}' on agent '{}'",
+                runner_name, agent_id
+            );
+
+            loop {
+                interval.tick().await;
+
+                // Check if agent is still connected
+                let agent = agent_registry.get(&agent_id).await;
+                if agent.is_none() {
+                    warn!(
+                        "Agent '{}' disconnected while watching runner '{}' - stopping watcher",
+                        agent_id, runner_name
+                    );
+                    // Agent disconnected - runner state will be handled when agent reconnects
+                    // or by the disconnect cleanup logic
+                    break;
+                }
+
+                // For now, we can't easily check if the VM is still running without
+                // the status messages coming through the normal channel. The runner
+                // watcher will be stopped when the agent reports the VM is gone in
+                // its status updates.
+                //
+                // A more sophisticated approach would be to have the agent report
+                // VM completions explicitly, but for now we rely on:
+                // 1. Agent disconnect cleanup
+                // 2. Stale runner cleanup based on age
+                //
+                // The important thing is that pending_runners count is tracked,
+                // so we won't over-provision runners.
+
+                // Check if this runner is still in persisted state
+                // (It will be removed when the agent reports completion or disconnects)
+                if !runner_state.has_runner(&runner_name).await {
+                    info!(
+                        "Runner '{}' removed from state - watcher task exiting",
+                        runner_name
+                    );
+                    break;
+                }
+            }
+
+            // Decrement pending count when watcher exits
+            if let Some(idx) = config_idx {
+                let mut pool = pool.write().await;
+                if let Some(p) = pool.pending_runners.get_mut(&idx) {
+                    *p = p.saturating_sub(1);
+                }
+            }
+
+            // Clean up from GitHub
+            info!(
+                "Recovery watcher for '{}' exiting, cleaning up from GitHub",
+                runner_name
+            );
+            if let Err(e) = token_provider
+                .remove_runner(&runner_scope, &runner_name)
+                .await
+            {
+                warn!(
+                    "Could not remove runner '{}' from GitHub: {}",
+                    runner_name, e
+                );
+            }
+
+            // Remove from persistent state
+            runner_state.remove_runner(&runner_name).await;
+        });
     }
 
     /// Reconcile the current state with the desired state.
@@ -255,6 +484,16 @@ impl FleetManager {
                 *pool.pending_runners.entry(config_idx).or_insert(0) += 1;
             }
 
+            // Save runner state for crash recovery
+            self.runner_state
+                .add_runner(
+                    runner_name.clone(),
+                    agent_id.clone(),
+                    runner_name.clone(), // vm_name is same as runner_name
+                    runner_config.runner_scope.clone(),
+                )
+                .await;
+
             // Build CreateRunner command
             let create_cmd = CreateRunnerCommand {
                 command_id: command_id.clone(),
@@ -281,6 +520,7 @@ impl FleetManager {
             let token_provider = self.token_provider.clone();
             let runner_scope = runner_config.runner_scope.clone();
             let runner_name_clone = runner_name.clone();
+            let runner_state = self.runner_state.clone();
 
             // Spawn task to send command and handle response
             // This allows us to continue creating other runners while waiting
@@ -330,6 +570,9 @@ impl FleetManager {
                                 runner_name_clone, e
                             );
                         }
+
+                        // Remove from persistent state
+                        runner_state.remove_runner(&runner_name_clone).await;
                     }
                     Err(e) => {
                         error!("CreateRunner command failed: {}", e);
@@ -357,6 +600,9 @@ impl FleetManager {
                                 runner_name_clone, e
                             );
                         }
+
+                        // Remove from persistent state
+                        runner_state.remove_runner(&runner_name_clone).await;
                     }
                 }
             });

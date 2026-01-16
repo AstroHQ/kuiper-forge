@@ -108,7 +108,7 @@ fn default_runner_count() -> u32 {
 }
 
 /// GitHub runner registration scope.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RunnerScope {
     /// Organization-level runner
