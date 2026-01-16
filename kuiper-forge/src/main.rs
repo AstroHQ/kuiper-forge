@@ -110,10 +110,6 @@ enum CaCommands {
 enum TokenCommands {
     /// Create a new registration token
     Create {
-        /// Labels for the agent (comma-separated)
-        #[arg(long, value_delimiter = ',')]
-        labels: Vec<String>,
-
         /// Token expiration time (e.g., "1h", "30m", "1d")
         #[arg(long, default_value = "1h")]
         expires: String,
@@ -433,16 +429,15 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
     )?;
 
     match command {
-        TokenCommands::Create { labels, expires } => {
+        TokenCommands::Create { expires } => {
             let ttl = parse_duration(&expires)?;
 
             let token = auth_manager
-                .create_registration_token(labels.clone(), ttl, "cli")
+                .create_registration_token(ttl, "cli")
                 .await?;
 
             println!("Registration token created:");
             println!("  Token:   {}", token.token);
-            println!("  Labels:  {}", labels.join(", "));
             println!("  Expires: {} (in {})", token.expires_at.format("%Y-%m-%d %H:%M:%S UTC"), expires);
             println!();
             println!("Copy this token to the agent configuration to register it.");
@@ -459,12 +454,11 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
                 return Ok(());
             }
 
-            println!("{:<25} {:<20} {:<20} {:<20} {:<10}",
-                "TOKEN", "LABELS", "CREATED", "EXPIRES", "CREATED BY");
-            println!("{}", "-".repeat(100));
+            println!("{:<25} {:<20} {:<20} {:<10}",
+                "TOKEN", "CREATED", "EXPIRES", "CREATED BY");
+            println!("{}", "-".repeat(80));
 
             for token in tokens {
-                let labels = token.labels.join(",");
                 let created = token.created_at.format("%Y-%m-%d %H:%M");
                 let expires = token.expires_at.format("%Y-%m-%d %H:%M");
                 let token_short = if token.token.len() > 20 {
@@ -472,8 +466,8 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
                 } else {
                     token.token.clone()
                 };
-                println!("{:<25} {:<20} {:<20} {:<20} {:<10}",
-                    token_short, labels, created, expires, token.created_by);
+                println!("{:<25} {:<20} {:<20} {:<10}",
+                    token_short, created, expires, token.created_by);
             }
 
             Ok(())

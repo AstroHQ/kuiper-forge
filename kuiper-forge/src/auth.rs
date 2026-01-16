@@ -25,7 +25,6 @@ use tokio::sync::RwLock;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RegistrationToken {
     pub token: String,
-    pub labels: Vec<String>,
     pub expires_at: DateTime<Utc>,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
@@ -253,7 +252,6 @@ impl AuthManager {
     /// Generate a new registration token
     pub async fn create_registration_token(
         &self,
-        labels: Vec<String>,
         ttl: Duration,
         created_by: &str,
     ) -> Result<RegistrationToken> {
@@ -263,7 +261,6 @@ impl AuthManager {
 
         let reg_token = RegistrationToken {
             token,
-            labels,
             expires_at,
             created_by: created_by.to_string(),
             created_at: now,
@@ -339,19 +336,11 @@ impl AuthManager {
         let serial = hex::encode(agent_cert.der());
 
         // 5. Record agent in store
-        // Use the labels from the request, merging with token labels
-        let mut all_labels = reg_token.labels.clone();
-        for label in labels {
-            if !all_labels.contains(&label) {
-                all_labels.push(label);
-            }
-        }
-
         let registered = RegisteredAgent {
             agent_id: agent_id.clone(),
             hostname: hostname.to_string(),
             agent_type: agent_type.to_string(),
-            labels: all_labels.clone(),
+            labels: labels.clone(),
             max_vms,
             serial_number: serial.clone(),
             created_at: Utc::now(),
@@ -362,7 +351,7 @@ impl AuthManager {
 
         Ok(AgentCertificate {
             agent_id,
-            labels: all_labels,
+            labels,
             cert_pem,
             key_pem,
             expires_at,
@@ -678,7 +667,6 @@ mod tests {
         // Create a token
         let token = RegistrationToken {
             token: "reg_test123".to_string(),
-            labels: vec!["macos".to_string()],
             expires_at: Utc::now() + Duration::hours(1),
             created_by: "admin".to_string(),
             created_at: Utc::now(),
