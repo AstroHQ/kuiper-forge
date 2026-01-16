@@ -251,23 +251,23 @@ impl Config {
 
     /// Get the default configuration file path.
     ///
-    /// - macOS: `~/Library/Application Support/tart-agent/config.toml`
-    /// - Linux: `~/.config/tart-agent/config.toml`
+    /// - macOS: `~/Library/Application Support/kuiper-tart-agent/config.toml`
+    /// - Linux: `~/.config/kuiper-tart-agent/config.toml`
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("tart-agent")
+            .join("kuiper-tart-agent")
             .join("config.toml")
     }
 
     /// Get the default data directory.
     ///
-    /// - macOS: `~/Library/Application Support/tart-agent/`
-    /// - Linux: `~/.local/share/tart-agent/`
+    /// - macOS: `~/Library/Application Support/kuiper-tart-agent/`
+    /// - Linux: `~/.local/share/kuiper-tart-agent/`
     pub fn default_data_dir() -> PathBuf {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("tart-agent")
+            .join("kuiper-tart-agent")
     }
 }
 

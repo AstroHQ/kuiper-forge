@@ -11,11 +11,11 @@ pub enum Error {
 
     /// Proxmox API error
     #[error("Proxmox API error: {0}")]
-    ProxmoxApi(#[from] proxmox_api::Error),
+    ProxmoxApi(#[from] kuiper_proxmox_api::Error),
 
     /// Agent library error (connection, registration)
     #[error("Agent error: {0}")]
-    AgentLib(#[from] agent_lib::Error),
+    AgentLib(#[from] kuiper_agent_lib::Error),
 
     /// SSH connection error
     #[error("SSH error: {0}")]

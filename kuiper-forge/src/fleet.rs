@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use agent_proto::{AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand};
+use kuiper_agent_proto::{AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand};
 
 use crate::agent_registry::AgentRegistry;
 use crate::config::{Config, RunnerConfig};

@@ -173,10 +173,4 @@ impl RunnerStateStore {
         let runners = self.runners.read().await;
         runners.contains_key(runner_name)
     }
-
-    /// Get runner info by name.
-    pub async fn get_runner(&self, runner_name: &str) -> Option<RunnerInfo> {
-        let runners = self.runners.read().await;
-        runners.get(runner_name).cloned()
-    }
 }

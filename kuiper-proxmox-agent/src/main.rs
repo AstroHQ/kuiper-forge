@@ -11,15 +11,15 @@ mod error;
 mod ssh;
 mod vm_manager;
 
-use agent_lib::{AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector};
-use agent_proto::{
+use kuiper_agent_lib::{AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector};
+use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentStatus, CommandResult, CommandResultPayload,
     CoordinatorPayload, CreateRunnerResult, DestroyRunnerResult, Ping, Pong, VmInfo,
 };
 use clap::Parser;
 use config::Config;
 use error::{Error, Result};
-use proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
+use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,7 +32,7 @@ use vm_manager::VmManager;
 
 /// Proxmox Agent for CI Runner Coordination
 #[derive(Parser, Debug)]
-#[command(name = "proxmox-agent")]
+#[command(name = "kuiper-proxmox-agent")]
 #[command(about = "Proxmox VE agent for ephemeral CI runner VMs")]
 struct Args {
     /// Path to configuration file
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = Config::default_data_dir();
     init_logging(&data_dir, args.verbose)?;
 
-    info!("Starting proxmox-agent");
+    info!("Starting kuiper-proxmox-agent");
 
     // Load configuration
     let config = match &args.config {
@@ -208,7 +208,7 @@ impl ProxmoxAgent {
     /// Run the bidirectional gRPC stream.
     async fn run_stream(
         &self,
-        mut client: agent_proto::AgentServiceClient<tonic::transport::Channel>,
+        mut client: kuiper_agent_proto::AgentServiceClient<tonic::transport::Channel>,
     ) -> Result<()> {
         // Create channels for sending/receiving
         let (tx, rx) = mpsc::channel::<AgentMessage>(32);
@@ -263,7 +263,7 @@ impl ProxmoxAgent {
     /// Handle a message from the coordinator.
     async fn handle_coordinator_message(
         &self,
-        msg: agent_proto::CoordinatorMessage,
+        msg: kuiper_agent_proto::CoordinatorMessage,
         tx: &mpsc::Sender<AgentMessage>,
     ) -> Result<()> {
         let payload = match msg.payload {
@@ -305,7 +305,7 @@ impl ProxmoxAgent {
     /// Handle a CreateRunner command.
     async fn handle_create_runner(
         &self,
-        cmd: agent_proto::CreateRunnerCommand,
+        cmd: kuiper_agent_proto::CreateRunnerCommand,
         tx: mpsc::Sender<AgentMessage>,
     ) {
         let vm_manager = self.vm_manager.clone();
@@ -360,7 +360,7 @@ impl ProxmoxAgent {
     /// Handle a DestroyRunner command.
     async fn handle_destroy_runner(
         &self,
-        cmd: agent_proto::DestroyRunnerCommand,
+        cmd: kuiper_agent_proto::DestroyRunnerCommand,
         tx: mpsc::Sender<AgentMessage>,
     ) {
         let vm_manager = self.vm_manager.clone();
@@ -439,10 +439,10 @@ fn init_logging(data_dir: &PathBuf, verbose: bool) -> anyhow::Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
-    // Create a daily rotating file appender (e.g., proxmox-agent.2026-01-15.log)
+    // Create a daily rotating file appender (e.g., kuiper-proxmox-agent.2026-01-15.log)
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
-        .filename_prefix("proxmox-agent")
+        .filename_prefix("kuiper-proxmox-agent")
         .filename_suffix("log")
         .build(&log_dir)?;
 

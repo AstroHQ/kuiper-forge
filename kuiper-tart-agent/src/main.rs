@@ -11,7 +11,7 @@
 //!
 //! First run with registration token:
 //! ```
-//! tart-agent --coordinator-url https://coordinator:9443 \
+//! kuiper-tart-agent --coordinator-url https://coordinator:9443 \
 //!            --token reg_xxxxx \
 //!            --ca-cert /path/to/ca.crt \
 //!            --labels macos,arm64 \
@@ -20,7 +20,7 @@
 //!
 //! Subsequent runs (uses saved config):
 //! ```
-//! tart-agent
+//! kuiper-tart-agent
 //! ```
 
 mod config;
@@ -32,8 +32,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationTlsMode};
-use agent_proto::{
+use kuiper_agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationTlsMode};
+use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentStatus, CommandResult, CommandResultPayload,
     CoordinatorPayload, CreateRunnerResult, DestroyRunnerResult, Pong,
 };
@@ -52,7 +52,7 @@ use vm_manager::VmManager;
 
 /// Tart VM Agent for CI Runner Coordination
 #[derive(Parser, Debug)]
-#[command(name = "tart-agent", version, about, long_about = None)]
+#[command(name = "kuiper-tart-agent", version, about, long_about = None)]
 struct Args {
     /// Path to configuration file (default: platform-specific config dir)
     #[arg(short, long)]
@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!();
         eprintln!("To register this agent for the first time, run:");
         eprintln!();
-        eprintln!("  tart-agent --coordinator-url https://YOUR_COORDINATOR:9443 \\");
+        eprintln!("  kuiper-tart-agent --coordinator-url https://YOUR_COORDINATOR:9443 \\");
         eprintln!("             --token REG_TOKEN_FROM_COORDINATOR \\");
         eprintln!("             --labels macos,arm64");
         eprintln!();
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     };
 
-    info!("tart-agent starting");
+    info!("kuiper-tart-agent starting");
     info!("Coordinator: {}", config.coordinator.url);
     info!("Max concurrent VMs: {}", config.tart.max_concurrent_vms);
     info!("Labels: {:?}", config.agent.labels);
@@ -287,7 +287,7 @@ impl TartAgent {
     /// Run the bidirectional gRPC stream.
     async fn run_stream(
         self: &Arc<Self>,
-        mut client: agent_proto::AgentServiceClient<tonic::transport::Channel>,
+        mut client: kuiper_agent_proto::AgentServiceClient<tonic::transport::Channel>,
     ) -> Result<()> {
         // Create channels for sending messages to coordinator
         let (tx, rx) = mpsc::channel::<AgentMessage>(32);
@@ -400,7 +400,7 @@ impl TartAgent {
     /// Handle CreateRunner command.
     async fn handle_create_runner(
         &self,
-        cmd: &agent_proto::CreateRunnerCommand,
+        cmd: &kuiper_agent_proto::CreateRunnerCommand,
     ) -> CommandResult {
         let command_id = cmd.command_id.clone();
         let vm_name = cmd.vm_name.clone();
@@ -527,7 +527,7 @@ impl TartAgent {
     /// Handle DestroyRunner command.
     async fn handle_destroy_runner(
         &self,
-        cmd: &agent_proto::DestroyRunnerCommand,
+        cmd: &kuiper_agent_proto::DestroyRunnerCommand,
     ) -> CommandResult {
         let command_id = cmd.command_id.clone();
         let vm_id = cmd.vm_id.clone();
@@ -579,10 +579,10 @@ fn init_logging(data_dir: &PathBuf) -> anyhow::Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
-    // Create a daily rotating file appender (e.g., tart-agent.2026-01-15.log)
+    // Create a daily rotating file appender (e.g., kuiper-tart-agent.2026-01-15.log)
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
-        .filename_prefix("tart-agent")
+        .filename_prefix("kuiper-tart-agent")
         .filename_suffix("log")
         .build(&log_dir)?;
 

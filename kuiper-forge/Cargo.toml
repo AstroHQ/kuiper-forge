@@ -24,7 +24,7 @@ async-trait = { workspace = true }
 
 # gRPC
 tonic = { workspace = true }
-agent-proto = { path = "../agent-proto" }
+kuiper-agent-proto = { path = "../kuiper-agent-proto" }
 
 # TLS/Certificates
 rcgen = { workspace = true }

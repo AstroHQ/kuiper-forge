@@ -10,7 +10,7 @@
 use crate::config::{SshConfig, VmConfig};
 use crate::error::{Error, Result};
 use crate::ssh::{RunnerConfigBuilder, SshClient, SshSession};
-use proxmox_api::ProxmoxVEAPI;
+use kuiper_proxmox_api::ProxmoxVEAPI;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -5,7 +5,7 @@
 
 // Allow dead code for fields/methods that may be useful for future features
 
-use agent_proto::{AgentMessage, CoordinatorMessage};
+use kuiper_agent_proto::{AgentMessage, CoordinatorMessage};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;

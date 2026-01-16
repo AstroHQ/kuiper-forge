@@ -1,6 +1,6 @@
 //! Shared library for CI runner agents.
 //!
-//! This crate provides common functionality for both tart-agent and proxmox-agent:
+//! This crate provides common functionality for both kuiper-tart-agent and kuiper-proxmox-agent:
 //! - Certificate storage and management
 //! - gRPC connection handling with mTLS
 //! - Registration token exchange

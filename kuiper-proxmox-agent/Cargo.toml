@@ -1,16 +1,17 @@
 [package]
-name = "tart-agent"
+name = "kuiper-proxmox-agent"
 version = "0.1.0"
 edition = "2021"
-description = "Tart VM agent for CI runner coordination (macOS)"
+description = "Proxmox VE agent for CI runner coordination (Windows/Linux)"
 
 [[bin]]
-name = "tart-agent"
+name = "kuiper-proxmox-agent"
 path = "src/main.rs"
 
 [dependencies]
-agent-proto = { path = "../agent-proto" }
-agent-lib = { path = "../agent-lib" }
+kuiper-agent-proto = { path = "../kuiper-agent-proto" }
+kuiper-agent-lib = { path = "../kuiper-agent-lib" }
+kuiper-proxmox-api = { path = "../kuiper-proxmox-api" }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -24,11 +25,8 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
+async-trait = { workspace = true }
 toml = "0.8"
-uuid = { workspace = true }
-chrono = { workspace = true }
+russh = "0.48"
+russh-keys = "0.48"
 gethostname = "0.5"
-url = "2"
-
-# SSH
-russh = "0.56"

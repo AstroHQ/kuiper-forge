@@ -1,13 +1,13 @@
-# Example tart-agent configuration
+# Example kuiper-tart-agent configuration
 #
-# NOTE: For first-time setup, tart-agent can bootstrap from CLI arguments:
-#   tart-agent --coordinator-url https://localhost:9443 \
+# NOTE: For first-time setup, kuiper-tart-agent can bootstrap from CLI arguments:
+#   kuiper-tart-agent --coordinator-url https://localhost:9443 \
 #              --token REG_TOKEN_FROM_COORDINATOR \
 #              --ca-cert /path/to/ca.crt \
 #              --labels macos,arm64
 #
 # This creates a config file automatically. Subsequent runs just need:
-#   tart-agent
+#   kuiper-tart-agent
 #
 # This example config file is for reference or manual setup.
 
@@ -17,9 +17,9 @@ hostname = "localhost"
 
 [tls]
 # CA certificate from coordinator (copy from coordinator's data dir)
-ca_cert = "~/.config/tart-agent/certs/ca.crt"
+ca_cert = "~/.config/kuiper-tart-agent/certs/ca.crt"
 # Directory where agent stores its client certificate after registration
-certs_dir = "~/.config/tart-agent/certs"
+certs_dir = "~/.config/kuiper-tart-agent/certs"
 
 [agent]
 # Labels this agent advertises - used for job matching

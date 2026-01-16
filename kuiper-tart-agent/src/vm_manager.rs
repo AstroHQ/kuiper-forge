@@ -7,7 +7,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_proto::VmInfo;
+use kuiper_agent_proto::VmInfo;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
@@ -472,7 +472,7 @@ mod tests {
             ssh: Default::default(),
             runner_version: "latest".to_string(),
         };
-        let log_dir = std::env::temp_dir().join("tart-agent-test-logs");
+        let log_dir = std::env::temp_dir().join("kuiper-tart-agent-test-logs");
         let manager = VmManager::new(config, SshConfig::default(), log_dir);
 
         assert_eq!(manager.max_vms(), 2);

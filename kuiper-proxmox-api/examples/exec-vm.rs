@@ -1,5 +1,6 @@
 use anyhow::Result;
-use proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
+use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
+use std::process::Command;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -14,19 +15,16 @@ async fn main() -> Result<()> {
         .init();
     let proxmox = ProxmoxVEAPI::new(
         "root@pam",
-        // ProxmoxAuth::api_token("vm-control", "ad97f909-34ec-4f4f-959f-ce3b959a2f3f"),
-        ProxmoxAuth::api_token("vm-control", "42741fe0-54c1-43a4-83c0-7156d090adcf"),
-        // "https://192.168.1.254:8006/",
-        "https://192.168.1.253:8006/",
+        ProxmoxAuth::api_token("vm-control", "ad97f909-34ec-4f4f-959f-ce3b959a2f3f"),
+        // ProxmoxAuth::api_token("vm-control", "42741fe0-54c1-43a4-83c0-7156d090adcf"),
+        "https://192.168.1.254:8006/",
+        // "https://192.168.1.253:8006/",
         true,
     )?;
     let vms = proxmox.list_vms().await?;
-    for vm in vms {
-        let snapshots = proxmox.list_vm_snapshots(&vm).await?;
-        println!(
-            "VM: {} ({}) - {} - Snapshots: {snapshots:?}",
-            vm.name, vm.vmid, vm.status
-        );
-    }
+    let vm = vms.into_iter().find(|vm| vm.vmid == 105).unwrap();
+    let command = Command::new("hostname");
+    proxmox.ping(&vm).await?;
+    proxmox.exec_on_vm(&vm, command).await?;
     Ok(())
 }

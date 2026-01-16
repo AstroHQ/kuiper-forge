@@ -1,5 +1,5 @@
 use crate::{AgentCertStore, Error, Result};
-use agent_proto::{
+use kuiper_agent_proto::{
     AgentServiceClient, RegisterRequest, RegistrationServiceClient,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};

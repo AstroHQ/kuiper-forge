@@ -1,5 +1,5 @@
 [package]
-name = "proxmox-api"
+name = "kuiper-proxmox-api"
 version = "0.1.0"
 edition = "2021"
 

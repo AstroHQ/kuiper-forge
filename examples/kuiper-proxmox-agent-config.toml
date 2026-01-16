@@ -1,21 +1,21 @@
-# Example proxmox-agent configuration
+# Example kuiper-proxmox-agent configuration
 #
-# Unlike tart-agent, proxmox-agent requires a config file for Proxmox
+# Unlike tart-agent, kuiper-proxmox-agent requires a config file for Proxmox
 # credentials and VM settings. However, the registration token should
 # be passed via CLI:
 #
-#   proxmox-agent --config /path/to/config.toml --token REG_TOKEN
+#   kuiper-proxmox-agent --config /path/to/config.toml --token REG_TOKEN
 #
 # After initial registration, subsequent runs don't need --token:
-#   proxmox-agent --config /path/to/config.toml
+#   kuiper-proxmox-agent --config /path/to/config.toml
 
 [coordinator]
 url = "https://localhost:9443"
 hostname = "localhost"
 
 [tls]
-ca_cert = "~/.config/proxmox-agent/certs/ca.crt"
-certs_dir = "~/.config/proxmox-agent/certs"
+ca_cert = "~/.config/kuiper-proxmox-agent/certs/ca.crt"
+certs_dir = "~/.config/kuiper-proxmox-agent/certs"
 
 [agent]
 labels = ["self-hosted", "linux", "x64"]

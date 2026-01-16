@@ -1,11 +1,11 @@
 [workspace]
 members = [
     "kuiper-forge",
-    "proxmox-api",
-    "agent-proto",
-    "agent-lib",
-    "tart-agent",
-    "proxmox-agent",
+    "kuiper-proxmox-api",
+    "kuiper-agent-proto",
+    "kuiper-agent-lib",
+    "kuiper-tart-agent",
+    "kuiper-proxmox-agent",
 ]
 resolver = "2"
 

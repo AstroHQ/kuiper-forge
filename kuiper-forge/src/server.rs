@@ -5,7 +5,7 @@
 //! - AgentService: Bidirectional streaming for agent communication (mTLS)
 
 
-use agent_proto::{
+use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentService, AgentServiceServer,
     CoordinatorMessage, CoordinatorPayload, Ping, RegisterRequest, RegisterResponse,
     RegistrationService, RegistrationServiceServer,

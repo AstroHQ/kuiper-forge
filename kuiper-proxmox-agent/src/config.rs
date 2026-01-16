@@ -1,4 +1,4 @@
-//! Configuration loading for proxmox-agent.
+//! Configuration loading for kuiper-proxmox-agent.
 //!
 //! Configuration is loaded from a TOML file. See docs/ProxmoxProviderPlan.md for
 //! the full configuration schema.
@@ -184,9 +184,9 @@ impl Config {
     /// Load configuration from the default location.
     ///
     /// Searches in order:
-    /// 1. `./proxmox-agent.toml` (current directory)
-    /// 2. `~/.config/proxmox-agent/config.toml` (user config)
-    /// 3. `/etc/proxmox-agent/config.toml` (system config, Linux only)
+    /// 1. `./kuiper-proxmox-agent.toml` (current directory)
+    /// 2. `~/.config/kuiper-proxmox-agent/config.toml` (user config)
+    /// 3. `/etc/kuiper-proxmox-agent/config.toml` (system config, Linux only)
     pub fn load_default() -> Result<Self, ConfigError> {
         let candidates = Self::config_search_paths();
 
@@ -205,26 +205,26 @@ impl Config {
 
     /// Get the list of paths to search for config files.
     pub fn config_search_paths() -> Vec<PathBuf> {
-        let mut paths = vec![PathBuf::from("proxmox-agent.toml")];
+        let mut paths = vec![PathBuf::from("kuiper-proxmox-agent.toml")];
 
         if let Some(config_dir) = dirs::config_dir() {
-            paths.push(config_dir.join("proxmox-agent").join("config.toml"));
+            paths.push(config_dir.join("kuiper-proxmox-agent").join("config.toml"));
         }
 
         #[cfg(target_os = "linux")]
-        paths.push(PathBuf::from("/etc/proxmox-agent/config.toml"));
+        paths.push(PathBuf::from("/etc/kuiper-proxmox-agent/config.toml"));
 
         paths
     }
 
     /// Get the default data directory.
     ///
-    /// - Linux: `~/.local/share/proxmox-agent/`
-    /// - macOS: `~/Library/Application Support/proxmox-agent/`
+    /// - Linux: `~/.local/share/kuiper-proxmox-agent/`
+    /// - macOS: `~/Library/Application Support/kuiper-proxmox-agent/`
     pub fn default_data_dir() -> PathBuf {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("proxmox-agent")
+            .join("kuiper-proxmox-agent")
     }
 
     /// Validate the configuration.
@@ -282,8 +282,8 @@ url = "https://coordinator.example.com:9443"
 hostname = "coordinator.example.com"
 
 [tls]
-ca_cert = "/etc/proxmox-agent/certs/ca.crt"
-certs_dir = "/etc/proxmox-agent/certs"
+ca_cert = "/etc/kuiper-proxmox-agent/certs/ca.crt"
+certs_dir = "/etc/kuiper-proxmox-agent/certs"
 
 [agent]
 labels = ["self-hosted", "windows", "x64"]
@@ -299,7 +299,7 @@ template_vmid = 9000
 storage = "local-lvm"
 
 [ssh]
-private_key_path = "/etc/proxmox-agent/id_ed25519"
+private_key_path = "/etc/kuiper-proxmox-agent/id_ed25519"
 "#;
 
         let config: Config = toml::from_str(toml).expect("Failed to parse config");
@@ -318,8 +318,8 @@ url = "https://coordinator.example.com:9443"
 hostname = "coordinator.example.com"
 
 [tls]
-ca_cert = "/etc/proxmox-agent/certs/ca.crt"
-certs_dir = "/etc/proxmox-agent/certs"
+ca_cert = "/etc/kuiper-proxmox-agent/certs/ca.crt"
+certs_dir = "/etc/kuiper-proxmox-agent/certs"
 
 [agent]
 labels = ["self-hosted", "windows", "x64", "proxmox"]
@@ -340,7 +340,7 @@ ip_timeout_secs = 180
 clone_timeout_secs = 600
 
 [ssh]
-private_key_path = "/etc/proxmox-agent/id_ed25519"
+private_key_path = "/etc/kuiper-proxmox-agent/id_ed25519"
 username = "administrator"
 port = 2222
 timeout_secs = 60

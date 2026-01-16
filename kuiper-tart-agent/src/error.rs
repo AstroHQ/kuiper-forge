@@ -1,4 +1,4 @@
-//! Error types for tart-agent.
+//! Error types for kuiper-tart-agent.
 
 use thiserror::Error;
 
@@ -47,7 +47,7 @@ pub enum Error {
 
     /// Agent library error.
     #[error("Agent error: {0}")]
-    AgentLib(#[from] agent_lib::Error),
+    AgentLib(#[from] kuiper_agent_lib::Error),
 
     /// Send error on channel.
     #[error("Channel send error")]
@@ -58,5 +58,5 @@ pub enum Error {
     VmAlreadyRunning(String),
 }
 
-/// Result type alias for tart-agent.
+/// Result type alias for kuiper-tart-agent.
 pub type Result<T, E = Error> = std::result::Result<T, E>;

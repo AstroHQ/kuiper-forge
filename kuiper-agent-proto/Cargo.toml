@@ -1,5 +1,5 @@
 [package]
-name = "agent-proto"
+name = "kuiper-agent-proto"
 version = "0.1.0"
 edition = "2021"
 description = "gRPC protocol definitions for CI runner agents"
