@@ -55,7 +55,7 @@ The Tart provider uses a **distributed agent architecture** because Tart runs lo
 ## Crate Structure
 
 ```
-ci-runner-coordinator/
+kuiper-forge/
 ├── tart-agent/               # Daemon on each Mac host
 │   ├── Cargo.toml
 │   └── src/

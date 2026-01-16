@@ -1,8 +1,8 @@
 [package]
-name = "ci-runner-coordinator"
+name = "kuiper-forge"
 version = "0.1.0"
 edition = "2021"
-description = "CI runner coordinator for ephemeral VMs"
+description = "KuiperForge - CI runner coordinator for ephemeral VMs"
 
 [dependencies]
 # CLI

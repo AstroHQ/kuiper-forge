@@ -124,7 +124,7 @@ impl GitHubClient {
     /// Create a new GitHub client from a private key string
     pub fn from_key(app_id: String, private_key: String, installation_id: String) -> Result<Self> {
         let http_client = Client::builder()
-            .user_agent("ci-runner-coordinator")
+            .user_agent("kuiper-forge")
             .build()
             .context("Failed to create HTTP client")?;
 

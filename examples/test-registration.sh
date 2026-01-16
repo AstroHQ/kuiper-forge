@@ -4,14 +4,14 @@
 
 set -e
 
-echo "=== CI Runner Coordinator - Registration Test ==="
+echo "=== KuiperForge - Registration Test ==="
 echo ""
 
 # Determine data directories based on OS
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    COORD_DATA_DIR="$HOME/Library/Application Support/ci-runner-coordinator"
+    COORD_DATA_DIR="$HOME/Library/Application Support/kuiper-forge"
 else
-    COORD_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ci-runner-coordinator"
+    COORD_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kuiper-forge"
 fi
 
 echo "Coordinator data dir: $COORD_DATA_DIR"
@@ -22,7 +22,7 @@ echo "=== Step 1: Initialize CA ==="
 if [ -f "$COORD_DATA_DIR/ca.crt" ]; then
     echo "CA already exists at $COORD_DATA_DIR/ca.crt"
 else
-    cargo run --bin ci-runner-coordinator -- ca init --org "Test Org"
+    cargo run --bin kuiper-forge -- ca init --org "Test Org"
 fi
 echo ""
 
@@ -31,14 +31,14 @@ echo "=== Step 2: Generate server certificate ==="
 if [ -f "$COORD_DATA_DIR/server.crt" ]; then
     echo "Server cert already exists at $COORD_DATA_DIR/server.crt"
 else
-    cargo run --bin ci-runner-coordinator -- ca server-cert --hostname localhost
+    cargo run --bin kuiper-forge -- ca server-cert --hostname localhost
 fi
 echo ""
 
 # Step 3: Create registration token
 echo "=== Step 3: Create registration token ==="
 echo "Creating token for tart-agent..."
-TOKEN=$(cargo run --bin ci-runner-coordinator -- token create --labels macos,arm64 2>&1 | grep "Token:" | awk '{print $2}')
+TOKEN=$(cargo run --bin kuiper-forge -- token create --labels macos,arm64 2>&1 | grep "Token:" | awk '{print $2}')
 echo "Token: $TOKEN"
 echo ""
 
@@ -46,7 +46,7 @@ echo ""
 echo "=== Next Steps ==="
 echo ""
 echo "1. In terminal 1, start the coordinator in dry-run mode (no GitHub needed):"
-echo "   cargo run --bin ci-runner-coordinator -- serve --dry-run"
+echo "   cargo run --bin kuiper-forge -- serve --dry-run"
 echo ""
 echo "2. In terminal 2, bootstrap and start the tart-agent:"
 echo "   cargo run --bin tart-agent -- \\"
@@ -59,12 +59,12 @@ echo "3. After registration, subsequent runs just need:"
 echo "   cargo run --bin tart-agent"
 echo ""
 echo "4. Check registered agents:"
-echo "   cargo run --bin ci-runner-coordinator -- agent list"
+echo "   cargo run --bin kuiper-forge -- agent list"
 echo ""
 echo "=== For proxmox-agent ==="
 echo ""
 echo "Create a new token and use --token flag:"
-echo "   cargo run --bin ci-runner-coordinator -- token create --labels linux,x64"
+echo "   cargo run --bin kuiper-forge -- token create --labels linux,x64"
 echo "   cargo run --bin proxmox-agent -- --config examples/proxmox-agent-config.toml --token REG_TOKEN"
 echo ""
 echo "=== Notes ==="

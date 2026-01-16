@@ -1,11 +1,11 @@
 # Example coordinator configuration for local testing
 #
 # Before using:
-# 1. Run: cargo run --bin coordinator -- ca init --org "Test Org"
-# 2. Run: cargo run --bin coordinator -- ca server-cert --hostname localhost
+# 1. Run: cargo run --bin kuiper-forge -- ca init --org "Test Org"
+# 2. Run: cargo run --bin kuiper-forge -- ca server-cert --hostname localhost
 #
 # Then start the coordinator:
-#   cargo run --bin coordinator -- -c examples/coordinator-config.toml serve
+#   cargo run --bin kuiper-forge -- -c examples/coordinator-config.toml serve
 
 [github]
 # For testing without GitHub, use placeholder values
@@ -19,13 +19,13 @@ listen_addr = "0.0.0.0:9443"
 
 [tls]
 # UPDATE THESE PATHS for your system!
-# macOS: ~/Library/Application Support/ci-runner-coordinator/
-# Linux: ~/.local/share/ci-runner-coordinator/
+# macOS: ~/Library/Application Support/kuiper-forge/
+# Linux: ~/.local/share/kuiper-forge/
 #
 # Example for macOS (replace YOUR_USERNAME):
-# ca_cert = "/Users/YOUR_USERNAME/Library/Application Support/ci-runner-coordinator/ca.crt"
+# ca_cert = "/Users/YOUR_USERNAME/Library/Application Support/kuiper-forge/ca.crt"
 #
-# Or use the output from: cargo run --bin coordinator -- init-config
+# Or use the output from: cargo run --bin kuiper-forge -- init-config
 ca_cert = "UPDATE_THIS_PATH/ca.crt"
 ca_key = "UPDATE_THIS_PATH/ca.key"
 server_cert = "UPDATE_THIS_PATH/server.crt"

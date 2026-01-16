@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "coordinator",
+    "kuiper-forge",
     "proxmox-api",
     "agent-proto",
     "agent-lib",

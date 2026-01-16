@@ -213,22 +213,22 @@ impl Config {
     }
 
     /// Get the default config file path
-    /// - macOS: ~/Library/Application Support/ci-runner-coordinator/config.toml
-    /// - Linux: ~/.config/ci-runner-coordinator/config.toml
+    /// - macOS: ~/Library/Application Support/kuiper-forge/config.toml
+    /// - Linux: ~/.config/kuiper-forge/config.toml
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("ci-runner-coordinator")
+            .join("kuiper-forge")
             .join("config.toml")
     }
 
     /// Get the default data directory (for certs, auth store, etc.)
-    /// - macOS: ~/Library/Application Support/ci-runner-coordinator/
-    /// - Linux: ~/.local/share/ci-runner-coordinator/
+    /// - macOS: ~/Library/Application Support/kuiper-forge/
+    /// - Linux: ~/.local/share/kuiper-forge/
     pub fn default_data_dir() -> PathBuf {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("ci-runner-coordinator")
+            .join("kuiper-forge")
     }
 }
 

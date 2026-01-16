@@ -1,4 +1,4 @@
-# CI Runner Coordinator Plan
+# KuiperForge Coordinator Plan
 
 The coordinator is the main daemon that manages ephemeral GitHub Actions runners across multiple VM providers (Tart for macOS, Proxmox for Windows/Linux).
 
@@ -8,7 +8,7 @@ Following the [Tartelet](https://github.com/shapehq/tartelet) pattern - **no web
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         ci-runner-coordinator                               │
+│                            KuiperForge                                      │
 │                        (centralized daemon)                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
@@ -72,7 +72,7 @@ Following the [Tartelet](https://github.com/shapehq/tartelet) pattern - **no web
 ## Crate Structure
 
 ```
-ci-runner-coordinator/
+kuiper-forge/
 ├── Cargo.toml                 # Workspace root
 │
 ├── coordinator/               # Centralized daemon (runs on server)
@@ -1300,22 +1300,22 @@ Registration tokens are the initial bootstrap mechanism. Security properties:
 ### Coordinator Metrics (Prometheus)
 ```
 # VM lifecycle
-ci_runner_vm_created_total{provider="tart", host="mac-mini-1"}
-ci_runner_vm_destroyed_total{provider="tart", host="mac-mini-1"}
-ci_runner_vm_creation_duration_seconds{provider="tart"}
+kf_vm_created_total{provider="tart", host="mac-mini-1"}
+kf_vm_destroyed_total{provider="tart", host="mac-mini-1"}
+kf_vm_creation_duration_seconds{provider="tart"}
 
 # Job execution
-ci_runner_jobs_completed_total{provider="tart", status="success"}
-ci_runner_jobs_completed_total{provider="tart", status="failure"}
-ci_runner_job_duration_seconds{provider="tart"}
+kf_jobs_completed_total{provider="tart", status="success"}
+kf_jobs_completed_total{provider="tart", status="failure"}
+kf_job_duration_seconds{provider="tart"}
 
 # Fleet status
-ci_runner_active_vms{provider="tart", host="mac-mini-1"}
-ci_runner_fleet_tasks{provider="tart", status="running"}
+kf_active_vms{provider="tart", host="mac-mini-1"}
+kf_fleet_tasks{provider="tart", status="running"}
 
 # Agent health
-ci_runner_agent_status{host="mac-mini-1", status="online"}
-ci_runner_agent_capacity{host="mac-mini-1"}
+kf_agent_status{host="mac-mini-1", status="online"}
+kf_agent_capacity{host="mac-mini-1"}
 ```
 
 ### Agent Metrics
