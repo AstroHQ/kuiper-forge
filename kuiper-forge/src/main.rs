@@ -290,7 +290,6 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     let server_config = ServerConfig {
         listen_addr,
         tls: config.tls,
-        require_mtls: false, // MVP: don't require mTLS for now
     };
 
     // Spawn stale agent cleanup task

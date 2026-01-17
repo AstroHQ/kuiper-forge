@@ -1,8 +1,13 @@
-//! gRPC server implementation with mTLS support.
+//! gRPC server implementation with optional mTLS support.
 //!
 //! Provides:
-//! - RegistrationService: Token-based agent registration (server TLS only)
-//! - AgentService: Bidirectional streaming for agent communication (mTLS)
+//! - RegistrationService: Token-based agent registration (no client cert required)
+//! - AgentService: Bidirectional streaming for agent communication (client cert required)
+//!
+//! Security model:
+//! - Single port with optional client certificate verification
+//! - Registration service works without client cert (uses registration token)
+//! - Agent service requires client cert - identity extracted from certificate CN
 
 
 use kuiper_agent_proto::{
@@ -104,26 +109,44 @@ impl AgentServiceImpl {
         }
     }
 
-    /// Extract agent ID from mTLS client certificate.
-    /// Used in production when proper mTLS is configured.
-    #[allow(dead_code)] // Used with full mTLS implementation
-    fn extract_agent_id(&self, request: &Request<Streaming<AgentMessage>>) -> Result<String, Status> {
-        // In a full mTLS setup, we'd extract the CN from the client certificate
-        // For now, we'll use a header or metadata approach that the TLS layer can set
+    /// Extract agent ID from mTLS client certificate CN.
+    ///
+    /// When optional mTLS is enabled, tonic populates TlsConnectInfo with peer certificates.
+    /// We extract the Common Name (CN) from the client certificate, which contains
+    /// the agent_id that was set during registration.
+    fn extract_agent_id_from_cert<T>(&self, request: &Request<T>) -> Result<String, Status> {
+        use tonic::transport::server::TlsConnectInfo;
 
-        // Try to get agent_id from request metadata (set by TLS layer or interceptor)
-        if let Some(agent_id) = request.metadata().get("x-agent-id") {
-            return agent_id
-                .to_str()
-                .map(String::from)
-                .map_err(|_| Status::unauthenticated("Invalid agent ID header"));
-        }
+        // Get TLS connection info from request extensions
+        let tls_info = request
+            .extensions()
+            .get::<TlsConnectInfo<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>()
+            .ok_or_else(|| {
+                Status::unauthenticated("No TLS connection info - TLS required")
+            })?;
 
-        // In production with proper mTLS, this would come from the TLS peer certificate
-        // For now, agents must send their ID in the first message
-        Err(Status::unauthenticated(
-            "Agent identity not found in request",
-        ))
+        // Get peer certificates (None if client didn't present a cert)
+        let certs = tls_info
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("No client certificate presented - mTLS required for agent service"))?;
+
+        let cert_der = certs
+            .first()
+            .ok_or_else(|| Status::unauthenticated("Empty client certificate chain"))?;
+
+        // Parse the certificate to extract CN
+        let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())
+            .map_err(|e| Status::unauthenticated(format!("Invalid client certificate: {}", e)))?;
+
+        // Extract CN from subject
+        let cn = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok())
+            .ok_or_else(|| Status::unauthenticated("No CN in client certificate"))?;
+
+        Ok(cn.to_string())
     }
 }
 
@@ -136,31 +159,33 @@ impl AgentService for AgentServiceImpl {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::AgentStreamStream>, Status> {
-        // Note: In a full implementation, agent_id would come from mTLS cert
-        // For now, we'll get it from the first status message
+        // Extract agent_id from mTLS client certificate - this is the authoritative identity
+        let agent_id = self.extract_agent_id_from_cert(&request)?;
+
+        // Verify agent is registered and not revoked
+        if !self.auth_manager.is_agent_valid(&agent_id).await {
+            warn!(
+                agent_id = %agent_id,
+                "Agent certificate valid but agent revoked or expired in registry"
+            );
+            return Err(Status::unauthenticated(
+                "Agent not registered or has been revoked",
+            ));
+        }
 
         let mut inbound = request.into_inner();
 
-        // Wait for first message to get agent identity
+        // Wait for first message to get agent metadata (hostname, labels, etc.)
+        // Note: agent_id from the message is ignored - we use the cert CN
         let first_msg = inbound
             .next()
             .await
             .ok_or_else(|| Status::invalid_argument("No initial message received"))?
             .map_err(|e| Status::internal(format!("Stream error: {}", e)))?;
 
-        // The first message should be a status message containing agent identity
-        // When mTLS is enabled, agent_id would come from certificate CN
-        // When mTLS is disabled (MVP), agent must self-identify in the status message
-
-        let (agent_id, hostname, agent_type, labels, max_vms, vm_names) = match &first_msg.payload {
+        // Extract metadata from status message (identity comes from cert, not message)
+        let (hostname, agent_type, labels, max_vms, vm_names) = match &first_msg.payload {
             Some(AgentPayload::Status(status)) => {
-                // Extract identity from status message
-                if status.agent_id.is_empty() {
-                    return Err(Status::invalid_argument(
-                        "First status message must contain agent_id",
-                    ));
-                }
-
                 let agent_type = match status.agent_type.to_lowercase().as_str() {
                     "tart" => AgentType::Tart,
                     "proxmox" => AgentType::Proxmox,
@@ -175,7 +200,6 @@ impl AgentService for AgentServiceImpl {
                 let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
 
                 (
-                    status.agent_id.clone(),
                     status.hostname.clone(),
                     agent_type,
                     status.labels.clone(),
@@ -189,17 +213,6 @@ impl AgentService for AgentServiceImpl {
                 ));
             }
         };
-
-        // Verify agent is registered and valid
-        if !self.auth_manager.is_agent_valid(&agent_id).await {
-            warn!(
-                agent_id = %agent_id,
-                "Agent not registered or certificate revoked/expired"
-            );
-            return Err(Status::unauthenticated(
-                "Agent not registered or certificate revoked/expired",
-            ));
-        }
 
         info!(
             agent_id = %agent_id,
@@ -360,12 +373,16 @@ pub struct ServerConfig {
 
     /// TLS configuration paths
     pub tls: TlsConfig,
-
-    /// Whether to require mTLS for agent service (true in production)
-    pub require_mtls: bool,
 }
 
-/// Start the gRPC server
+/// Start the gRPC server with optional mTLS.
+///
+/// Both registration and agent services run on the same port:
+/// - Registration service: No client cert required (uses registration token)
+/// - Agent service: Client cert required (identity extracted from cert CN)
+///
+/// Uses `client_auth_optional(true)` so client certs are verified if presented
+/// but not required at the TLS layer. The agent service enforces the requirement.
 pub async fn run_server(
     config: ServerConfig,
     auth_manager: Arc<AuthManager>,
@@ -382,22 +399,22 @@ pub async fn run_server(
 
     let identity = Identity::from_pem(&server_cert, &server_key);
 
-    // Configure TLS
-    let tls_config = if config.require_mtls {
-        // mTLS: require client certificate
-        ServerTlsConfig::new()
-            .identity(identity)
-            .client_ca_root(Certificate::from_pem(&ca_cert))
-    } else {
-        // Server TLS only (for registration service)
-        ServerTlsConfig::new().identity(identity)
-    };
+    // Configure TLS with optional client auth
+    // - client_ca_root: CA to verify client certs (if presented)
+    // - client_auth_optional: don't reject connections without client certs
+    let tls_config = ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(Certificate::from_pem(&ca_cert))
+        .client_auth_optional(true);
 
     // Create services
     let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
     let agent_service = AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier);
 
-    info!(addr = %config.listen_addr, "Starting gRPC server");
+    info!(
+        addr = %config.listen_addr,
+        "Starting gRPC server (optional mTLS - agent service requires client cert)"
+    );
 
     Server::builder()
         .tls_config(tls_config)
@@ -407,57 +424,6 @@ pub async fn run_server(
         .serve(config.listen_addr)
         .await
         .context("gRPC server error")?;
-
-    Ok(())
-}
-
-/// Run server with separate TLS for registration (no mTLS) and agent service (mTLS)
-/// This is the production setup where registration doesn't require client certs
-/// but the agent stream does.
-#[allow(dead_code)] // Production deployment option
-pub async fn run_dual_server(
-    registration_addr: SocketAddr,
-    agent_addr: SocketAddr,
-    tls_config: TlsConfig,
-    auth_manager: Arc<AuthManager>,
-    agent_registry: Arc<AgentRegistry>,
-) -> Result<()> {
-    // Load TLS credentials
-    let server_cert = std::fs::read_to_string(&tls_config.server_cert)?;
-    let server_key = std::fs::read_to_string(&tls_config.server_key)?;
-    let ca_cert = std::fs::read_to_string(&tls_config.ca_cert)?;
-
-    let identity = Identity::from_pem(&server_cert, &server_key);
-
-    // Registration server (server TLS only, no client cert required)
-    let reg_tls = ServerTlsConfig::new().identity(identity.clone());
-    let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
-
-    let reg_server = Server::builder()
-        .tls_config(reg_tls)?
-        .add_service(RegistrationServiceServer::new(registration_service))
-        .serve(registration_addr);
-
-    // Agent server (mTLS, requires client cert)
-    let agent_tls = ServerTlsConfig::new()
-        .identity(identity)
-        .client_ca_root(Certificate::from_pem(&ca_cert));
-
-    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry, None);
-
-    let agent_server = Server::builder()
-        .tls_config(agent_tls)?
-        .add_service(AgentServiceServer::new(agent_service))
-        .serve(agent_addr);
-
-    info!(
-        registration = %registration_addr,
-        agent = %agent_addr,
-        "Starting dual gRPC servers"
-    );
-
-    // Run both servers
-    tokio::try_join!(reg_server, agent_server)?;
 
     Ok(())
 }
