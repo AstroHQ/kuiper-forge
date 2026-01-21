@@ -1,8 +1,8 @@
 //! Fleet manager for maintaining runner pools.
 //!
 //! The fleet manager is responsible for:
-//! - Maintaining a target number of runners per configuration
-//! - Requesting new runners from agents when below target
+//! - Maintaining a target number of runners per configuration (fixed capacity mode)
+//! - Creating runners on-demand from webhook events (webhook mode)
 //! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
 //! - Recovering runners when agents reconnect after coordinator restart
 
@@ -19,9 +19,10 @@ use kuiper_agent_proto::{
 };
 
 use crate::agent_registry::AgentRegistry;
-use crate::config::{Config, ProvisioningMode, RunnerConfig};
+use crate::config::{Config, ProvisioningMode, RunnerConfig, RunnerScope};
 use crate::github::RunnerTokenProvider;
 use crate::runner_state::RunnerStateStore;
+use crate::webhook::{WebhookNotifier, WebhookRunnerRequest};
 
 /// Information about an agent's VMs for recovery.
 #[derive(Debug, Clone)]
@@ -102,22 +103,33 @@ pub struct FleetManager {
     recovery_rx: mpsc::Receiver<AgentRecoveryInfo>,
     /// Channel for receiving runner lifecycle events
     runner_event_rx: mpsc::Receiver<AgentRunnerEvent>,
+    /// Channel for receiving webhook-triggered runner requests (webhook mode only)
+    webhook_rx: Option<mpsc::Receiver<WebhookRunnerRequest>>,
 }
 
 impl FleetManager {
-    /// Create a new fleet manager and notification handle.
+    /// Create a new fleet manager and notification handles.
     ///
-    /// Returns the fleet manager and a notifier that can be used to trigger
-    /// immediate reconciliation (e.g., when an agent connects).
+    /// Returns the fleet manager, a notifier for triggering reconciliation,
+    /// and optionally a webhook notifier (only in webhook provisioning mode).
     pub fn new(
         config: Config,
         token_provider: Arc<dyn RunnerTokenProvider>,
         agent_registry: Arc<AgentRegistry>,
         runner_state: Arc<RunnerStateStore>,
-    ) -> (Self, FleetNotifier) {
+    ) -> (Self, FleetNotifier, Option<WebhookNotifier>) {
         let (notify_tx, notify_rx) = mpsc::channel(16);
         let (recovery_tx, recovery_rx) = mpsc::channel(16);
         let (runner_event_tx, runner_event_rx) = mpsc::channel(32);
+
+        // Create webhook channel only in webhook mode
+        let (webhook_rx, webhook_notifier) = match config.provisioning.mode {
+            ProvisioningMode::Webhook => {
+                let (tx, rx) = mpsc::channel(32);
+                (Some(rx), Some(WebhookNotifier::new(tx)))
+            }
+            ProvisioningMode::FixedCapacity => (None, None),
+        };
 
         let manager = Self {
             config,
@@ -128,6 +140,7 @@ impl FleetManager {
             notify_rx,
             recovery_rx,
             runner_event_rx,
+            webhook_rx,
         };
 
         let notifier = FleetNotifier {
@@ -136,7 +149,7 @@ impl FleetManager {
             runner_event_tx,
         };
 
-        (manager, notifier)
+        (manager, notifier, webhook_notifier)
     }
 
     /// Start the fleet manager loop.
@@ -237,10 +250,8 @@ impl FleetManager {
             }
         }
 
-        // In webhook mode, we don't run periodic reconciliation.
-        // We only handle recovery and runner events.
-        // The actual webhook HTTP server will be implemented separately and will
-        // call into the fleet manager to create runners on-demand.
+        info!("Webhook provisioning mode active - waiting for webhook events");
+
         loop {
             tokio::select! {
                 Some(()) = self.notify_rx.recv() => {
@@ -258,8 +269,210 @@ impl FleetManager {
                 Some(event) = self.runner_event_rx.recv() => {
                     self.handle_runner_event(event).await;
                 }
+                Some(request) = async {
+                    match &mut self.webhook_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<WebhookRunnerRequest>>().await,
+                    }
+                } => {
+                    self.handle_webhook_request(request).await;
+                }
             }
         }
+    }
+
+    /// Handle a webhook-triggered runner creation request.
+    async fn handle_webhook_request(&self, request: WebhookRunnerRequest) {
+        info!(
+            "Processing webhook runner request for job {} with labels {:?}",
+            request.job_id, request.job_labels
+        );
+
+        if let Err(e) = self
+            .create_runner_on_demand(
+                &request.agent_labels,
+                &request.runner_scope,
+                request.runner_group.as_deref(),
+                request.job_id,
+            )
+            .await
+        {
+            error!(
+                "Failed to create runner for webhook job {}: {}",
+                request.job_id, e
+            );
+        }
+    }
+
+    /// Create a single runner on-demand (for webhook mode).
+    ///
+    /// Unlike fixed-capacity reconciliation, this doesn't track pending counts
+    /// since there's no target to maintain.
+    async fn create_runner_on_demand(
+        &self,
+        labels: &[String],
+        runner_scope: &RunnerScope,
+        _runner_group: Option<&str>,
+        job_id: u64,
+    ) -> anyhow::Result<()> {
+        // Find an available agent with matching labels
+        let agent_id = self
+            .agent_registry
+            .find_available_agent(labels)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No available agent for labels {:?}", labels))?;
+
+        info!(
+            "Found available agent {} for job {} with labels {:?}",
+            agent_id, job_id, labels
+        );
+
+        // Reserve a slot on the agent
+        if !self.agent_registry.reserve_slot(&agent_id).await {
+            anyhow::bail!(
+                "Failed to reserve slot on agent {} (might be at capacity)",
+                agent_id
+            );
+        }
+
+        // Get registration token from provider (GitHub API or mock)
+        let token = match self.token_provider.get_registration_token(runner_scope).await {
+            Ok(t) => t,
+            Err(e) => {
+                // Release the reserved slot since we won't use it
+                self.agent_registry.release_slot(&agent_id).await;
+                return Err(e);
+            }
+        };
+
+        // Generate runner name and command ID
+        let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
+        let command_id = Uuid::new_v4().to_string();
+
+        // Save runner state for crash recovery
+        self.runner_state
+            .add_runner(
+                runner_name.clone(),
+                agent_id.clone(),
+                runner_name.clone(), // vm_name is same as runner_name
+                runner_scope.clone(),
+            )
+            .await;
+
+        // Build CreateRunner command
+        let create_cmd = CreateRunnerCommand {
+            command_id: command_id.clone(),
+            vm_name: runner_name.clone(),
+            registration_token: token,
+            labels: labels.to_vec(),
+            runner_scope_url: runner_scope.to_url(),
+        };
+
+        let coordinator_msg = CoordinatorMessage {
+            payload: Some(CoordinatorPayload::CreateRunner(create_cmd)),
+        };
+
+        info!(
+            "Sending CreateRunner to agent {} for {} (job {})",
+            agent_id, runner_name, job_id
+        );
+
+        // Clone for async task
+        let agent_registry = self.agent_registry.clone();
+        let token_provider = self.token_provider.clone();
+        let runner_scope = runner_scope.clone();
+        let runner_name_clone = runner_name.clone();
+        let runner_state = self.runner_state.clone();
+        let agent_id_clone = agent_id.clone();
+
+        // Spawn task to send command and handle response
+        tokio::spawn(async move {
+            let timeout = Duration::from_secs(30);
+
+            match agent_registry
+                .send_command(&agent_id_clone, coordinator_msg, &command_id, timeout)
+                .await
+            {
+                Ok(response) => match response.payload {
+                    Some(AgentPayload::Ack(ack)) => {
+                        if ack.accepted {
+                            info!(
+                                "CreateRunner accepted by agent {} for {} (webhook)",
+                                agent_id_clone, runner_name_clone
+                            );
+                        } else {
+                            warn!(
+                                "CreateRunner rejected by agent {} for {}: {}",
+                                agent_id_clone, runner_name_clone, ack.error
+                            );
+                            agent_registry.release_slot(&agent_id_clone).await;
+                            if let Err(e) = token_provider
+                                .remove_runner(&runner_scope, &runner_name_clone)
+                                .await
+                            {
+                                warn!(
+                                    "Could not remove runner '{}' from GitHub: {}",
+                                    runner_name_clone, e
+                                );
+                            }
+                            runner_state.remove_runner(&runner_name_clone).await;
+                        }
+                    }
+                    Some(AgentPayload::Result(result)) => {
+                        // Legacy agents may respond with a full lifecycle result
+                        agent_registry.release_slot(&agent_id_clone).await;
+                        if result.success {
+                            info!("Runner {} completed successfully (webhook)", runner_name_clone);
+                        } else {
+                            warn!("Runner {} failed: {}", runner_name_clone, result.error);
+                        }
+                        if let Err(e) = token_provider
+                            .remove_runner(&runner_scope, &runner_name_clone)
+                            .await
+                        {
+                            warn!(
+                                "Could not remove runner '{}' from GitHub: {}",
+                                runner_name_clone, e
+                            );
+                        }
+                        runner_state.remove_runner(&runner_name_clone).await;
+                    }
+                    other => {
+                        warn!(
+                            "Unexpected CreateRunner response from agent {} for {}: {:?}",
+                            agent_id_clone, runner_name_clone, other
+                        );
+                        agent_registry.release_slot(&agent_id_clone).await;
+                        if let Err(e) = token_provider
+                            .remove_runner(&runner_scope, &runner_name_clone)
+                            .await
+                        {
+                            warn!(
+                                "Could not remove runner '{}' from GitHub: {}",
+                                runner_name_clone, e
+                            );
+                        }
+                        runner_state.remove_runner(&runner_name_clone).await;
+                    }
+                },
+                Err(e) => {
+                    error!("CreateRunner command failed (webhook): {}", e);
+                    agent_registry.release_slot(&agent_id_clone).await;
+                    if let Err(e) = token_provider
+                        .remove_runner(&runner_scope, &runner_name_clone)
+                        .await
+                    {
+                        warn!(
+                            "Could not remove runner '{}' from GitHub: {}",
+                            runner_name_clone, e
+                        );
+                    }
+                    runner_state.remove_runner(&runner_name_clone).await;
+                }
+            }
+        });
+
+        Ok(())
     }
 
     /// Handle recovery when an agent reconnects with existing VMs.

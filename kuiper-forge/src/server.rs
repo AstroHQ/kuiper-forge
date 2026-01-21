@@ -1,36 +1,46 @@
-//! gRPC server implementation with optional mTLS support.
+//! gRPC server implementation with optional mTLS support and HTTP webhook endpoint.
 //!
 //! Provides:
 //! - RegistrationService: Token-based agent registration (no client cert required)
 //! - AgentService: Bidirectional streaming for agent communication (client cert required)
+//! - Webhook endpoint: HTTP endpoint for GitHub webhooks (webhook mode only)
 //!
 //! Security model:
 //! - Single port with optional client certificate verification
 //! - Registration service works without client cert (uses registration token)
 //! - Agent service requires client cert - identity extracted from certificate CN
+//! - Webhook endpoint validates GitHub HMAC-SHA256 signatures
 
-
-use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentService, AgentServiceServer,
-    CoordinatorMessage, CoordinatorPayload, Ping, RegisterRequest, RegisterResponse,
-    RegistrationService, RegistrationServiceServer,
-};
 use anyhow::{Context, Result};
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HttpBuilder;
+use kuiper_agent_proto::{
+    AgentMessage, AgentPayload, AgentService, AgentServiceServer, CoordinatorMessage,
+    CoordinatorPayload, Ping, RegisterRequest, RegisterResponse, RegistrationService,
+    RegistrationServiceServer,
+};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_rustls::TlsAcceptor;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
+use tonic::service::Routes;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
+use tower::Service;
 use tracing::{debug, error, info, warn};
 
 use crate::agent_registry::{AgentRegistry, AgentType};
 use crate::auth::AuthManager;
-use crate::config::TlsConfig;
+use crate::config::{TlsConfig, WebhookConfig};
 use crate::fleet::FleetNotifier;
 use crate::runner_state::RunnerStateStore;
+use crate::webhook::{self, WebhookNotifier, WebhookState};
 
 /// Registration service implementation
 pub struct RegistrationServiceImpl {
@@ -449,7 +459,195 @@ pub struct ServerConfig {
 ///
 /// Uses `client_auth_optional(true)` so client certs are verified if presented
 /// but not required at the TLS layer. The agent service enforces the requirement.
+///
+/// If `webhook_config` is provided, also serves HTTP webhook endpoint on the same port.
+/// Traffic is routed based on content-type: `application/grpc` goes to gRPC services,
+/// everything else goes to the HTTP webhook handler.
 pub async fn run_server(
+    config: ServerConfig,
+    auth_manager: Arc<AuthManager>,
+    agent_registry: Arc<AgentRegistry>,
+    fleet_notifier: Option<FleetNotifier>,
+    runner_state: Option<Arc<RunnerStateStore>>,
+    webhook_config: Option<(WebhookConfig, WebhookNotifier)>,
+) -> Result<()> {
+    // If no webhook config, use the simple gRPC-only path
+    if webhook_config.is_none() {
+        return run_grpc_only_server(
+            config,
+            auth_manager,
+            agent_registry,
+            fleet_notifier,
+            runner_state,
+        )
+        .await;
+    }
+
+    let (wh_config, wh_notifier) = webhook_config.unwrap();
+
+    // Load TLS credentials
+    let server_cert = std::fs::read_to_string(&config.tls.server_cert)
+        .with_context(|| format!("Failed to read server cert: {:?}", config.tls.server_cert))?;
+    let server_key = std::fs::read_to_string(&config.tls.server_key)
+        .with_context(|| format!("Failed to read server key: {:?}", config.tls.server_key))?;
+    let ca_cert = std::fs::read_to_string(&config.tls.ca_cert)
+        .with_context(|| format!("Failed to read CA cert: {:?}", config.tls.ca_cert))?;
+
+    // Build TLS config using rustls
+    let certs = rustls_pemfile::certs(&mut server_cert.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("Failed to parse server certificate")?;
+    let key = rustls_pemfile::private_key(&mut server_key.as_bytes())
+        .context("Failed to parse server key")?
+        .context("No private key found")?;
+    let ca_certs = rustls_pemfile::certs(&mut ca_cert.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("Failed to parse CA certificate")?;
+
+    let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+    for cert in ca_certs {
+        root_store
+            .add(cert)
+            .context("Failed to add CA cert to root store")?;
+    }
+
+    // Configure TLS with optional client auth
+    let client_verifier =
+        tokio_rustls::rustls::server::WebPkiClientVerifier::builder(root_store.into())
+            .allow_unauthenticated()
+            .build()
+            .context("Failed to create client verifier")?;
+
+    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(certs, key)
+        .context("Failed to configure TLS")?;
+
+    let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+    // Create gRPC services
+    let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
+    let agent_service =
+        AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
+
+    // Build gRPC service using tonic Routes
+    let grpc_service = Routes::new(RegistrationServiceServer::new(registration_service))
+        .add_service(AgentServiceServer::new(agent_service));
+
+    // Build webhook HTTP router
+    let webhook_state = Arc::new(WebhookState {
+        config: wh_config.clone(),
+        notifier: wh_notifier,
+    });
+    let http_router = webhook::webhook_router(webhook_state);
+
+    info!(
+        addr = %config.listen_addr,
+        webhook_path = %wh_config.path,
+        "Starting server with gRPC + HTTP webhook endpoint (optional mTLS)"
+    );
+
+    // Bind TCP listener
+    let listener = TcpListener::bind(config.listen_addr)
+        .await
+        .context("Failed to bind to address")?;
+
+    // Accept connections and route them
+    loop {
+        let (tcp_stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
+
+        let tls_acceptor = tls_acceptor.clone();
+        let grpc_service = grpc_service.clone();
+        let http_router = http_router.clone();
+
+        tokio::spawn(async move {
+            // TLS handshake
+            let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    debug!("TLS handshake failed from {}: {}", remote_addr, e);
+                    return;
+                }
+            };
+
+            // Wrap in hyper IO adapter
+            let io = TokioIo::new(tls_stream);
+
+            // Create a combined service that routes based on content-type
+            // Both branches return the same UnsyncBoxBody type
+            type UnsyncBody =
+                http_body_util::combinators::UnsyncBoxBody<hyper::body::Bytes, std::io::Error>;
+
+            let service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                let mut grpc = grpc_service.clone();
+                let http = http_router.clone();
+
+                async move {
+                    // Check if this is a gRPC request
+                    let is_grpc = req
+                        .headers()
+                        .get("content-type")
+                        .map(|ct| ct.as_bytes().starts_with(b"application/grpc"))
+                        .unwrap_or(false);
+
+                    if is_grpc {
+                        // Route to gRPC using tonic's Routes service
+                        match grpc.call(req).await {
+                            Ok(resp) => {
+                                let (parts, body) = resp.into_parts();
+                                let body: UnsyncBody = body
+                                    .map_err(|e| {
+                                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                                    })
+                                    .boxed_unsync();
+                                Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
+                            }
+                            Err(e) => Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                e.to_string(),
+                            )),
+                        }
+                    } else {
+                        // Route to HTTP (webhook) using axum
+                        let (parts, body) = req.into_parts();
+                        let body = axum::body::Body::new(body);
+                        let req = hyper::Request::from_parts(parts, body);
+
+                        match http.clone().call(req).await {
+                            Ok(resp) => {
+                                let (parts, body) = resp.into_parts();
+                                let body: UnsyncBody = body
+                                    .map_err(|e| {
+                                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                                    })
+                                    .boxed_unsync();
+                                Ok(hyper::Response::from_parts(parts, body))
+                            }
+                            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                        }
+                    }
+                }
+            });
+
+            // Serve the connection with HTTP/2 support (required for gRPC)
+            let builder = HttpBuilder::new(TokioExecutor::new());
+            if let Err(e) = builder.serve_connection(io, service).await {
+                debug!("Connection error from {}: {}", remote_addr, e);
+            }
+        });
+    }
+}
+
+/// Run gRPC-only server (no webhook endpoint).
+///
+/// This is used when webhook mode is not enabled.
+async fn run_grpc_only_server(
     config: ServerConfig,
     auth_manager: Arc<AuthManager>,
     agent_registry: Arc<AgentRegistry>,

@@ -63,18 +63,6 @@ pub enum ProvisioningMode {
     Webhook,
 }
 
-impl ProvisioningMode {
-    /// Returns true if this is the fixed capacity mode.
-    pub fn is_fixed_capacity(&self) -> bool {
-        matches!(self, ProvisioningMode::FixedCapacity)
-    }
-
-    /// Returns true if this is the webhook-driven mode.
-    pub fn is_webhook(&self) -> bool {
-        matches!(self, ProvisioningMode::Webhook)
-    }
-}
-
 /// Provisioning configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProvisioningConfig {
@@ -629,8 +617,6 @@ server_key = "/etc/ci-runner/server.key"
 
         let config = parse_config(config_str);
         assert_eq!(config.provisioning.mode, ProvisioningMode::FixedCapacity);
-        assert!(config.provisioning.mode.is_fixed_capacity());
-        assert!(!config.provisioning.mode.is_webhook());
     }
 
     #[test]
@@ -684,8 +670,6 @@ name = "my-org"
 
         let config = parse_config(config_str);
         assert_eq!(config.provisioning.mode, ProvisioningMode::Webhook);
-        assert!(config.provisioning.mode.is_webhook());
-        assert!(!config.provisioning.mode.is_fixed_capacity());
 
         let webhook = config.provisioning.webhook.unwrap();
         assert_eq!(webhook.path, "/github/webhook");

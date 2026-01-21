@@ -10,6 +10,7 @@ mod fleet;
 mod github;
 mod runner_state;
 mod server;
+mod webhook;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Duration;
@@ -23,7 +24,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 use crate::agent_registry::AgentRegistry;
 use crate::auth::{export_ca_cert, generate_server_cert, init_ca, AuthManager, AuthStore};
-use crate::config::Config;
+use crate::config::{Config, ProvisioningMode};
 use crate::server::{run_server, ServerConfig};
 
 /// CI Runner Coordinator - Manages ephemeral GitHub Actions runners
@@ -246,16 +247,17 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
 
     // Initialize token provider and fleet manager
     // In dry-run mode, use mock tokens instead of GitHub API
-    let (fleet_manager, fleet_notifier) = if dry_run {
+    let (fleet_manager, fleet_notifier, webhook_notifier) = if dry_run {
         warn!("DRY-RUN MODE: Using mock token provider (fake GitHub registration tokens)");
-        let token_provider: Arc<dyn github::RunnerTokenProvider> = Arc::new(github::MockTokenProvider);
-        let (fm, notifier) = fleet::FleetManager::new(
+        let token_provider: Arc<dyn github::RunnerTokenProvider> =
+            Arc::new(github::MockTokenProvider);
+        let (fm, notifier, wh_notifier) = fleet::FleetManager::new(
             config.clone(),
             token_provider,
             agent_registry.clone(),
             runner_state.clone(),
         );
-        (Some(fm), Some(notifier))
+        (Some(fm), Some(notifier), wh_notifier)
     } else {
         let github_client = github::GitHubClient::new(
             config.github.app_id.clone(),
@@ -270,13 +272,13 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
 
         let token_provider: Arc<dyn github::RunnerTokenProvider> = Arc::new(github_client);
 
-        let (fm, notifier) = fleet::FleetManager::new(
+        let (fm, notifier, wh_notifier) = fleet::FleetManager::new(
             config.clone(),
             token_provider,
             agent_registry.clone(),
             runner_state.clone(),
         );
-        (Some(fm), Some(notifier))
+        (Some(fm), Some(notifier), wh_notifier)
     };
 
     info!("CI Runner Coordinator starting...");
@@ -286,10 +288,19 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     info!("Listening on: {}", listen_addr);
     info!("Managing {} runner configurations", config.runners.len());
 
+    // Build webhook config if in webhook mode
+    let webhook_config = match (&config.provisioning.mode, &config.provisioning.webhook, webhook_notifier) {
+        (ProvisioningMode::Webhook, Some(wh_config), Some(wh_notifier)) => {
+            info!("Webhook mode enabled - webhook endpoint at {}", wh_config.path);
+            Some((wh_config.clone(), wh_notifier))
+        }
+        _ => None,
+    };
+
     // Run the gRPC server
     let server_config = ServerConfig {
         listen_addr,
-        tls: config.tls,
+        tls: config.tls.clone(),
     };
 
     // Spawn stale agent cleanup task
@@ -338,7 +349,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Run fleet manager (if enabled) and server concurrently
     if let Some(fm) = fleet_manager {
         tokio::select! {
-            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier, Some(runner_state)) => {
+            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier, Some(runner_state), webhook_config) => {
                 result
             }
             _ = fm.run() => {
@@ -348,7 +359,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         }
     } else {
         // No fleet manager, just run the server
-        run_server(server_config, auth_manager, agent_registry, None, None).await
+        run_server(server_config, auth_manager, agent_registry, None, None, None).await
     }
 }
 

@@ -1,0 +1,406 @@
+//! Webhook handler for dynamic runner provisioning.
+//!
+//! Handles GitHub `workflow_job` webhook events to create runners on-demand.
+//! This module provides:
+//! - GitHub webhook payload parsing
+//! - HMAC-SHA256 signature validation
+//! - Label matching against configured mappings
+//! - Axum HTTP handlers for the webhook endpoint
+
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::post,
+    Router,
+};
+use hmac::{Hmac, Mac};
+use serde::Deserialize;
+use sha2::Sha256;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
+
+use crate::config::{LabelMapping, RunnerScope, WebhookConfig};
+
+/// GitHub webhook event types we care about
+const WORKFLOW_JOB_EVENT: &str = "workflow_job";
+
+/// GitHub workflow_job webhook payload (partial - only fields we need)
+#[derive(Debug, Deserialize)]
+pub struct WorkflowJobEvent {
+    pub action: String,
+    pub workflow_job: WorkflowJob,
+    #[allow(dead_code)]
+    pub repository: Repository,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub organization: Option<Organization>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkflowJob {
+    pub id: u64,
+    #[allow(dead_code)]
+    pub name: String,
+    pub labels: Vec<String>,
+    #[allow(dead_code)]
+    pub runner_id: Option<u64>,
+    #[allow(dead_code)]
+    pub runner_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Repository {
+    #[allow(dead_code)]
+    pub full_name: String,
+    #[allow(dead_code)]
+    pub owner: RepositoryOwner,
+    #[allow(dead_code)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepositoryOwner {
+    #[allow(dead_code)]
+    pub login: String,
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    pub owner_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Organization {
+    #[allow(dead_code)]
+    pub login: String,
+}
+
+/// Request to create a runner, sent from webhook handler to fleet manager
+#[derive(Debug, Clone)]
+pub struct WebhookRunnerRequest {
+    /// Job labels from the webhook (the labels the job requested)
+    pub job_labels: Vec<String>,
+    /// Agent labels to match (from the LabelMapping)
+    pub agent_labels: Vec<String>,
+    /// Runner scope determined by label matching
+    pub runner_scope: RunnerScope,
+    /// Optional runner group
+    pub runner_group: Option<String>,
+    /// GitHub job ID (for logging/deduplication)
+    pub job_id: u64,
+}
+
+/// Handle for sending webhook runner requests to the fleet manager
+#[derive(Clone)]
+pub struct WebhookNotifier {
+    tx: mpsc::Sender<WebhookRunnerRequest>,
+}
+
+impl WebhookNotifier {
+    pub fn new(tx: mpsc::Sender<WebhookRunnerRequest>) -> Self {
+        Self { tx }
+    }
+
+    pub async fn request_runner(&self, request: WebhookRunnerRequest) -> bool {
+        self.tx.try_send(request).is_ok()
+    }
+}
+
+/// Shared state for webhook handlers
+pub struct WebhookState {
+    pub config: WebhookConfig,
+    pub notifier: WebhookNotifier,
+}
+
+/// Validate HMAC-SHA256 signature from GitHub.
+///
+/// GitHub sends the signature in the `X-Hub-Signature-256` header as `sha256=<hex>`.
+pub fn validate_signature(secret: &str, payload: &[u8], signature_header: &str) -> bool {
+    // GitHub sends signature as "sha256=<hex>"
+    let signature = match signature_header.strip_prefix("sha256=") {
+        Some(sig) => sig,
+        None => return false,
+    };
+
+    let signature_bytes = match hex::decode(signature) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => return false,
+    };
+
+    mac.update(payload);
+    mac.verify_slice(&signature_bytes).is_ok()
+}
+
+/// Match job labels against configured label mappings.
+///
+/// Returns the first matching `LabelMapping`, or `None` if no match.
+/// A mapping matches if ALL of its labels are present in the job's labels
+/// (case-insensitive comparison).
+pub fn match_labels<'a>(
+    job_labels: &[String],
+    mappings: &'a [LabelMapping],
+) -> Option<&'a LabelMapping> {
+    mappings.iter().find(|mapping| {
+        mapping.labels.iter().all(|required| {
+            job_labels
+                .iter()
+                .any(|job_label| job_label.eq_ignore_ascii_case(required))
+        })
+    })
+}
+
+/// Build the Axum router for webhook endpoints.
+pub fn webhook_router(state: Arc<WebhookState>) -> Router {
+    let path = state.config.path.clone();
+    Router::new().route(&path, post(handle_webhook)).with_state(state)
+}
+
+/// Handle incoming GitHub webhook.
+async fn handle_webhook(
+    State(state): State<Arc<WebhookState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    // Get event type
+    let event_type = headers
+        .get("X-GitHub-Event")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // We only care about workflow_job events
+    if event_type != WORKFLOW_JOB_EVENT {
+        debug!("Ignoring webhook event type: {}", event_type);
+        return StatusCode::OK;
+    }
+
+    // Validate signature
+    let signature = headers
+        .get("X-Hub-Signature-256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !validate_signature(&state.config.secret, &body, signature) {
+        warn!("Webhook signature validation failed");
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    // Parse payload
+    let event: WorkflowJobEvent = match serde_json::from_slice(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Failed to parse webhook payload: {}", e);
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
+    // Only handle "queued" action
+    if event.action != "queued" {
+        debug!(
+            "Ignoring workflow_job action: {} for job {}",
+            event.action, event.workflow_job.id
+        );
+        return StatusCode::OK;
+    }
+
+    info!(
+        "Received workflow_job.queued for job {} with labels {:?}",
+        event.workflow_job.id, event.workflow_job.labels
+    );
+
+    // Match labels to find runner scope
+    let mapping = match match_labels(&event.workflow_job.labels, &state.config.label_mappings) {
+        Some(m) => m,
+        None => {
+            info!(
+                "No label mapping matches job {} labels {:?} - ignoring (probably a GitHub-hosted runner job)",
+                event.workflow_job.id, event.workflow_job.labels
+            );
+            return StatusCode::OK;
+        }
+    };
+
+    info!(
+        "Matched job {} to runner scope {:?} (mapping labels: {:?})",
+        event.workflow_job.id, mapping.runner_scope, mapping.labels
+    );
+
+    // Send request to fleet manager (non-blocking)
+    let request = WebhookRunnerRequest {
+        job_labels: event.workflow_job.labels,
+        agent_labels: mapping.labels.clone(),
+        runner_scope: mapping.runner_scope.clone(),
+        runner_group: mapping.runner_group.clone(),
+        job_id: event.workflow_job.id,
+    };
+
+    if state.notifier.request_runner(request).await {
+        info!("Queued runner creation for job {}", event.workflow_job.id);
+    } else {
+        warn!(
+            "Failed to queue runner creation for job {} (channel full)",
+            event.workflow_job.id
+        );
+    }
+
+    // Always return 200 OK quickly - runner creation is async
+    StatusCode::OK
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_signature() {
+        let secret = "test-secret";
+        let payload = b"test payload";
+
+        // Generate valid signature
+        use hmac::Mac;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        let header = format!("sha256={}", signature);
+
+        assert!(validate_signature(secret, payload, &header));
+        assert!(!validate_signature("wrong-secret", payload, &header));
+        assert!(!validate_signature(secret, b"wrong payload", &header));
+    }
+
+    #[test]
+    fn test_validate_signature_invalid_format() {
+        let secret = "test-secret";
+        let payload = b"test payload";
+
+        // Missing sha256= prefix
+        assert!(!validate_signature(secret, payload, "abc123"));
+
+        // Invalid hex
+        assert!(!validate_signature(secret, payload, "sha256=notvalidhex!"));
+
+        // Empty
+        assert!(!validate_signature(secret, payload, ""));
+    }
+
+    #[test]
+    fn test_match_labels() {
+        let mappings = vec![
+            LabelMapping {
+                labels: vec!["self-hosted".into(), "macOS".into(), "ARM64".into()],
+                runner_scope: RunnerScope::Organization {
+                    name: "test-org".into(),
+                },
+                runner_group: None,
+            },
+            LabelMapping {
+                labels: vec!["self-hosted".into(), "Linux".into()],
+                runner_scope: RunnerScope::Repository {
+                    owner: "test-org".into(),
+                    repo: "test-repo".into(),
+                },
+                runner_group: Some("linux-runners".into()),
+            },
+        ];
+
+        // Exact match
+        let job_labels = vec!["self-hosted".into(), "macOS".into(), "ARM64".into()];
+        let matched = match_labels(&job_labels, &mappings);
+        assert!(matched.is_some());
+        assert_eq!(
+            matched.unwrap().runner_scope,
+            RunnerScope::Organization {
+                name: "test-org".into()
+            }
+        );
+
+        // Superset match (extra labels OK)
+        let job_labels = vec![
+            "self-hosted".into(),
+            "macOS".into(),
+            "ARM64".into(),
+            "gpu".into(),
+        ];
+        let matched = match_labels(&job_labels, &mappings);
+        assert!(matched.is_some());
+
+        // Case-insensitive
+        let job_labels = vec!["SELF-HOSTED".into(), "macos".into(), "arm64".into()];
+        let matched = match_labels(&job_labels, &mappings);
+        assert!(matched.is_some());
+
+        // No match (missing required label)
+        let job_labels = vec!["self-hosted".into(), "macOS".into()];
+        let matched = match_labels(&job_labels, &mappings);
+        assert!(matched.is_none());
+
+        // No match (github-hosted runner)
+        let job_labels = vec!["ubuntu-latest".into()];
+        let matched = match_labels(&job_labels, &mappings);
+        assert!(matched.is_none());
+
+        // Match second mapping
+        let job_labels = vec!["self-hosted".into(), "Linux".into()];
+        let matched = match_labels(&job_labels, &mappings);
+        assert!(matched.is_some());
+        assert!(matches!(
+            matched.unwrap().runner_scope,
+            RunnerScope::Repository { .. }
+        ));
+    }
+
+    #[test]
+    fn test_match_labels_empty() {
+        let mappings: Vec<LabelMapping> = vec![];
+        let job_labels = vec!["self-hosted".into()];
+        assert!(match_labels(&job_labels, &mappings).is_none());
+
+        let mappings = vec![LabelMapping {
+            labels: vec!["self-hosted".into()],
+            runner_scope: RunnerScope::Organization {
+                name: "test".into(),
+            },
+            runner_group: None,
+        }];
+        let job_labels: Vec<String> = vec![];
+        assert!(match_labels(&job_labels, &mappings).is_none());
+    }
+
+    #[test]
+    fn test_parse_workflow_job_event() {
+        let payload = r#"{
+            "action": "queued",
+            "workflow_job": {
+                "id": 12345,
+                "name": "build",
+                "labels": ["self-hosted", "macOS", "ARM64"],
+                "runner_id": null,
+                "runner_name": null
+            },
+            "repository": {
+                "full_name": "test-org/test-repo",
+                "name": "test-repo",
+                "owner": {
+                    "login": "test-org",
+                    "type": "Organization"
+                }
+            },
+            "organization": {
+                "login": "test-org"
+            }
+        }"#;
+
+        let event: WorkflowJobEvent = serde_json::from_str(payload).unwrap();
+        assert_eq!(event.action, "queued");
+        assert_eq!(event.workflow_job.id, 12345);
+        assert_eq!(event.workflow_job.labels.len(), 3);
+        assert!(event.workflow_job.labels.contains(&"self-hosted".to_string()));
+    }
+}
