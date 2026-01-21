@@ -1,0 +1,68 @@
+# Global settings
+tag_prefix = ""
+skip_ci = "[skip ci]"
+branch_whitelist = ["main"]
+from_latest_tag = true
+ignore_merge_commits = true
+disable_bump_commit = true
+
+post_bump_hooks = [
+    "git add CHANGELOG.md",
+    "git commit -m 'chore: bump version to {{version}}'",
+    # Re-tag release commit to ensure a signed tag
+    "git tag {{version_tag}} --force --sign --annotate --message='Release {{version}}'"
+]
+
+[changelog]
+template = ".cog/changelog-template.tera"
+remote = "github.com"
+owner = "AstroHQ"
+repository = "kuiper-forge"
+authors = [
+    { username = "jfro", signature = "Jeremy Knope" }
+]
+
+# Conventional commit types
+[commit_types]
+test = { changelog_title = "Tests", changelog_exclude = true }
+tests = { changelog_title = "Tests", changelog_exclude = true }
+chore = { changelog_title = "Chores", changelog_exclude = true }
+
+# Monorepo packages
+# Bump order: proto first (base dependency), then api/lib, then consumers
+
+[packages.kuiper-agent-proto]
+path = "kuiper-agent-proto"
+public_api = false
+bump_order = 1
+pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
+
+[packages.kuiper-proxmox-api]
+path = "kuiper-proxmox-api"
+public_api = false
+bump_order = 2
+pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
+
+[packages.kuiper-agent-lib]
+path = "kuiper-agent-lib"
+public_api = false
+bump_order = 3
+pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
+
+[packages.kuiper-forge]
+path = "kuiper-forge"
+public_api = true
+bump_order = 4
+pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
+
+[packages.kuiper-tart-agent]
+path = "kuiper-tart-agent"
+public_api = false
+bump_order = 5
+pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
+
+[packages.kuiper-proxmox-agent]
+path = "kuiper-proxmox-agent"
+public_api = false
+bump_order = 6
+pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
