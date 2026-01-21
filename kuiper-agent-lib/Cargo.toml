@@ -2,10 +2,13 @@
 name = "kuiper-agent-lib"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Shared library for CI runner agents (connection, certificates)"
 
 [dependencies]
-kuiper-agent-proto = { path = "../kuiper-agent-proto" }
+kuiper-agent-proto = { version = "0.1.0", path = "../kuiper-agent-proto" }
 
 tonic = { workspace = true }
 tokio = { workspace = true }

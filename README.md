@@ -85,7 +85,7 @@ See `examples/` for sample configuration files.
 
 ## Requirements
 
-- Rust 1.75+
+- Rust 1.85+
 - For macOS agents: [Tart](https://github.com/cirruslabs/tart)
 - For Proxmox agents: Proxmox VE 7+ with API token
 

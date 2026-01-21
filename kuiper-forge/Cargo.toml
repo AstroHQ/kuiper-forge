@@ -2,6 +2,9 @@
 name = "kuiper-forge"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "KuiperForge - CI runner coordinator for ephemeral VMs"
 
 [dependencies]
@@ -26,7 +29,7 @@ async-trait = { workspace = true }
 
 # gRPC
 tonic = { workspace = true }
-kuiper-agent-proto = { path = "../kuiper-agent-proto" }
+kuiper-agent-proto = { version = "0.1.0", path = "../kuiper-agent-proto" }
 
 # TLS/Certificates
 rcgen = { workspace = true }

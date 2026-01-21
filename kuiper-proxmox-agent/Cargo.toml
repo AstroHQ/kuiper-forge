@@ -2,6 +2,9 @@
 name = "kuiper-proxmox-agent"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Proxmox VE agent for CI runner coordination (Windows/Linux)"
 
 [[bin]]
@@ -9,9 +12,9 @@ name = "kuiper-proxmox-agent"
 path = "src/main.rs"
 
 [dependencies]
-kuiper-agent-proto = { path = "../kuiper-agent-proto" }
-kuiper-agent-lib = { path = "../kuiper-agent-lib" }
-kuiper-proxmox-api = { path = "../kuiper-proxmox-api" }
+kuiper-agent-proto = { version = "0.1.0", path = "../kuiper-agent-proto" }
+kuiper-agent-lib = { version = "0.1.0", path = "../kuiper-agent-lib" }
+kuiper-proxmox-api = { version = "0.1.0", path = "../kuiper-proxmox-api" }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

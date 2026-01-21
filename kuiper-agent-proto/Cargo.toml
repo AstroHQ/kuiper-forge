@@ -2,6 +2,9 @@
 name = "kuiper-agent-proto"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "gRPC protocol definitions for CI runner agents"
 
 [dependencies]

@@ -2,6 +2,9 @@
 name = "kuiper-tart-agent"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Tart VM agent for CI runner coordination (macOS)"
 
 [[bin]]
@@ -9,8 +12,8 @@ name = "kuiper-tart-agent"
 path = "src/main.rs"
 
 [dependencies]
-kuiper-agent-proto = { path = "../kuiper-agent-proto" }
-kuiper-agent-lib = { path = "../kuiper-agent-lib" }
+kuiper-agent-proto = { version = "0.1.0", path = "../kuiper-agent-proto" }
+kuiper-agent-lib = { version = "0.1.0", path = "../kuiper-agent-lib" }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
