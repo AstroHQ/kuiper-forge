@@ -101,8 +101,12 @@ fn default_clone_timeout() -> u64 {
 /// SSH configuration for connecting to VMs.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SshConfig {
-    /// Path to SSH private key
-    pub private_key_path: PathBuf,
+    /// Path to SSH private key (optional if password is provided)
+    #[serde(default)]
+    pub private_key_path: Option<PathBuf>,
+    /// SSH password (optional if private_key_path is provided)
+    #[serde(default)]
+    pub password: Option<String>,
     /// SSH username
     #[serde(default = "default_ssh_username")]
     pub username: String,
@@ -172,9 +176,14 @@ impl Config {
             ))
         })?;
 
-        let config: Config = toml::from_str(&content).map_err(|e| {
+        let mut config: Config = toml::from_str(&content).map_err(|e| {
             ConfigError::ParseError(format!("Failed to parse config: {}", e))
         })?;
+
+        // Expand ~ in paths
+        config.tls.ca_cert = expand_tilde(&config.tls.ca_cert);
+        config.tls.certs_dir = expand_tilde(&config.tls.certs_dir);
+        config.ssh.private_key_path = config.ssh.private_key_path.map(|p| expand_tilde(&p));
 
         config.validate()?;
 
@@ -250,6 +259,13 @@ impl Config {
             ));
         }
 
+        // Validate SSH authentication - at least one method must be provided
+        if self.ssh.private_key_path.is_none() && self.ssh.password.is_none() {
+            return Err(ConfigError::ValidationError(
+                "SSH config must have either private_key_path or password (or both)".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -268,6 +284,18 @@ pub enum ConfigError {
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+}
+
+/// Expand ~ to the user's home directory.
+fn expand_tilde(path: &Path) -> PathBuf {
+    if let Some(path_str) = path.to_str() {
+        if path_str.starts_with("~/") {
+            if let Some(home) = dirs::home_dir() {
+                return home.join(&path_str[2..]);
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -353,5 +381,113 @@ retries = 5
         assert_eq!(config.vm.concurrent_vms, 8);
         assert_eq!(config.ssh.username, "administrator");
         assert_eq!(config.ssh.port, 2222);
+    }
+
+    #[test]
+    fn test_parse_password_auth_config() {
+        let toml = r#"
+[coordinator]
+url = "https://coordinator.example.com:9443"
+hostname = "coordinator.example.com"
+
+[tls]
+ca_cert = "/etc/kuiper-proxmox-agent/certs/ca.crt"
+certs_dir = "/etc/kuiper-proxmox-agent/certs"
+
+[agent]
+labels = ["self-hosted", "windows", "x64"]
+
+[proxmox]
+api_url = "https://proxmox.local:8006"
+node = "pve"
+token_id = "ci-runner@pve!runner"
+token_secret = "secret"
+
+[vm]
+template_vmid = 9000
+storage = "local-lvm"
+
+[ssh]
+password = "my-secret-password"
+username = "vagrant"
+"#;
+
+        let config: Config = toml::from_str(toml).expect("Failed to parse config");
+        config.validate().expect("Validation should pass");
+        assert!(config.ssh.private_key_path.is_none());
+        assert_eq!(config.ssh.password, Some("my-secret-password".to_string()));
+        assert_eq!(config.ssh.username, "vagrant");
+    }
+
+    #[test]
+    fn test_parse_both_auth_methods() {
+        let toml = r#"
+[coordinator]
+url = "https://coordinator.example.com:9443"
+hostname = "coordinator.example.com"
+
+[tls]
+ca_cert = "/etc/kuiper-proxmox-agent/certs/ca.crt"
+certs_dir = "/etc/kuiper-proxmox-agent/certs"
+
+[agent]
+labels = ["self-hosted"]
+
+[proxmox]
+api_url = "https://proxmox.local:8006"
+node = "pve"
+token_id = "ci-runner@pve!runner"
+token_secret = "secret"
+
+[vm]
+template_vmid = 9000
+storage = "local-lvm"
+
+[ssh]
+private_key_path = "/etc/kuiper-proxmox-agent/id_ed25519"
+password = "fallback-password"
+"#;
+
+        let config: Config = toml::from_str(toml).expect("Failed to parse config");
+        config.validate().expect("Validation should pass");
+        assert!(config.ssh.private_key_path.is_some());
+        assert!(config.ssh.password.is_some());
+    }
+
+    #[test]
+    fn test_validation_fails_without_ssh_auth() {
+        let toml = r#"
+[coordinator]
+url = "https://coordinator.example.com:9443"
+hostname = "coordinator.example.com"
+
+[tls]
+ca_cert = "/etc/kuiper-proxmox-agent/certs/ca.crt"
+certs_dir = "/etc/kuiper-proxmox-agent/certs"
+
+[agent]
+labels = ["self-hosted"]
+
+[proxmox]
+api_url = "https://proxmox.local:8006"
+node = "pve"
+token_id = "ci-runner@pve!runner"
+token_secret = "secret"
+
+[vm]
+template_vmid = 9000
+storage = "local-lvm"
+
+[ssh]
+username = "vagrant"
+"#;
+
+        let config: Config = toml::from_str(toml).expect("Failed to parse config");
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("private_key_path or password"));
     }
 }

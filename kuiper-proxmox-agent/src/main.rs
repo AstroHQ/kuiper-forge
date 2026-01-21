@@ -13,8 +13,8 @@ mod vm_manager;
 
 use kuiper_agent_lib::{AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector};
 use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentStatus, CommandResult, CommandResultPayload,
-    CoordinatorPayload, CreateRunnerResult, DestroyRunnerResult, Ping, Pong, VmInfo,
+    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Ping, Pong,
+    RunnerEvent, RunnerEventType, VmInfo,
 };
 use clap::Parser;
 use config::Config;
@@ -107,13 +107,57 @@ async fn main() -> anyhow::Result<()> {
         info!("Copied CA certificate to {:?}", ca_dest);
     }
 
+    // Clone vm_manager for shutdown cleanup
+    let shutdown_vm_manager = vm_manager.clone();
+
     // Create agent runner
     let agent = ProxmoxAgent::new(config, vm_manager, cert_store, args.token);
 
-    // Run the agent (loops forever with reconnection)
-    agent.run().await?;
+    // Run the agent with graceful shutdown handling
+    tokio::select! {
+        result = agent.run() => {
+            // Agent loop exited (shouldn't happen normally)
+            result?;
+        }
+        _ = shutdown_signal() => {
+            info!("Shutdown signal received, cleaning up VMs...");
+            shutdown_vm_manager.destroy_all_vms().await;
+            info!("Graceful shutdown complete");
+        }
+    }
 
     Ok(())
+}
+
+/// Wait for a shutdown signal (SIGTERM or SIGINT/Ctrl-C).
+async fn shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("Received Ctrl-C");
+        }
+        _ = terminate => {
+            info!("Received SIGTERM");
+        }
+    }
 }
 
 /// Create the Proxmox API client from configuration.
@@ -144,6 +188,42 @@ struct ProxmoxAgent {
     registration_token: Option<String>,
 }
 
+async fn send_command_ack(
+    tx: &mpsc::Sender<AgentMessage>,
+    command_id: String,
+    accepted: bool,
+    error: String,
+) -> Result<()> {
+    tx.send(AgentMessage {
+        payload: Some(AgentPayload::Ack(CommandAck {
+            command_id,
+            accepted,
+            error,
+        })),
+    })
+    .await
+    .map_err(|_| Error::ChannelSend)
+}
+
+async fn send_runner_event(
+    tx: &mpsc::Sender<AgentMessage>,
+    runner_name: String,
+    vm_id: String,
+    event_type: RunnerEventType,
+    error: String,
+) -> Result<()> {
+    tx.send(AgentMessage {
+        payload: Some(AgentPayload::RunnerEvent(RunnerEvent {
+            runner_name,
+            vm_id,
+            event_type: event_type as i32,
+            error,
+        })),
+    })
+    .await
+    .map_err(|_| Error::ChannelSend)
+}
+
 impl ProxmoxAgent {
     /// Create a new Proxmox agent.
     fn new(
@@ -166,6 +246,10 @@ impl ProxmoxAgent {
             match self.connect_and_run().await {
                 Ok(_) => {
                     info!("Connection closed, reconnecting...");
+                }
+                Err(Error::Shutdown) => {
+                    info!("Shutting down");
+                    return Ok(());
                 }
                 Err(e) => {
                     error!("Agent error: {}", e);
@@ -259,31 +343,19 @@ impl ProxmoxAgent {
         });
 
         // Process messages from coordinator
-        loop {
-            tokio::select! {
-                msg = inbound.message() => {
-                    match msg {
-                        Ok(Some(coordinator_msg)) => {
-                            self.handle_coordinator_message(coordinator_msg, &tx).await?;
-                        }
-                        Ok(None) => {
-                            info!("Stream closed by coordinator");
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Stream error: {}", e);
-                            status_handle.abort();
-                            return Err(Error::Grpc(e));
-                        }
-                    }
+        while let Some(msg) = inbound.message().await.transpose() {
+            match msg {
+                Ok(coordinator_msg) => {
+                    self.handle_coordinator_message(coordinator_msg, &tx).await?;
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received shutdown signal");
+                Err(e) => {
+                    error!("Stream error: {}", e);
                     status_handle.abort();
-                    return Err(Error::Shutdown);
+                    return Err(Error::Grpc(e));
                 }
             }
         }
+        info!("Stream closed by coordinator");
 
         // Clean up status task when stream closes
         status_handle.abort();
@@ -311,6 +383,7 @@ impl ProxmoxAgent {
                     "Received CreateRunner command: {} ({})",
                     cmd.command_id, cmd.vm_name
                 );
+                send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await?;
                 self.handle_create_runner(cmd, tx.clone()).await;
             }
             CoordinatorPayload::DestroyRunner(cmd) => {
@@ -318,12 +391,19 @@ impl ProxmoxAgent {
                     "Received DestroyRunner command: {} ({})",
                     cmd.command_id, cmd.vm_id
                 );
+                send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await?;
                 self.handle_destroy_runner(cmd, tx.clone()).await;
             }
             CoordinatorPayload::Ping(Ping {}) => {
                 debug!("Received ping from coordinator");
                 tx.send(AgentMessage {
                     payload: Some(AgentPayload::Pong(Pong {})),
+                })
+                .await
+                .map_err(|_| Error::ChannelSend)?;
+                let status = self.build_status().await;
+                tx.send(AgentMessage {
+                    payload: Some(AgentPayload::Status(status)),
                 })
                 .await
                 .map_err(|_| Error::ChannelSend)?;
@@ -340,7 +420,7 @@ impl ProxmoxAgent {
         tx: mpsc::Sender<AgentMessage>,
     ) {
         let vm_manager = self.vm_manager.clone();
-        let command_id = cmd.command_id.clone();
+        let runner_name = cmd.vm_name.clone();
 
         // Spawn task to handle the runner lifecycle
         tokio::spawn(async move {
@@ -353,37 +433,36 @@ impl ProxmoxAgent {
                 )
                 .await;
 
-            let response = match result {
+            match result {
                 Ok((vmid, ip)) => {
-                    info!("Runner {} completed successfully", command_id);
-                    CommandResult {
-                        command_id: command_id.clone(),
-                        success: true,
-                        error: String::new(),
-                        result: Some(CommandResultPayload::CreateRunner(CreateRunnerResult {
-                            vm_id: vmid.to_string(),
-                            ip_address: ip,
-                        })),
+                    info!("Runner {} completed successfully", runner_name);
+                    if let Err(e) = send_runner_event(
+                        &tx,
+                        runner_name,
+                        vmid.to_string(),
+                        RunnerEventType::Completed,
+                        String::new(),
+                    )
+                    .await
+                    {
+                        error!("Failed to send runner event: {}", e);
                     }
+                    info!("Runner completed at IP {}", ip);
                 }
                 Err(e) => {
-                    error!("Runner {} failed: {}", command_id, e);
-                    CommandResult {
-                        command_id: command_id.clone(),
-                        success: false,
-                        error: e.to_string(),
-                        result: None,
+                    error!("Runner {} failed: {}", runner_name, e);
+                    if let Err(e) = send_runner_event(
+                        &tx,
+                        runner_name,
+                        cmd.vm_name.clone(),
+                        RunnerEventType::Failed,
+                        e.to_string(),
+                    )
+                    .await
+                    {
+                        error!("Failed to send runner event: {}", e);
                     }
                 }
-            };
-
-            if let Err(e) = tx
-                .send(AgentMessage {
-                    payload: Some(AgentPayload::Result(response)),
-                })
-                .await
-            {
-                error!("Failed to send result: {}", e);
             }
         });
     }
@@ -395,41 +474,42 @@ impl ProxmoxAgent {
         tx: mpsc::Sender<AgentMessage>,
     ) {
         let vm_manager = self.vm_manager.clone();
-        let command_id = cmd.command_id.clone();
         let vm_id = cmd.vm_id.clone();
+        let runner_name = vm_id.clone();
 
         // Spawn task to handle destruction
         tokio::spawn(async move {
             let result = vm_manager.force_destroy(&vm_id).await;
 
-            let response = match result {
+            match result {
                 Ok(()) => {
                     info!("VM {} destroyed successfully", vm_id);
-                    CommandResult {
-                        command_id: command_id.clone(),
-                        success: true,
-                        error: String::new(),
-                        result: Some(CommandResultPayload::DestroyRunner(DestroyRunnerResult {})),
+                    if let Err(e) = send_runner_event(
+                        &tx,
+                        runner_name,
+                        vm_id,
+                        RunnerEventType::Destroyed,
+                        String::new(),
+                    )
+                    .await
+                    {
+                        error!("Failed to send runner event: {}", e);
                     }
                 }
                 Err(e) => {
                     error!("Failed to destroy VM {}: {}", vm_id, e);
-                    CommandResult {
-                        command_id: command_id.clone(),
-                        success: false,
-                        error: e.to_string(),
-                        result: None,
+                    if let Err(e) = send_runner_event(
+                        &tx,
+                        runner_name,
+                        vm_id,
+                        RunnerEventType::Failed,
+                        e.to_string(),
+                    )
+                    .await
+                    {
+                        error!("Failed to send runner event: {}", e);
                     }
                 }
-            };
-
-            if let Err(e) = tx
-                .send(AgentMessage {
-                    payload: Some(AgentPayload::Result(response)),
-                })
-                .await
-            {
-                error!("Failed to send result: {}", e);
             }
         });
     }

@@ -408,6 +408,26 @@ impl VmManager {
         }
     }
 
+    /// Destroy all active VMs (used during shutdown).
+    pub async fn destroy_all_vms(&self) {
+        let vmids: Vec<u32> = {
+            self.active_vms.read().await.keys().copied().collect()
+        };
+
+        if vmids.is_empty() {
+            info!("No active VMs to clean up");
+            return;
+        }
+
+        info!("Destroying {} active VM(s)...", vmids.len());
+        for vmid in vmids {
+            info!("Destroying VM {}", vmid);
+            if let Err(e) = self.destroy_vm(vmid).await {
+                error!("Failed to destroy VM {}: {}", vmid, e);
+            }
+        }
+    }
+
     /// Detect OS type by running a command via SSH.
     async fn detect_os_type(&self, session: &mut SshSession) -> Result<bool> {
         // Try Windows-specific command first

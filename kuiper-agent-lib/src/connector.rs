@@ -369,6 +369,14 @@ impl AgentConnector {
         );
         info!("Certificate expires: {}", response.expires_at);
 
+        // Explicitly drop the registration client/channel before creating mTLS connection.
+        // This prevents HTTP/2 connection reuse from the non-mTLS registration channel.
+        drop(reg_client);
+
+        // Brief delay to ensure the old connection is fully closed before creating new one.
+        // This works around potential HTTP/2 connection pooling issues.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         // Now connect with the new certificate
         self.connect_with_mtls().await
     }

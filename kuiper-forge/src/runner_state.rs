@@ -168,6 +168,12 @@ impl RunnerStateStore {
             .collect()
     }
 
+    /// Get a single runner by name.
+    pub async fn get_runner(&self, runner_name: &str) -> Option<RunnerInfo> {
+        let runners = self.runners.read().await;
+        runners.get(runner_name).cloned()
+    }
+
     /// Check if a runner exists in the state.
     pub async fn has_runner(&self, runner_name: &str) -> bool {
         let runners = self.runners.read().await;

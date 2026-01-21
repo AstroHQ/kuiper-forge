@@ -119,12 +119,13 @@ impl AgentServiceImpl {
     /// We extract the Common Name (CN) from the client certificate, which contains
     /// the agent_id that was set during registration.
     fn extract_agent_id_from_cert<T>(&self, request: &Request<T>) -> Result<String, Status> {
-        use tonic::transport::server::TlsConnectInfo;
+        use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 
         // Get TLS connection info from request extensions
+        // Note: tonic uses TlsConnectInfo<TcpConnectInfo>, not the raw TlsStream type
         let tls_info = request
             .extensions()
-            .get::<TlsConnectInfo<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>>()
+            .get::<TlsConnectInfo<TcpConnectInfo>>()
             .ok_or_else(|| {
                 Status::unauthenticated("No TLS connection info - TLS required")
             })?;
@@ -264,6 +265,7 @@ impl AgentService for AgentServiceImpl {
         // Clone what we need for the task
         let agent_registry = Arc::clone(&self.agent_registry);
         let runner_state = self.runner_state.clone();
+        let fleet_notifier = self.fleet_notifier.clone();
         let agent_id_clone = agent_id.clone();
 
         // Spawn task to handle inbound messages and forward commands
@@ -277,7 +279,14 @@ impl AgentService for AgentServiceImpl {
                     msg = inbound.next() => {
                         match msg {
                             Some(Ok(agent_msg)) => {
-                                handle_agent_message(&agent_registry, &agent_id, agent_msg, runner_state.as_ref()).await;
+                                handle_agent_message(
+                                    &agent_registry,
+                                    &agent_id,
+                                    agent_msg,
+                                    runner_state.as_ref(),
+                                    fleet_notifier.as_ref(),
+                                )
+                                .await;
                             }
                             Some(Err(e)) => {
                                 error!(agent_id = %agent_id, error = %e, "Stream error");
@@ -335,6 +344,7 @@ async fn handle_agent_message(
     agent_id: &str,
     msg: AgentMessage,
     runner_state: Option<&Arc<RunnerStateStore>>,
+    fleet_notifier: Option<&FleetNotifier>,
 ) {
     match msg.payload {
         Some(AgentPayload::Status(status)) => {
@@ -360,6 +370,36 @@ async fn handle_agent_message(
                         removed.len()
                     );
                 }
+            }
+        }
+        Some(AgentPayload::Ack(ack)) => {
+            let command_id = ack.command_id.clone();
+            debug!(
+                agent_id = %agent_id,
+                command_id = %command_id,
+                accepted = ack.accepted,
+                "Command ack received"
+            );
+            registry
+                .handle_response(
+                    agent_id,
+                    &command_id,
+                    AgentMessage {
+                        payload: Some(AgentPayload::Ack(ack)),
+                    },
+                )
+                .await;
+        }
+        Some(AgentPayload::RunnerEvent(event)) => {
+            if let Some(notifier) = fleet_notifier {
+                notifier
+                    .notify_runner_event(agent_id.to_string(), event)
+                    .await;
+            } else {
+                warn!(
+                    agent_id = %agent_id,
+                    "Runner event received but no fleet notifier configured"
+                );
             }
         }
         Some(AgentPayload::Result(result)) => {

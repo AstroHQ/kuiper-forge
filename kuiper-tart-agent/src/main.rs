@@ -34,8 +34,8 @@ use std::time::Duration;
 
 use kuiper_agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationTlsMode};
 use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentStatus, CommandResult, CommandResultPayload,
-    CoordinatorPayload, CreateRunnerResult, DestroyRunnerResult, Pong,
+    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Pong, RunnerEvent,
+    RunnerEventType,
 };
 use clap::Parser;
 use tokio::signal;
@@ -236,6 +236,48 @@ struct TartAgent {
     config: Config,
 }
 
+async fn send_command_ack(
+    tx: &mpsc::Sender<AgentMessage>,
+    command_id: String,
+    accepted: bool,
+    error: String,
+) {
+    if let Err(e) = tx
+        .send(AgentMessage {
+            payload: Some(AgentPayload::Ack(CommandAck {
+                command_id,
+                accepted,
+                error,
+            })),
+        })
+        .await
+    {
+        error!("Failed to send command ack: {}", e);
+    }
+}
+
+async fn send_runner_event(
+    tx: &mpsc::Sender<AgentMessage>,
+    runner_name: String,
+    vm_id: String,
+    event_type: RunnerEventType,
+    error: String,
+) {
+    if let Err(e) = tx
+        .send(AgentMessage {
+            payload: Some(AgentPayload::RunnerEvent(RunnerEvent {
+                runner_name,
+                vm_id,
+                event_type: event_type as i32,
+                error,
+            })),
+        })
+        .await
+    {
+        error!("Failed to send runner event: {}", e);
+    }
+}
+
 impl TartAgent {
     fn new(
         agent_config: AgentConfig,
@@ -377,16 +419,8 @@ impl TartAgent {
                 let agent = Arc::clone(self);
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let result = agent.handle_create_runner(&cmd).await;
-
-                    if let Err(e) = tx
-                        .send(AgentMessage {
-                            payload: Some(AgentPayload::Result(result)),
-                        })
-                        .await
-                    {
-                        error!("Failed to send result: {}", e);
-                    }
+                    send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await;
+                    agent.handle_create_runner(cmd, &tx).await;
                 });
             }
 
@@ -397,22 +431,15 @@ impl TartAgent {
                 let agent = Arc::clone(self);
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let result = agent.handle_destroy_runner(&cmd).await;
-
-                    if let Err(e) = tx
-                        .send(AgentMessage {
-                            payload: Some(AgentPayload::Result(result)),
-                        })
-                        .await
-                    {
-                        error!("Failed to send result: {}", e);
-                    }
+                    send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await;
+                    agent.handle_destroy_runner(cmd, &tx).await;
                 });
             }
 
             CoordinatorPayload::Ping(_) => {
                 // Pings are quick, handle inline
                 let tx = tx.clone();
+                let agent = Arc::clone(self);
                 tokio::spawn(async move {
                     if let Err(e) = tx
                         .send(AgentMessage {
@@ -422,6 +449,15 @@ impl TartAgent {
                     {
                         error!("Failed to send pong: {}", e);
                     }
+                    let status = agent.build_status().await;
+                    if let Err(e) = tx
+                        .send(AgentMessage {
+                            payload: Some(AgentPayload::Status(status)),
+                        })
+                        .await
+                    {
+                        error!("Failed to send status update: {}", e);
+                    }
                 });
             }
         }
@@ -430,9 +466,9 @@ impl TartAgent {
     /// Handle CreateRunner command.
     async fn handle_create_runner(
         &self,
-        cmd: &kuiper_agent_proto::CreateRunnerCommand,
-    ) -> CommandResult {
-        let command_id = cmd.command_id.clone();
+        cmd: kuiper_agent_proto::CreateRunnerCommand,
+        tx: &mpsc::Sender<AgentMessage>,
+    ) {
         let vm_name = cmd.vm_name.clone();
 
         // Validate inputs early and warn about suspicious values
@@ -495,6 +531,15 @@ impl TartAgent {
                     e
                 })?;
 
+            send_runner_event(
+                tx,
+                vm_name.clone(),
+                vm_id.clone(),
+                RunnerEventType::Started,
+                String::new(),
+            )
+            .await;
+
             // 4. Wait for runner to complete (this blocks until the job finishes)
             info!(
                 "[{}] Step 4/5: Runner configured, waiting for job completion...",
@@ -519,22 +564,17 @@ impl TartAgent {
                     "CreateRunner completed successfully: vm={}, ip={}",
                     vm_id, ip
                 );
-                CommandResult {
-                    command_id,
-                    success: true,
-                    error: String::new(),
-                    result: Some(CommandResultPayload::CreateRunner(CreateRunnerResult {
-                        vm_id,
-                        ip_address: ip,
-                    })),
-                }
+                send_runner_event(
+                    tx,
+                    vm_name,
+                    vm_id,
+                    RunnerEventType::Completed,
+                    String::new(),
+                )
+                .await;
             }
             Err(e) => {
-                error!(
-                    "CreateRunner FAILED for vm={}: {}",
-                    vm_name,
-                    e
-                );
+                error!("CreateRunner FAILED for vm={}: {}", vm_name, e);
                 // Attempt cleanup on failure
                 info!("[{}] Attempting cleanup after failure...", vm_name);
                 if let Err(cleanup_err) = self.vm_manager.destroy_vm(&vm_name).await {
@@ -543,13 +583,14 @@ impl TartAgent {
                         vm_name, cleanup_err
                     );
                 }
-
-                CommandResult {
-                    command_id,
-                    success: false,
-                    error: e.to_string(),
-                    result: None,
-                }
+                send_runner_event(
+                    tx,
+                    vm_name.clone(),
+                    vm_name,
+                    RunnerEventType::Failed,
+                    e.to_string(),
+                )
+                .await;
             }
         }
     }
@@ -557,29 +598,33 @@ impl TartAgent {
     /// Handle DestroyRunner command.
     async fn handle_destroy_runner(
         &self,
-        cmd: &kuiper_agent_proto::DestroyRunnerCommand,
-    ) -> CommandResult {
-        let command_id = cmd.command_id.clone();
+        cmd: kuiper_agent_proto::DestroyRunnerCommand,
+        tx: &mpsc::Sender<AgentMessage>,
+    ) {
         let vm_id = cmd.vm_id.clone();
 
         match self.vm_manager.destroy_vm(&vm_id).await {
             Ok(()) => {
                 info!("DestroyRunner completed: vm={}", vm_id);
-                CommandResult {
-                    command_id,
-                    success: true,
-                    error: String::new(),
-                    result: Some(CommandResultPayload::DestroyRunner(DestroyRunnerResult {})),
-                }
+                send_runner_event(
+                    tx,
+                    vm_id.clone(),
+                    vm_id,
+                    RunnerEventType::Destroyed,
+                    String::new(),
+                )
+                .await;
             }
             Err(e) => {
                 error!("DestroyRunner failed: {}", e);
-                CommandResult {
-                    command_id,
-                    success: false,
-                    error: e.to_string(),
-                    result: None,
-                }
+                send_runner_event(
+                    tx,
+                    vm_id.clone(),
+                    vm_id,
+                    RunnerEventType::Failed,
+                    e.to_string(),
+                )
+                .await;
             }
         }
     }

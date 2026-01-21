@@ -146,7 +146,9 @@ impl ProxmoxVEAPI {
                 request_builder.form(&params)
             }
             ProxmoxAuth::ApiToken { id, token } => {
-                let value = format!("PVEAPIToken={}!{id}={token}", self.username);
+                // Format: PVEAPIToken=USER@REALM!TOKENID=UUID
+                // id already contains the full token ID (e.g., "user@pve!tokenname")
+                let value = format!("PVEAPIToken={id}={token}");
                 request_builder.header("Authorization", value)
             }
         }
@@ -302,7 +304,8 @@ impl ProxmoxVEAPI {
             newid: target_vmid,
             name: name.to_string(),
             full: if linked { Some(0) } else { Some(1) },
-            storage: storage.map(|s| s.to_string()),
+            // storage parameter is not allowed for linked clones
+            storage: if linked { None } else { storage.map(|s| s.to_string()) },
             target: Some(self.node().to_string()),
         };
 

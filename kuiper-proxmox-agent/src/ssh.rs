@@ -19,22 +19,50 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+/// SSH authentication method.
+#[derive(Debug, Clone)]
+pub enum SshAuth {
+    /// Public key authentication
+    PublicKey(Arc<PrivateKey>),
+    /// Password authentication
+    Password(String),
+    /// Both methods available (try key first, then password)
+    Both {
+        private_key: Arc<PrivateKey>,
+        password: String,
+    },
+}
+
 /// SSH client for VM operations.
 pub struct SshClient {
     config: SshConfig,
-    private_key: Arc<PrivateKey>,
+    auth: SshAuth,
 }
 
 impl SshClient {
     /// Create a new SSH client with the given configuration.
     pub async fn new(config: SshConfig) -> Result<Self> {
-        let key_path = &config.private_key_path;
-        let private_key = Self::load_private_key(key_path).await?;
+        let auth = match (&config.private_key_path, &config.password) {
+            (Some(key_path), Some(password)) => {
+                let private_key = Self::load_private_key(key_path).await?;
+                SshAuth::Both {
+                    private_key: Arc::new(private_key),
+                    password: password.clone(),
+                }
+            }
+            (Some(key_path), None) => {
+                let private_key = Self::load_private_key(key_path).await?;
+                SshAuth::PublicKey(Arc::new(private_key))
+            }
+            (None, Some(password)) => SshAuth::Password(password.clone()),
+            (None, None) => {
+                return Err(Error::ssh(
+                    "SSH config must have either private_key_path or password".to_string(),
+                ));
+            }
+        };
 
-        Ok(Self {
-            config,
-            private_key: Arc::new(private_key),
-        })
+        Ok(Self { config, auth })
     }
 
     /// Load a private key from a file.
@@ -110,17 +138,10 @@ impl SshClient {
         .map_err(|_| Error::timeout("SSH handshake timed out"))?
         .map_err(|e| Error::ssh(format!("SSH handshake failed: {}", e)))?;
 
-        // Authenticate with public key
-        let authenticated = timeout(
-            connect_timeout,
-            handle.authenticate_publickey(
-                &self.config.username,
-                self.private_key.clone(),
-            ),
-        )
-        .await
-        .map_err(|_| Error::timeout("SSH authentication timed out"))?
-        .map_err(|e| Error::ssh(format!("SSH authentication error: {}", e)))?;
+        // Authenticate based on configured method
+        let authenticated = self
+            .authenticate(&mut handle, connect_timeout)
+            .await?;
 
         if !authenticated {
             return Err(Error::ssh("SSH authentication failed: not authenticated"));
@@ -130,6 +151,70 @@ impl SshClient {
             handle,
             _config: ssh_config,
         })
+    }
+
+    /// Authenticate using the configured method(s).
+    async fn authenticate(
+        &self,
+        handle: &mut Handle<ClientHandler>,
+        connect_timeout: Duration,
+    ) -> Result<bool> {
+        match &self.auth {
+            SshAuth::PublicKey(private_key) => {
+                self.authenticate_publickey(handle, private_key.clone(), connect_timeout)
+                    .await
+            }
+            SshAuth::Password(password) => {
+                self.authenticate_password(handle, password, connect_timeout)
+                    .await
+            }
+            SshAuth::Both { private_key, password } => {
+                // Try public key first, fall back to password
+                match self
+                    .authenticate_publickey(handle, private_key.clone(), connect_timeout)
+                    .await
+                {
+                    Ok(true) => Ok(true),
+                    Ok(false) | Err(_) => {
+                        debug!("Public key auth failed, trying password auth");
+                        self.authenticate_password(handle, password, connect_timeout)
+                            .await
+                    }
+                }
+            }
+        }
+    }
+
+    /// Authenticate with public key.
+    async fn authenticate_publickey(
+        &self,
+        handle: &mut Handle<ClientHandler>,
+        private_key: Arc<PrivateKey>,
+        connect_timeout: Duration,
+    ) -> Result<bool> {
+        timeout(
+            connect_timeout,
+            handle.authenticate_publickey(&self.config.username, private_key),
+        )
+        .await
+        .map_err(|_| Error::timeout("SSH public key authentication timed out"))?
+        .map_err(|e| Error::ssh(format!("SSH public key authentication error: {}", e)))
+    }
+
+    /// Authenticate with password.
+    async fn authenticate_password(
+        &self,
+        handle: &mut Handle<ClientHandler>,
+        password: &str,
+        connect_timeout: Duration,
+    ) -> Result<bool> {
+        timeout(
+            connect_timeout,
+            handle.authenticate_password(&self.config.username, password),
+        )
+        .await
+        .map_err(|_| Error::timeout("SSH password authentication timed out"))?
+        .map_err(|e| Error::ssh(format!("SSH password authentication error: {}", e)))
     }
 
     /// Wait for SSH to become available on a VM.

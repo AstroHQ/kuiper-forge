@@ -13,7 +13,10 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use kuiper_agent_proto::{AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand};
+use kuiper_agent_proto::{
+    AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand, RunnerEvent,
+    RunnerEventType,
+};
 
 use crate::agent_registry::AgentRegistry;
 use crate::config::{Config, RunnerConfig};
@@ -29,11 +32,21 @@ pub struct AgentRecoveryInfo {
     pub vm_names: Vec<String>,
 }
 
+/// Event emitted by an agent about a runner lifecycle.
+#[derive(Debug, Clone)]
+pub struct AgentRunnerEvent {
+    /// Agent ID
+    pub agent_id: String,
+    /// Runner event payload
+    pub event: RunnerEvent,
+}
+
 /// Handle for triggering fleet manager reconciliation.
 #[derive(Clone)]
 pub struct FleetNotifier {
     notify_tx: mpsc::Sender<()>,
     recovery_tx: mpsc::Sender<AgentRecoveryInfo>,
+    runner_event_tx: mpsc::Sender<AgentRunnerEvent>,
 }
 
 impl FleetNotifier {
@@ -52,6 +65,14 @@ impl FleetNotifier {
     pub async fn notify_with_recovery(&self, agent_id: String, vm_names: Vec<String>) {
         let _ = self.recovery_tx.try_send(AgentRecoveryInfo { agent_id, vm_names });
         // Also trigger a reconcile
+        let _ = self.notify_tx.try_send(());
+    }
+
+    /// Notify with a runner lifecycle event from an agent.
+    pub async fn notify_runner_event(&self, agent_id: String, event: RunnerEvent) {
+        let _ = self
+            .runner_event_tx
+            .try_send(AgentRunnerEvent { agent_id, event });
         let _ = self.notify_tx.try_send(());
     }
 }
@@ -79,6 +100,8 @@ pub struct FleetManager {
     notify_rx: mpsc::Receiver<()>,
     /// Channel for receiving recovery notifications
     recovery_rx: mpsc::Receiver<AgentRecoveryInfo>,
+    /// Channel for receiving runner lifecycle events
+    runner_event_rx: mpsc::Receiver<AgentRunnerEvent>,
 }
 
 impl FleetManager {
@@ -94,6 +117,7 @@ impl FleetManager {
     ) -> (Self, FleetNotifier) {
         let (notify_tx, notify_rx) = mpsc::channel(16);
         let (recovery_tx, recovery_rx) = mpsc::channel(16);
+        let (runner_event_tx, runner_event_rx) = mpsc::channel(32);
 
         let manager = Self {
             config,
@@ -103,9 +127,14 @@ impl FleetManager {
             runner_state,
             notify_rx,
             recovery_rx,
+            runner_event_rx,
         };
 
-        let notifier = FleetNotifier { notify_tx, recovery_tx };
+        let notifier = FleetNotifier {
+            notify_tx,
+            recovery_tx,
+            runner_event_tx,
+        };
 
         (manager, notifier)
     }
@@ -150,6 +179,9 @@ impl FleetManager {
                         recovery_info.agent_id, recovery_info.vm_names.len()
                     );
                     self.handle_agent_recovery(recovery_info).await;
+                }
+                Some(event) = self.runner_event_rx.recv() => {
+                    self.handle_runner_event(event).await;
                 }
             }
         }
@@ -229,6 +261,106 @@ impl FleetManager {
                     }
                     runner_state.remove_runner(&runner_name_clone).await;
                     info!("Cleaned up stale runner '{}'", runner_name_clone);
+                });
+            }
+        }
+    }
+
+    /// Handle a runner lifecycle event emitted by an agent.
+    async fn handle_runner_event(&self, event: AgentRunnerEvent) {
+        let runner_name = if event.event.runner_name.is_empty() {
+            event.event.vm_id.clone()
+        } else {
+            event.event.runner_name.clone()
+        };
+
+        if runner_name.is_empty() {
+            warn!(
+                agent_id = %event.agent_id,
+                "Runner event missing runner_name and vm_id"
+            );
+            return;
+        }
+
+        let event_type = RunnerEventType::try_from(event.event.event_type)
+            .unwrap_or(RunnerEventType::Unspecified);
+
+        match event_type {
+            RunnerEventType::Unspecified => {
+                warn!(
+                    agent_id = %event.agent_id,
+                    runner_name = %runner_name,
+                    "Runner event has unspecified type"
+                );
+            }
+            RunnerEventType::Started => {
+                info!(
+                    agent_id = %event.agent_id,
+                    runner_name = %runner_name,
+                    "Runner started"
+                );
+            }
+            RunnerEventType::Completed | RunnerEventType::Failed | RunnerEventType::Destroyed => {
+                let runner_info = self.runner_state.get_runner(&runner_name).await;
+                let Some(runner_info) = runner_info else {
+                    warn!(
+                        agent_id = %event.agent_id,
+                        runner_name = %runner_name,
+                        "Runner event received for unknown runner"
+                    );
+                    return;
+                };
+
+                let config_idx = self.find_config_for_runner(&runner_info.runner_scope);
+                if let Some(idx) = config_idx {
+                    let mut pool = self.pool.write().await;
+                    if let Some(p) = pool.pending_runners.get_mut(&idx) {
+                        *p = p.saturating_sub(1);
+                    }
+                }
+
+                self.agent_registry.release_slot(&event.agent_id).await;
+
+                match event_type {
+                    RunnerEventType::Failed => {
+                        warn!(
+                            agent_id = %event.agent_id,
+                            runner_name = %runner_name,
+                            error = %event.event.error,
+                            "Runner failed"
+                        );
+                    }
+                    RunnerEventType::Destroyed => {
+                        info!(
+                            agent_id = %event.agent_id,
+                            runner_name = %runner_name,
+                            "Runner destroyed"
+                        );
+                    }
+                    _ => {
+                        info!(
+                            agent_id = %event.agent_id,
+                            runner_name = %runner_name,
+                            "Runner completed"
+                        );
+                    }
+                }
+
+                self.runner_state.remove_runner(&runner_name).await;
+
+                let token_provider = self.token_provider.clone();
+                let runner_scope = runner_info.runner_scope.clone();
+                let runner_name_clone = runner_name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = token_provider
+                        .remove_runner(&runner_scope, &runner_name_clone)
+                        .await
+                    {
+                        warn!(
+                            "Could not remove runner '{}' from GitHub: {}",
+                            runner_name_clone, e
+                        );
+                    }
                 });
             }
         }
@@ -525,55 +657,95 @@ impl FleetManager {
             // Spawn task to send command and handle response
             // This allows us to continue creating other runners while waiting
             tokio::spawn(async move {
-                let timeout = Duration::from_secs(3600); // 1 hour for runner lifecycle
+                let timeout = Duration::from_secs(30);
 
                 match agent_registry
                     .send_command(&agent_id_clone, coordinator_msg, &command_id, timeout)
                     .await
                 {
-                    Ok(response) => {
-                        // Decrement pending when done
-                        {
-                            let mut pool = pool.write().await;
-                            if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
-                                *p = p.saturating_sub(1);
+                    Ok(response) => match response.payload {
+                        Some(AgentPayload::Ack(ack)) => {
+                            if ack.accepted {
+                                info!(
+                                    "CreateRunner accepted by agent {} for {}",
+                                    agent_id_clone, runner_name_clone
+                                );
+                            } else {
+                                warn!(
+                                    "CreateRunner rejected by agent {} for {}: {}",
+                                    agent_id_clone, runner_name_clone, ack.error
+                                );
+                                {
+                                    let mut pool = pool.write().await;
+                                    if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
+                                        *p = p.saturating_sub(1);
+                                    }
+                                }
+                                agent_registry.release_slot(&agent_id_clone).await;
+                                if let Err(e) = token_provider
+                                    .remove_runner(&runner_scope, &runner_name_clone)
+                                    .await
+                                {
+                                    warn!(
+                                        "Could not remove runner '{}' from GitHub: {}",
+                                        runner_name_clone, e
+                                    );
+                                }
+                                runner_state.remove_runner(&runner_name_clone).await;
                             }
                         }
-
-                        // Release the reserved slot (agent will report actual active_vms in next status)
-                        agent_registry.release_slot(&agent_id_clone).await;
-
-                        // Check if success
-                        if let Some(AgentPayload::Result(result)) = response.payload {
+                        Some(AgentPayload::Result(result)) => {
+                            // Legacy agents may still respond with a full lifecycle result.
+                            {
+                                let mut pool = pool.write().await;
+                                if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
+                                    *p = p.saturating_sub(1);
+                                }
+                            }
+                            agent_registry.release_slot(&agent_id_clone).await;
                             if result.success {
                                 info!("Runner {} completed successfully", runner_name_clone);
                             } else {
-                                warn!("Runner {} failed: {}", runner_name_clone, result.error);
+                                warn!(
+                                    "Runner {} failed: {}",
+                                    runner_name_clone, result.error
+                                );
                             }
+                            if let Err(e) = token_provider
+                                .remove_runner(&runner_scope, &runner_name_clone)
+                                .await
+                            {
+                                warn!(
+                                    "Could not remove runner '{}' from GitHub (may have self-removed): {}",
+                                    runner_name_clone, e
+                                );
+                            }
+                            runner_state.remove_runner(&runner_name_clone).await;
                         }
-
-                        // Remove the runner from GitHub (regardless of success/failure)
-                        // The runner lifecycle is over, so we need to clean up
-                        // Note: For ephemeral runners, GitHub usually auto-removes them,
-                        // but we call this anyway as a safety net
-                        info!(
-                            "Cleaning up runner '{}' from GitHub after lifecycle complete",
-                            runner_name_clone
-                        );
-                        if let Err(e) = token_provider
-                            .remove_runner(&runner_scope, &runner_name_clone)
-                            .await
-                        {
-                            // This is often expected - ephemeral runners self-remove
+                        other => {
                             warn!(
-                                "Could not remove runner '{}' from GitHub (may have self-removed): {}",
-                                runner_name_clone, e
+                                "Unexpected CreateRunner response from agent {} for {}: {:?}",
+                                agent_id_clone, runner_name_clone, other
                             );
+                            {
+                                let mut pool = pool.write().await;
+                                if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
+                                    *p = p.saturating_sub(1);
+                                }
+                            }
+                            agent_registry.release_slot(&agent_id_clone).await;
+                            if let Err(e) = token_provider
+                                .remove_runner(&runner_scope, &runner_name_clone)
+                                .await
+                            {
+                                warn!(
+                                    "Could not remove runner '{}' from GitHub: {}",
+                                    runner_name_clone, e
+                                );
+                            }
+                            runner_state.remove_runner(&runner_name_clone).await;
                         }
-
-                        // Remove from persistent state
-                        runner_state.remove_runner(&runner_name_clone).await;
-                    }
+                    },
                     Err(e) => {
                         error!("CreateRunner command failed: {}", e);
                         {
@@ -582,26 +754,16 @@ impl FleetManager {
                                 *p = p.saturating_sub(1);
                             }
                         }
-                        // Release the reserved slot on failure
                         agent_registry.release_slot(&agent_id_clone).await;
-
-                        // Also try to remove runner from GitHub in case it was partially registered
-                        info!(
-                            "Cleaning up runner '{}' from GitHub after command failure",
-                            runner_name_clone
-                        );
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)
                             .await
                         {
-                            // Log at warn level - cleanup failed but not critical
                             warn!(
                                 "Could not remove runner '{}' from GitHub: {}",
                                 runner_name_clone, e
                             );
                         }
-
-                        // Remove from persistent state
                         runner_state.remove_runner(&runner_name_clone).await;
                     }
                 }
