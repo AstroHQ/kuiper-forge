@@ -33,7 +33,7 @@ chore = { changelog_title = "Chores", changelog_exclude = true }
 
 [packages.kuiper-agent-proto]
 path = "kuiper-agent-proto"
-public_api = false
+public_api = true
 bump_order = 1
 pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
 
@@ -45,7 +45,7 @@ pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
 
 [packages.kuiper-agent-lib]
 path = "kuiper-agent-lib"
-public_api = false
+public_api = true
 bump_order = 3
 pre_bump_hooks = ["../.cog/bump_version.sh {{version}}"]
 
