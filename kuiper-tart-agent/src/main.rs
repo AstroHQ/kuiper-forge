@@ -310,6 +310,32 @@ impl TartAgent {
 
         info!("Stream established, processing commands...");
 
+        // Spawn a task to send periodic status updates
+        // This is critical for recovery: when coordinator restarts, it needs to know
+        // when VMs complete so it can clean up the associated runners from GitHub
+        let status_tx = tx.clone();
+        let status_agent = Arc::clone(self);
+        let status_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            // Skip the first tick since we already sent initial status
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+                let status = status_agent.build_status().await;
+                if status_tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await
+                    .is_err()
+                {
+                    // Channel closed, stream is ending
+                    break;
+                }
+            }
+        });
+
         // Process messages from coordinator
         while let Some(msg_result) = inbound.message().await.transpose() {
             match msg_result {
@@ -321,10 +347,14 @@ impl TartAgent {
                 }
                 Err(e) => {
                     error!("Error receiving message: {}", e);
+                    status_handle.abort();
                     return Err(Error::Status(e));
                 }
             }
         }
+
+        // Clean up status task when stream closes
+        status_handle.abort();
 
         warn!("Stream closed by coordinator");
         Ok(())

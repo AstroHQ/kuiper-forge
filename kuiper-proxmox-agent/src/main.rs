@@ -151,17 +151,17 @@ impl ProxmoxAgent {
         vm_manager: Arc<VmManager>,
         cert_store: AgentCertStore,
         registration_token: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             config,
             vm_manager,
             cert_store,
             registration_token,
-        }
+        })
     }
 
     /// Run the agent, handling reconnection.
-    async fn run(&self) -> Result<()> {
+    async fn run(self: &Arc<Self>) -> Result<()> {
         loop {
             match self.connect_and_run().await {
                 Ok(_) => {
@@ -179,7 +179,7 @@ impl ProxmoxAgent {
     }
 
     /// Connect to coordinator and run the agent loop.
-    async fn connect_and_run(&self) -> Result<()> {
+    async fn connect_and_run(self: &Arc<Self>) -> Result<()> {
         // Create agent config for connector
         // Use registration token from CLI args (for first-time registration)
         let agent_config = LibAgentConfig {
@@ -207,7 +207,7 @@ impl ProxmoxAgent {
 
     /// Run the bidirectional gRPC stream.
     async fn run_stream(
-        &self,
+        self: &Arc<Self>,
         mut client: kuiper_agent_proto::AgentServiceClient<tonic::transport::Channel>,
     ) -> Result<()> {
         // Create channels for sending/receiving
@@ -232,6 +232,32 @@ impl ProxmoxAgent {
 
         info!("Sent initial status to coordinator");
 
+        // Spawn a task to send periodic status updates
+        // This is critical for recovery: when coordinator restarts, it needs to know
+        // when VMs complete so it can clean up the associated runners from GitHub
+        let status_tx = tx.clone();
+        let status_agent = Arc::clone(self);
+        let status_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            // Skip the first tick since we already sent initial status
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+                let status = status_agent.build_status().await;
+                if status_tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await
+                    .is_err()
+                {
+                    // Channel closed, stream is ending
+                    break;
+                }
+            }
+        });
+
         // Process messages from coordinator
         loop {
             tokio::select! {
@@ -246,16 +272,21 @@ impl ProxmoxAgent {
                         }
                         Err(e) => {
                             error!("Stream error: {}", e);
+                            status_handle.abort();
                             return Err(Error::Grpc(e));
                         }
                     }
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received shutdown signal");
+                    status_handle.abort();
                     return Err(Error::Shutdown);
                 }
             }
         }
+
+        // Clean up status task when stream closes
+        status_handle.abort();
 
         Ok(())
     }

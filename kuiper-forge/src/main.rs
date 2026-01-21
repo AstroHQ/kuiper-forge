@@ -338,7 +338,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Run fleet manager (if enabled) and server concurrently
     if let Some(fm) = fleet_manager {
         tokio::select! {
-            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier) => {
+            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier, Some(runner_state)) => {
                 result
             }
             _ = fm.run() => {
@@ -348,7 +348,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         }
     } else {
         // No fleet manager, just run the server
-        run_server(server_config, auth_manager, agent_registry, None).await
+        run_server(server_config, auth_manager, agent_registry, None, None).await
     }
 }
 

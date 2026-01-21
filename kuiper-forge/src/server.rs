@@ -30,6 +30,7 @@ use crate::agent_registry::{AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::TlsConfig;
 use crate::fleet::FleetNotifier;
+use crate::runner_state::RunnerStateStore;
 
 /// Registration service implementation
 pub struct RegistrationServiceImpl {
@@ -94,6 +95,7 @@ pub struct AgentServiceImpl {
     auth_manager: Arc<AuthManager>,
     agent_registry: Arc<AgentRegistry>,
     fleet_notifier: Option<FleetNotifier>,
+    runner_state: Option<Arc<RunnerStateStore>>,
 }
 
 impl AgentServiceImpl {
@@ -101,11 +103,13 @@ impl AgentServiceImpl {
         auth_manager: Arc<AuthManager>,
         agent_registry: Arc<AgentRegistry>,
         fleet_notifier: Option<FleetNotifier>,
+        runner_state: Option<Arc<RunnerStateStore>>,
     ) -> Self {
         Self {
             auth_manager,
             agent_registry,
             fleet_notifier,
+            runner_state,
         }
     }
 
@@ -259,6 +263,7 @@ impl AgentService for AgentServiceImpl {
 
         // Clone what we need for the task
         let agent_registry = Arc::clone(&self.agent_registry);
+        let runner_state = self.runner_state.clone();
         let agent_id_clone = agent_id.clone();
 
         // Spawn task to handle inbound messages and forward commands
@@ -272,7 +277,7 @@ impl AgentService for AgentServiceImpl {
                     msg = inbound.next() => {
                         match msg {
                             Some(Ok(agent_msg)) => {
-                                handle_agent_message(&agent_registry, &agent_id, agent_msg).await;
+                                handle_agent_message(&agent_registry, &agent_id, agent_msg, runner_state.as_ref()).await;
                             }
                             Some(Err(e)) => {
                                 error!(agent_id = %agent_id, error = %e, "Stream error");
@@ -325,16 +330,37 @@ impl AgentService for AgentServiceImpl {
 }
 
 /// Handle messages received from an agent
-async fn handle_agent_message(registry: &AgentRegistry, agent_id: &str, msg: AgentMessage) {
+async fn handle_agent_message(
+    registry: &AgentRegistry,
+    agent_id: &str,
+    msg: AgentMessage,
+    runner_state: Option<&Arc<RunnerStateStore>>,
+) {
     match msg.payload {
         Some(AgentPayload::Status(status)) => {
             debug!(
                 agent_id = %agent_id,
                 active_vms = status.active_vms,
                 available_slots = status.available_slots,
+                vm_count = status.vms.len(),
                 "Agent status update"
             );
             registry.update_status(agent_id, status.active_vms as usize).await;
+
+            // Reconcile persisted runner state against the agent's current VM list
+            // This allows the recovery watcher to detect when VMs have completed
+            if let Some(rs) = runner_state {
+                let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
+                let removed = rs.reconcile_agent_vms(agent_id, &vm_names).await;
+                if !removed.is_empty() {
+                    info!(
+                        agent_id = %agent_id,
+                        removed_count = removed.len(),
+                        "Reconciled runner state - {} runner(s) marked as completed",
+                        removed.len()
+                    );
+                }
+            }
         }
         Some(AgentPayload::Result(result)) => {
             let command_id = result.command_id.clone();
@@ -388,6 +414,7 @@ pub async fn run_server(
     auth_manager: Arc<AuthManager>,
     agent_registry: Arc<AgentRegistry>,
     fleet_notifier: Option<FleetNotifier>,
+    runner_state: Option<Arc<RunnerStateStore>>,
 ) -> Result<()> {
     // Load TLS credentials
     let server_cert = std::fs::read_to_string(&config.tls.server_cert)
@@ -409,7 +436,7 @@ pub async fn run_server(
 
     // Create services
     let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
-    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier);
+    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
 
     info!(
         addr = %config.listen_addr,
