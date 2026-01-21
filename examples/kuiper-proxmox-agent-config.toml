@@ -18,26 +18,46 @@ ca_cert = "~/.config/kuiper-proxmox-agent/certs/ca.crt"
 certs_dir = "~/.config/kuiper-proxmox-agent/certs"
 
 [agent]
-labels = ["self-hosted", "linux", "x64"]
+labels = ["self-hosted", "Windows", "x64"]
 
 [proxmox]
-api_url = "https://proxmox.local:8006"
+api_url = "https://192.168.1.253:8006"
 node = "pve"
 token_id = "ci-runner@pve!runner"
 token_secret = "your-token-secret-here"
 accept_invalid_certs = true  # For self-signed Proxmox certs
 
 [vm]
-template_vmid = 9000
+# Default template VM ID to clone from (used when no mapping matches)
+template_vmid = 102
 storage = "local-lvm"
 linked_clone = true
-concurrent_vms = 4
+concurrent_vms = 2
 ip_timeout_secs = 120
 clone_timeout_secs = 300
 
+# Template mappings for label-based selection (first match wins)
+# Each mapping specifies labels that must ALL be present in job labels
+# Uncomment and customize as needed:
+
+# [[vm.template_mappings]]
+# labels = ["Windows", "2022"]
+# template_vmid = 9001
+
+# [[vm.template_mappings]]
+# labels = ["Windows", "2019"]
+# template_vmid = 9002
+
+# [[vm.template_mappings]]
+# labels = ["Linux", "ubuntu"]
+# template_vmid = 9003
+
 [ssh]
+# Authentication: provide private_key_path, password, or both
+# If both are provided, key auth is tried first, then password
 private_key_path = "~/.ssh/id_ed25519"
-username = "ci"
+password = "vagrant"
+username = "vagrant"
 port = 22
 timeout_secs = 30
 retries = 10

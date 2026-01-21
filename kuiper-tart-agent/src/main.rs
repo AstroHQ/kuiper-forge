@@ -28,6 +28,7 @@ mod error;
 mod ssh;
 mod vm_manager;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -463,6 +464,39 @@ impl TartAgent {
         }
     }
 
+    /// Select the appropriate VM image based on job labels.
+    ///
+    /// Iterates through `image_mappings` in order and returns the image from the first
+    /// mapping where ALL mapping labels are present in the job labels (case-insensitive).
+    /// Falls back to `base_image` if no mapping matches.
+    fn select_image(&self, job_labels: &[String]) -> String {
+        let job_labels_lower: HashSet<String> = job_labels
+            .iter()
+            .map(|l| l.to_lowercase())
+            .collect();
+
+        for mapping in &self.config.tart.image_mappings {
+            let all_match = mapping
+                .labels
+                .iter()
+                .all(|ml| job_labels_lower.contains(&ml.to_lowercase()));
+            if all_match {
+                info!(
+                    "Selected image '{}' for labels {:?} (matched mapping labels {:?})",
+                    mapping.image, job_labels, mapping.labels
+                );
+                return mapping.image.clone();
+            }
+        }
+
+        // Fallback to default
+        info!(
+            "No image mapping matched labels {:?}, using default '{}'",
+            job_labels, self.config.tart.base_image
+        );
+        self.config.tart.base_image.clone()
+    }
+
     /// Handle CreateRunner command.
     async fn handle_create_runner(
         &self,
@@ -493,12 +527,18 @@ impl TartAgent {
             }
         );
 
+        // Select image based on job labels
+        let selected_image = self.select_image(&cmd.labels);
+
         let result: std::result::Result<(String, String), Error> = async {
-            // 1. Clone and start VM (using agent's configured base_image)
-            info!("[{}] Step 1/5: Creating VM from template...", vm_name);
+            // 1. Clone and start VM from selected image
+            info!(
+                "[{}] Step 1/5: Creating VM from template '{}'...",
+                vm_name, selected_image
+            );
             let vm_id = self
                 .vm_manager
-                .create_vm(&vm_name, &self.config.tart.base_image)
+                .create_vm(&vm_name, &selected_image)
                 .await
                 .map_err(|e| {
                     error!("[{}] VM creation failed: {}", vm_name, e);

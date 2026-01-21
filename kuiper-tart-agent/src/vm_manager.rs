@@ -471,6 +471,7 @@ mod tests {
             shared_cache_dir: None,
             ssh: Default::default(),
             runner_version: "latest".to_string(),
+            image_mappings: Vec::new(),
         };
         let log_dir = std::env::temp_dir().join("kuiper-tart-agent-test-logs");
         let manager = VmManager::new(config, SshConfig::default(), log_dir);

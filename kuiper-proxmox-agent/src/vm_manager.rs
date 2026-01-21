@@ -111,17 +111,17 @@ impl VmManager {
         self.available_slots().await > 0
     }
 
-    /// Create a new VM by cloning the template.
+    /// Create a new VM by cloning a template.
     ///
     /// Returns the VM ID of the new clone.
-    pub async fn create_vm(&self, name: &str) -> Result<VmInstance> {
+    pub async fn create_vm(&self, name: &str, template_vmid: u32) -> Result<VmInstance> {
         if !self.has_capacity().await {
             return Err(Error::vm("No available VM slots"));
         }
 
         // Get next available VM ID
         let vmid = self.proxmox.get_next_vmid().await?;
-        info!("Creating VM {} with ID {}", name, vmid);
+        info!("Creating VM {} with ID {} from template {}", name, vmid, template_vmid);
 
         // Track the VM
         let instance = VmInstance {
@@ -141,7 +141,7 @@ impl VmManager {
         };
 
         let task = self.proxmox.clone_vm(
-            self.vm_config.template_vmid,
+            template_vmid,
             vmid,
             name,
             self.vm_config.linked_clone,
@@ -461,12 +461,13 @@ impl VmManager {
     pub async fn run_complete_lifecycle(
         &self,
         vm_name: &str,
+        template_vmid: u32,
         registration_token: &str,
         labels: &[String],
         runner_scope_url: &str,
     ) -> Result<(u32, String)> {
         // 1. Create VM
-        let vm = self.create_vm(vm_name).await?;
+        let vm = self.create_vm(vm_name, template_vmid).await?;
         let vmid = vm.vmid;
 
         // Ensure cleanup on failure

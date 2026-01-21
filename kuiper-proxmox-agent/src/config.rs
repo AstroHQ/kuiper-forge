@@ -61,10 +61,19 @@ pub struct ProxmoxConfig {
     pub accept_invalid_certs: bool,
 }
 
+/// A label-to-template mapping rule for selecting VM templates based on job labels.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TemplateMapping {
+    /// Labels that must ALL be present in job labels for this mapping to match
+    pub labels: Vec<String>,
+    /// The Proxmox template VMID to use when this mapping matches
+    pub template_vmid: u32,
+}
+
 /// VM configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VmConfig {
-    /// Template VM ID to clone from
+    /// Default template VM ID to clone from (used when no template mapping matches)
     pub template_vmid: u32,
     /// Storage pool for clones (e.g., "local-lvm")
     pub storage: String,
@@ -80,6 +89,9 @@ pub struct VmConfig {
     /// Timeout in seconds for clone operation
     #[serde(default = "default_clone_timeout")]
     pub clone_timeout_secs: u64,
+    /// Template mappings for label-based selection (first match wins)
+    #[serde(default)]
+    pub template_mappings: Vec<TemplateMapping>,
 }
 
 fn default_linked_clone() -> bool {

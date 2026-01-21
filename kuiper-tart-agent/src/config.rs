@@ -51,10 +51,19 @@ pub struct AgentConfig {
     pub labels: Vec<String>,
 }
 
+/// A label-to-image mapping rule for selecting VM images based on job labels.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageMapping {
+    /// Labels that must ALL be present in job labels for this mapping to match
+    pub labels: Vec<String>,
+    /// The Tart image to use when this mapping matches
+    pub image: String,
+}
+
 /// Tart-specific configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TartConfig {
-    /// Default base image for VMs
+    /// Default base image for VMs (used when no image mapping matches)
     pub base_image: String,
     /// Maximum concurrent VMs (Apple Virtualization Framework limit is 2)
     #[serde(default = "default_max_concurrent_vms")]
@@ -68,6 +77,9 @@ pub struct TartConfig {
     /// See: https://github.com/actions/runner/releases
     #[serde(default = "default_runner_version")]
     pub runner_version: String,
+    /// Image mappings for label-based selection (first match wins)
+    #[serde(default)]
+    pub image_mappings: Vec<ImageMapping>,
 }
 
 fn default_runner_version() -> String {
@@ -223,6 +235,7 @@ impl Config {
                 shared_cache_dir: None,
                 ssh: SshAuthConfig::default(),
                 runner_version: default_runner_version(),
+                image_mappings: Vec::new(),
             },
             cleanup: CleanupConfig::default(),
             reconnect: ReconnectConfig::default(),

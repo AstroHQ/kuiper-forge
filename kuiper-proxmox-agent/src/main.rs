@@ -20,6 +20,7 @@ use clap::Parser;
 use config::Config;
 use error::{Error, Result};
 use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -413,6 +414,39 @@ impl ProxmoxAgent {
         Ok(())
     }
 
+    /// Select the appropriate template VMID based on job labels.
+    ///
+    /// Iterates through `template_mappings` in order and returns the template_vmid from the first
+    /// mapping where ALL mapping labels are present in the job labels (case-insensitive).
+    /// Falls back to the default `template_vmid` if no mapping matches.
+    fn select_template(&self, job_labels: &[String]) -> u32 {
+        let job_labels_lower: HashSet<String> = job_labels
+            .iter()
+            .map(|l| l.to_lowercase())
+            .collect();
+
+        for mapping in &self.config.vm.template_mappings {
+            let all_match = mapping
+                .labels
+                .iter()
+                .all(|ml| job_labels_lower.contains(&ml.to_lowercase()));
+            if all_match {
+                info!(
+                    "Selected template {} for labels {:?} (matched mapping labels {:?})",
+                    mapping.template_vmid, job_labels, mapping.labels
+                );
+                return mapping.template_vmid;
+            }
+        }
+
+        // Fallback to default
+        info!(
+            "No template mapping matched labels {:?}, using default {}",
+            job_labels, self.config.vm.template_vmid
+        );
+        self.config.vm.template_vmid
+    }
+
     /// Handle a CreateRunner command.
     async fn handle_create_runner(
         &self,
@@ -422,11 +456,15 @@ impl ProxmoxAgent {
         let vm_manager = self.vm_manager.clone();
         let runner_name = cmd.vm_name.clone();
 
+        // Select template based on job labels
+        let template_vmid = self.select_template(&cmd.labels);
+
         // Spawn task to handle the runner lifecycle
         tokio::spawn(async move {
             let result = vm_manager
                 .run_complete_lifecycle(
                     &cmd.vm_name,
+                    template_vmid,
                     &cmd.registration_token,
                     &cmd.labels,
                     &cmd.runner_scope_url,
