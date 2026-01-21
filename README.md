@@ -1,4 +1,4 @@
-# Kuiper
+# Kuiper Forge
 
 Ephemeral GitHub Actions self-hosted runners on VMs.
 
