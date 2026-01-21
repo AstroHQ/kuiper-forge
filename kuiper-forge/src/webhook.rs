@@ -226,16 +226,24 @@ async fn handle_webhook(
         }
     };
 
+    // Use configured runner_scope, or default to the repository from the webhook
+    let runner_scope = mapping.runner_scope.clone().unwrap_or_else(|| {
+        RunnerScope::Repository {
+            owner: event.repository.owner.login.clone(),
+            repo: event.repository.name.clone(),
+        }
+    });
+
     info!(
         "Matched job {} to runner scope {:?} (mapping labels: {:?})",
-        event.workflow_job.id, mapping.runner_scope, mapping.labels
+        event.workflow_job.id, runner_scope, mapping.labels
     );
 
     // Send request to fleet manager (non-blocking)
     let request = WebhookRunnerRequest {
         job_labels: event.workflow_job.labels,
         agent_labels: mapping.labels.clone(),
-        runner_scope: mapping.runner_scope.clone(),
+        runner_scope,
         runner_group: mapping.runner_group.clone(),
         job_id: event.workflow_job.id,
     };
@@ -295,17 +303,17 @@ mod tests {
         let mappings = vec![
             LabelMapping {
                 labels: vec!["self-hosted".into(), "macOS".into(), "ARM64".into()],
-                runner_scope: RunnerScope::Organization {
+                runner_scope: Some(RunnerScope::Organization {
                     name: "test-org".into(),
-                },
+                }),
                 runner_group: None,
             },
             LabelMapping {
                 labels: vec!["self-hosted".into(), "Linux".into()],
-                runner_scope: RunnerScope::Repository {
+                runner_scope: Some(RunnerScope::Repository {
                     owner: "test-org".into(),
                     repo: "test-repo".into(),
-                },
+                }),
                 runner_group: Some("linux-runners".into()),
             },
         ];
@@ -316,9 +324,9 @@ mod tests {
         assert!(matched.is_some());
         assert_eq!(
             matched.unwrap().runner_scope,
-            RunnerScope::Organization {
+            Some(RunnerScope::Organization {
                 name: "test-org".into()
-            }
+            })
         );
 
         // Superset match (extra labels OK)
@@ -352,7 +360,7 @@ mod tests {
         assert!(matched.is_some());
         assert!(matches!(
             matched.unwrap().runner_scope,
-            RunnerScope::Repository { .. }
+            Some(RunnerScope::Repository { .. })
         ));
     }
 
@@ -364,9 +372,7 @@ mod tests {
 
         let mappings = vec![LabelMapping {
             labels: vec!["self-hosted".into()],
-            runner_scope: RunnerScope::Organization {
-                name: "test".into(),
-            },
+            runner_scope: None, // Test with no runner_scope - will use repo from webhook
             runner_group: None,
         }];
         let job_labels: Vec<String> = vec![];

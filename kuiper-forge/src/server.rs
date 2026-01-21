@@ -42,6 +42,11 @@ use crate::fleet::FleetNotifier;
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{self, WebhookNotifier, WebhookState};
 
+/// Custom extension for peer certificates when using manual TLS handling.
+/// Used in webhook mode where we handle TLS ourselves instead of letting tonic do it.
+#[derive(Clone)]
+pub struct PeerCertificates(pub Vec<Vec<u8>>);
+
 /// Registration service implementation
 pub struct RegistrationServiceImpl {
     auth_manager: Arc<AuthManager>,
@@ -126,31 +131,45 @@ impl AgentServiceImpl {
     /// Extract agent ID from mTLS client certificate CN.
     ///
     /// When optional mTLS is enabled, tonic populates TlsConnectInfo with peer certificates.
+    /// In webhook mode with manual TLS handling, we inject PeerCertificates instead.
     /// We extract the Common Name (CN) from the client certificate, which contains
     /// the agent_id that was set during registration.
     fn extract_agent_id_from_cert<T>(&self, request: &Request<T>) -> Result<String, Status> {
         use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 
-        // Get TLS connection info from request extensions
-        // Note: tonic uses TlsConnectInfo<TcpConnectInfo>, not the raw TlsStream type
-        let tls_info = request
-            .extensions()
-            .get::<TlsConnectInfo<TcpConnectInfo>>()
-            .ok_or_else(|| {
-                Status::unauthenticated("No TLS connection info - TLS required")
+        // Try to get peer cert DER bytes from either tonic's TlsConnectInfo or our custom PeerCertificates
+        let cert_der: Vec<u8> = if let Some(tls_info) =
+            request.extensions().get::<TlsConnectInfo<TcpConnectInfo>>()
+        {
+            // Standard tonic TLS path (gRPC-only mode)
+            let certs = tls_info.peer_certs().ok_or_else(|| {
+                Status::unauthenticated(
+                    "No client certificate presented - mTLS required for agent service",
+                )
             })?;
-
-        // Get peer certificates (None if client didn't present a cert)
-        let certs = tls_info
-            .peer_certs()
-            .ok_or_else(|| Status::unauthenticated("No client certificate presented - mTLS required for agent service"))?;
-
-        let cert_der = certs
-            .first()
-            .ok_or_else(|| Status::unauthenticated("Empty client certificate chain"))?;
+            certs
+                .first()
+                .ok_or_else(|| Status::unauthenticated("Empty client certificate chain"))?
+                .to_vec()
+        } else if let Some(peer_certs) = request.extensions().get::<PeerCertificates>() {
+            // Custom TLS path (webhook mode with manual TLS handling)
+            peer_certs
+                .0
+                .first()
+                .ok_or_else(|| {
+                    Status::unauthenticated(
+                        "No client certificate presented - mTLS required for agent service",
+                    )
+                })?
+                .clone()
+        } else {
+            return Err(Status::unauthenticated(
+                "No TLS connection info - TLS required",
+            ));
+        };
 
         // Parse the certificate to extract CN
-        let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())
+        let (_, cert) = x509_parser::parse_x509_certificate(&cert_der)
             .map_err(|e| Status::unauthenticated(format!("Invalid client certificate: {}", e)))?;
 
         // Extract CN from subject
@@ -518,10 +537,13 @@ pub async fn run_server(
             .build()
             .context("Failed to create client verifier")?;
 
-    let tls_config = tokio_rustls::rustls::ServerConfig::builder()
+    let mut tls_config = tokio_rustls::rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(certs, key)
         .context("Failed to configure TLS")?;
+
+    // Set ALPN protocols - h2 required for gRPC, http/1.1 for webhook
+    tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
@@ -576,6 +598,14 @@ pub async fn run_server(
                 }
             };
 
+            // Extract peer certificates from TLS connection (for mTLS auth)
+            // Must be done before wrapping in TokioIo since we need access to the raw stream
+            let peer_certs: Option<PeerCertificates> = tls_stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .map(|certs| PeerCertificates(certs.iter().map(|c| c.to_vec()).collect()));
+
             // Wrap in hyper IO adapter
             let io = TokioIo::new(tls_stream);
 
@@ -587,6 +617,7 @@ pub async fn run_server(
             let service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
                 let mut grpc = grpc_service.clone();
                 let http = http_router.clone();
+                let peer_certs = peer_certs.clone();
 
                 async move {
                     // Check if this is a gRPC request
@@ -597,6 +628,12 @@ pub async fn run_server(
                         .unwrap_or(false);
 
                     if is_grpc {
+                        // Inject peer certificates into request extensions for mTLS auth
+                        let mut req = req;
+                        if let Some(certs) = peer_certs {
+                            req.extensions_mut().insert(certs);
+                        }
+
                         // Route to gRPC using tonic's Routes service
                         match grpc.call(req).await {
                             Ok(resp) => {

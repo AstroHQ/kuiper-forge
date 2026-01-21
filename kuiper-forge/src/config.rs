@@ -145,7 +145,10 @@ pub struct LabelMapping {
     pub labels: Vec<String>,
 
     /// The runner scope to use for jobs matching these labels.
-    pub runner_scope: RunnerScope,
+    ///
+    /// If not specified, defaults to the repository that triggered the webhook.
+    #[serde(default)]
+    pub runner_scope: Option<RunnerScope>,
 
     /// Optional runner group for the created runner.
     #[serde(default)]

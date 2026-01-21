@@ -3,15 +3,6 @@
 //! The coordinator daemon manages ephemeral GitHub Actions runners
 //! across multiple VM providers (Tart for macOS, Proxmox for Windows/Linux).
 
-mod agent_registry;
-mod auth;
-mod config;
-mod fleet;
-mod github;
-mod runner_state;
-mod server;
-mod webhook;
-
 use anyhow::{anyhow, Context, Result};
 use chrono::Duration;
 use clap::{Parser, Subcommand};
@@ -22,10 +13,13 @@ use tracing::{debug, info, warn, Level};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::agent_registry::AgentRegistry;
-use crate::auth::{export_ca_cert, generate_server_cert, init_ca, AuthManager, AuthStore};
-use crate::config::{Config, ProvisioningMode};
-use crate::server::{run_server, ServerConfig};
+use kuiper_forge::agent_registry::AgentRegistry;
+use kuiper_forge::auth::{export_ca_cert, generate_server_cert, init_ca, AuthManager, AuthStore};
+use kuiper_forge::config::{self, Config, ProvisioningMode};
+use kuiper_forge::fleet;
+use kuiper_forge::github;
+use kuiper_forge::runner_state;
+use kuiper_forge::server::{run_server, ServerConfig};
 
 /// CI Runner Coordinator - Manages ephemeral GitHub Actions runners
 #[derive(Parser)]
