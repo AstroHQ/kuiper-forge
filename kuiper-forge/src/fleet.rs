@@ -19,7 +19,7 @@ use kuiper_agent_proto::{
 };
 
 use crate::agent_registry::AgentRegistry;
-use crate::config::{Config, RunnerConfig};
+use crate::config::{Config, ProvisioningMode, RunnerConfig};
 use crate::github::RunnerTokenProvider;
 use crate::runner_state::RunnerStateStore;
 
@@ -143,11 +143,40 @@ impl FleetManager {
     ///
     /// This runs forever, periodically checking and maintaining runner pools.
     /// Also responds to notifications for immediate reconciliation and recovery.
+    ///
+    /// Behavior depends on provisioning mode:
+    /// - **Fixed Capacity**: Actively reconciles runner pools to maintain target counts.
+    /// - **Webhook**: Waits passively for webhook-triggered runner creation (not yet implemented).
+    ///   Still handles runner events and recovery for any runners that were created.
     pub async fn run(mut self) {
+        let provisioning_mode = self.config.provisioning.mode;
+
+        match provisioning_mode {
+            ProvisioningMode::FixedCapacity => {
+                info!(
+                    "Fleet manager started in FIXED CAPACITY mode with {} runner configurations",
+                    self.config.runners.len()
+                );
+                self.run_fixed_capacity_loop().await;
+            }
+            ProvisioningMode::Webhook => {
+                info!("Fleet manager started in WEBHOOK mode");
+                info!("Runners will be created on-demand via GitHub webhook events");
+                if self.config.provisioning.webhook.is_none() {
+                    warn!("Webhook mode enabled but no webhook configuration found!");
+                    warn!("Add [provisioning.webhook] section to your config to receive webhook events");
+                }
+                self.run_webhook_loop().await;
+            }
+        }
+    }
+
+    /// Run the fixed capacity provisioning loop.
+    ///
+    /// Periodically reconciles runner pools to maintain target counts.
+    async fn run_fixed_capacity_loop(&mut self) {
         let check_interval = Duration::from_secs(30);
         let mut ticker = tokio::time::interval(check_interval);
-
-        info!("Fleet manager started with {} runner configurations", self.config.runners.len());
 
         // On startup, log any persisted runners (from previous coordinator run)
         let persisted = self.runner_state.get_all_runners().await;
@@ -172,6 +201,52 @@ impl FleetManager {
                 Some(()) = self.notify_rx.recv() => {
                     info!("Fleet manager triggered by agent connection");
                     self.reconcile().await;
+                }
+                Some(recovery_info) = self.recovery_rx.recv() => {
+                    info!(
+                        "Fleet manager received recovery info from agent '{}' with {} VMs",
+                        recovery_info.agent_id, recovery_info.vm_names.len()
+                    );
+                    self.handle_agent_recovery(recovery_info).await;
+                }
+                Some(event) = self.runner_event_rx.recv() => {
+                    self.handle_runner_event(event).await;
+                }
+            }
+        }
+    }
+
+    /// Run the webhook provisioning loop.
+    ///
+    /// In webhook mode, the fleet manager does not actively create runners.
+    /// Instead, it waits for webhook events to trigger runner creation.
+    /// This loop still handles recovery and runner lifecycle events.
+    async fn run_webhook_loop(&mut self) {
+        // On startup, log any persisted runners (from previous coordinator run)
+        let persisted = self.runner_state.get_all_runners().await;
+        if !persisted.is_empty() {
+            info!(
+                "Found {} persisted runner(s) from previous run - will recover when agents reconnect",
+                persisted.len()
+            );
+            for (name, info) in &persisted {
+                info!(
+                    "  Persisted runner '{}' on agent '{}' (created {})",
+                    name, info.agent_id, info.created_at
+                );
+            }
+        }
+
+        // In webhook mode, we don't run periodic reconciliation.
+        // We only handle recovery and runner events.
+        // The actual webhook HTTP server will be implemented separately and will
+        // call into the fleet manager to create runners on-demand.
+        loop {
+            tokio::select! {
+                Some(()) = self.notify_rx.recv() => {
+                    // In webhook mode, we don't reconcile on agent connect
+                    // (no target counts to maintain). But we log it for visibility.
+                    info!("Agent connected (webhook mode - no reconciliation needed)");
                 }
                 Some(recovery_info) = self.recovery_rx.recv() => {
                     info!(
