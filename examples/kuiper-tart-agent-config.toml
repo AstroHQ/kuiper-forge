@@ -26,7 +26,7 @@ certs_dir = "~/.config/kuiper-tart-agent/certs"
 labels = ["self-hosted", "macos", "arm64", "test-sequoia"]
 
 [tart]
-# Base VM image to clone for runners
+# Default base VM image to clone for runners (used when no mapping matches)
 base_image = "ghcr.io/cirruslabs/macos-sequoia-base:latest"
 # Max concurrent VMs (Apple Virtualization limit is 2)
 max_concurrent_vms = 2
@@ -35,6 +35,22 @@ max_concurrent_vms = 2
 # See https://github.com/actions/runner/releases for available versions
 # runner_version = "latest"
 # runner_version = "2.321.0"  # pin to specific version
+
+# Image mappings for label-based selection (first match wins)
+# Each mapping specifies labels that must ALL be present in job labels
+# Uncomment and customize as needed:
+
+# [[tart.image_mappings]]
+# labels = ["macOS", "sonoma"]
+# image = "ghcr.io/cirruslabs/macos-sonoma-base:latest"
+
+# [[tart.image_mappings]]
+# labels = ["macOS", "ventura"]
+# image = "ghcr.io/cirruslabs/macos-ventura-base:latest"
+
+# [[tart.image_mappings]]
+# labels = ["xcode-16"]
+# image = "macos-sequoia-xcode16"
 
 # SSH configuration for connecting to VMs
 [tart.ssh]

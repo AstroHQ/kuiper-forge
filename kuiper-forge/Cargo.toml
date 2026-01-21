@@ -15,7 +15,9 @@ thiserror = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.8"
+
+# Configuration (supports TOML files + environment variables)
+figment = { version = "0.10", features = ["toml", "env"] }
 
 # Async runtime
 tokio = { workspace = true }

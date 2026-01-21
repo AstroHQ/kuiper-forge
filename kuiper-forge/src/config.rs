@@ -1,7 +1,28 @@
 //! Configuration loading for the coordinator daemon.
 //!
-//! Loads TOML configuration including GitHub App credentials, TLS settings,
-//! and runner configurations.
+//! Loads configuration from TOML files and/or environment variables using figment.
+//! This makes the coordinator container-friendly by supporting both config files
+//! and environment variable overrides.
+//!
+//! # Configuration Sources (in order of priority, lowest to highest)
+//!
+//! 1. Default values (from `#[serde(default)]` attributes)
+//! 2. TOML config file (if provided)
+//! 3. Environment variables (prefix: `KUIPER_`, nested with `__`)
+//!
+//! # Environment Variable Naming
+//!
+//! Environment variables use the `KUIPER_` prefix with double-underscore for nesting:
+//!
+//! - `KUIPER_GITHUB__APP_ID` → `github.app_id`
+//! - `KUIPER_GITHUB__PRIVATE_KEY_PATH` → `github.private_key_path`
+//! - `KUIPER_GRPC__LISTEN_ADDR` → `grpc.listen_addr`
+//! - `KUIPER_TLS__CA_CERT` → `tls.ca_cert`
+//! - `KUIPER_PROVISIONING__MODE` → `provisioning.mode`
+//! - `KUIPER_PROVISIONING__WEBHOOK__SECRET` → `provisioning.webhook.secret`
+//!
+//! **Note:** Complex arrays like `runners` and `label_mappings` should be configured
+//! via TOML file, not environment variables.
 //!
 //! # Provisioning Modes
 //!
@@ -15,6 +36,10 @@
 //!   to use.
 
 use anyhow::{Context, Result};
+use figment::{
+    providers::{Env, Format, Toml},
+    Figment,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -314,13 +339,32 @@ impl RunnerScope {
 }
 
 impl Config {
-    /// Load configuration from a TOML file
+    /// Load configuration from TOML file and environment variables.
+    ///
+    /// Configuration sources are merged in order (later sources override earlier):
+    /// 1. TOML config file (if it exists)
+    /// 2. Environment variables (prefix: `KUIPER_`, nested with `__`)
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// # Override listen address via environment variable
+    /// export KUIPER_GRPC__LISTEN_ADDR=0.0.0.0:8080
+    /// ```
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        let mut figment = Figment::new();
 
-        let config: Config = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+        // Add TOML file if it exists
+        if path.exists() {
+            figment = figment.merge(Toml::file(path));
+        }
+
+        // Add environment variables (always, to allow overrides)
+        figment = figment.merge(Env::prefixed("KUIPER_").split("__"));
+
+        let config: Config = figment
+            .extract()
+            .with_context(|| format!("Failed to load config from {} and environment", path.display()))?;
 
         Ok(config)
     }
@@ -331,13 +375,20 @@ impl Config {
     /// a minimal config that just has TLS paths.
     pub fn load_or_default(path: &Path, data_dir: &Path) -> Result<Self> {
         if path.exists() {
-            // Try to load the existing config
+            // Try to load the existing config (with env var overrides)
             match Self::load(path) {
                 Ok(config) => return Ok(config),
                 Err(e) => {
                     tracing::warn!("Failed to load config (using defaults for dry-run): {}", e);
                 }
             }
+        }
+
+        // Try loading from environment variables only
+        let figment = Figment::new().merge(Env::prefixed("KUIPER_").split("__"));
+        if let Ok(config) = figment.extract::<Config>() {
+            tracing::info!("Loaded configuration from environment variables");
+            return Ok(config);
         }
 
         // Create minimal config for dry-run mode with test runners
@@ -508,6 +559,15 @@ repo = "my-repo"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use figment::providers::Toml as TomlProvider;
+
+    /// Helper to parse TOML config strings in tests
+    fn parse_config(toml_str: &str) -> Config {
+        Figment::new()
+            .merge(TomlProvider::string(toml_str))
+            .extract()
+            .expect("Failed to parse test config")
+    }
 
     #[test]
     fn test_parse_config() {
@@ -533,7 +593,7 @@ type = "organization"
 name = "my-org"
 "#;
 
-        let config: Config = toml::from_str(config_str).unwrap();
+        let config = parse_config(config_str);
         assert_eq!(config.github.app_id, "123456");
         assert_eq!(config.grpc.listen_addr, "0.0.0.0:9443");
         assert_eq!(config.runners.len(), 1);
@@ -567,7 +627,7 @@ server_cert = "/etc/ci-runner/server.crt"
 server_key = "/etc/ci-runner/server.key"
 "#;
 
-        let config: Config = toml::from_str(config_str).unwrap();
+        let config = parse_config(config_str);
         assert_eq!(config.provisioning.mode, ProvisioningMode::FixedCapacity);
         assert!(config.provisioning.mode.is_fixed_capacity());
         assert!(!config.provisioning.mode.is_webhook());
@@ -590,7 +650,7 @@ server_key = "/etc/ci-runner/server.key"
 mode = "fixed_capacity"
 "#;
 
-        let config: Config = toml::from_str(config_str).unwrap();
+        let config = parse_config(config_str);
         assert_eq!(config.provisioning.mode, ProvisioningMode::FixedCapacity);
     }
 
@@ -622,7 +682,7 @@ type = "organization"
 name = "my-org"
 "#;
 
-        let config: Config = toml::from_str(config_str).unwrap();
+        let config = parse_config(config_str);
         assert_eq!(config.provisioning.mode, ProvisioningMode::Webhook);
         assert!(config.provisioning.mode.is_webhook());
         assert!(!config.provisioning.mode.is_fixed_capacity());
@@ -654,7 +714,7 @@ mode = "webhook"
 secret = "test-secret"
 "#;
 
-        let config: Config = toml::from_str(config_str).unwrap();
+        let config = parse_config(config_str);
         let webhook = config.provisioning.webhook.unwrap();
         assert_eq!(webhook.path, "/webhook"); // default path
     }
