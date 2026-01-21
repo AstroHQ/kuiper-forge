@@ -44,10 +44,6 @@ pub enum Error {
     /// Channel send error
     #[error("Channel send error")]
     ChannelSend,
-
-    /// Shutdown signal received
-    #[error("Shutdown requested")]
-    Shutdown,
 }
 
 impl Error {

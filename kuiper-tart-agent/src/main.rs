@@ -303,13 +303,15 @@ impl TartAgent {
             let mut connector =
                 AgentConnector::new(self.agent_config.clone(), self.cert_store.clone());
 
-            match connector.connect().await {
+            let connect_result = connector.connect().await;
+            match connect_result {
                 Ok(client) => {
                     info!("Connected to coordinator");
                     // Reset reconnect delay on successful connection
                     reconnect_delay = Duration::from_secs(self.config.reconnect.initial_delay_secs);
 
-                    if let Err(e) = self.run_stream(client).await {
+                    let stream_result = self.run_stream(client).await;
+                    if let Err(e) = stream_result {
                         warn!("Stream error: {}", e);
                     }
                 }
@@ -380,19 +382,21 @@ impl TartAgent {
         });
 
         // Process messages from coordinator
-        while let Some(msg_result) = inbound.message().await.transpose() {
+        loop {
+            let msg_result = inbound.message().await.transpose();
             match msg_result {
-                Ok(msg) => {
+                Some(Ok(msg)) => {
                     if let Some(payload) = msg.payload {
                         // This spawns tasks for long-running commands, doesn't block
                         self.handle_coordinator_message(payload, &tx);
                     }
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     error!("Error receiving message: {}", e);
                     status_handle.abort();
                     return Err(Error::Status(e));
                 }
+                None => break,
             }
         }
 

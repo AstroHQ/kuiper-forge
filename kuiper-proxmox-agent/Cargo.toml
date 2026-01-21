@@ -1,7 +1,7 @@
 [package]
 name = "kuiper-proxmox-agent"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Proxmox VE agent for CI runner coordination (Windows/Linux)"
 
 [[bin]]

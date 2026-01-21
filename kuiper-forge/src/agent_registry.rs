@@ -146,11 +146,11 @@ impl ConnectedAgent {
     /// Complete a pending command with a response
     pub async fn complete_command(&self, command_id: &str, response: AgentMessage) -> bool {
         let mut pending = self.pending_commands.write().await;
-        if let Some(tx) = pending.remove(command_id) {
+        match pending.remove(command_id) { Some(tx) => {
             tx.send(response).is_ok()
-        } else {
+        } _ => {
             false
-        }
+        }}
     }
 
     /// Update the last seen timestamp
@@ -384,7 +384,7 @@ impl AgentRegistry {
     /// Reserve a slot on an agent for an upcoming VM creation
     /// Returns true if reservation succeeded
     pub async fn reserve_slot(&self, agent_id: &str) -> bool {
-        if let Some(agent) = self.get(agent_id).await {
+        match self.get(agent_id).await { Some(agent) => {
             let mut agent = agent.write().await;
             let reserved = agent.reserve_slot();
             if reserved {
@@ -395,9 +395,9 @@ impl AgentRegistry {
                 );
             }
             reserved
-        } else {
+        } _ => {
             false
-        }
+        }}
     }
 
     /// Release a reserved slot on an agent

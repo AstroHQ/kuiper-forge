@@ -248,10 +248,6 @@ impl ProxmoxAgent {
                 Ok(_) => {
                     info!("Connection closed, reconnecting...");
                 }
-                Err(Error::Shutdown) => {
-                    info!("Shutting down");
-                    return Ok(());
-                }
                 Err(e) => {
                     error!("Agent error: {}", e);
                 }

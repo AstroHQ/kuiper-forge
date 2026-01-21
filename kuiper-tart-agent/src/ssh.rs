@@ -127,7 +127,8 @@ pub async fn wait_for_ssh(ip: Ipv4Addr, timeout: Duration) -> Result<()> {
     debug!("Waiting for SSH on {}", addr);
 
     while tokio::time::Instant::now() < deadline {
-        match TcpStream::connect(&addr).await {
+        let connect_result = TcpStream::connect(&addr).await;
+        match connect_result {
             Ok(_) => {
                 info!("SSH port available on {}", ip);
                 return Ok(());
@@ -244,22 +245,23 @@ pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result
     let mut stderr = Vec::new();
     let mut exit_status = None;
 
-    while let Some(msg) = channel.wait().await {
+    loop {
+        let msg = channel.wait().await;
         match msg {
-            ChannelMsg::Data { data } => {
+            Some(ChannelMsg::Data { data }) => {
                 stdout.extend_from_slice(&data);
             }
-            ChannelMsg::ExtendedData { data, ext } => {
+            Some(ChannelMsg::ExtendedData { data, ext }) => {
                 if ext == 1 {
                     // stderr
                     stderr.extend_from_slice(&data);
                 }
             }
-            ChannelMsg::ExitStatus { exit_status: status } => {
+            Some(ChannelMsg::ExitStatus { exit_status: status }) => {
                 exit_status = Some(status);
             }
-            ChannelMsg::Eof | ChannelMsg::Close => break,
-            _ => {}
+            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+            Some(_) => {}
         }
     }
 
@@ -321,9 +323,10 @@ pub async fn ssh_exec_with_logging(
 
     let mut exit_status = None;
 
-    while let Some(msg) = channel.wait().await {
+    loop {
+        let msg = channel.wait().await;
         match msg {
-            ChannelMsg::Data { data } => {
+            Some(ChannelMsg::Data { data }) => {
                 // Write stdout to log file
                 log_file
                     .write_all(&data)
@@ -336,7 +339,7 @@ pub async fn ssh_exec_with_logging(
                     }
                 }
             }
-            ChannelMsg::ExtendedData { data, ext } => {
+            Some(ChannelMsg::ExtendedData { data, ext }) => {
                 if ext == 1 {
                     // stderr - prefix with [stderr] in log
                     let prefixed: Vec<u8> = data
@@ -355,11 +358,11 @@ pub async fn ssh_exec_with_logging(
                     }
                 }
             }
-            ChannelMsg::ExitStatus { exit_status: status } => {
+            Some(ChannelMsg::ExitStatus { exit_status: status }) => {
                 exit_status = Some(status);
             }
-            ChannelMsg::Eof | ChannelMsg::Close => break,
-            _ => {}
+            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+            Some(_) => {}
         }
     }
 
