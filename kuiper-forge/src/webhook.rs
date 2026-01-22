@@ -8,12 +8,12 @@
 //! - Axum HTTP handlers for the webhook endpoint
 
 use axum::{
+    Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
-    Router,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -91,19 +91,28 @@ pub struct WebhookRunnerRequest {
     pub job_id: u64,
 }
 
-/// Handle for sending webhook runner requests to the fleet manager
+/// Event types sent from webhook handler to fleet manager
+#[derive(Debug, Clone)]
+pub enum WebhookEvent {
+    /// Job queued - create a runner
+    RunnerRequest(WebhookRunnerRequest),
+    /// Job completed/cancelled - clean up deduplication state
+    JobCompleted { job_id: u64 },
+}
+
+/// Handle for sending webhook events to the fleet manager
 #[derive(Clone)]
 pub struct WebhookNotifier {
-    tx: mpsc::Sender<WebhookRunnerRequest>,
+    tx: mpsc::Sender<WebhookEvent>,
 }
 
 impl WebhookNotifier {
-    pub fn new(tx: mpsc::Sender<WebhookRunnerRequest>) -> Self {
+    pub fn new(tx: mpsc::Sender<WebhookEvent>) -> Self {
         Self { tx }
     }
 
-    pub async fn request_runner(&self, request: WebhookRunnerRequest) -> bool {
-        self.tx.try_send(request).is_ok()
+    pub async fn send(&self, event: WebhookEvent) -> bool {
+        self.tx.try_send(event).is_ok()
     }
 }
 
@@ -159,7 +168,9 @@ pub fn match_labels<'a>(
 /// Build the Axum router for webhook endpoints.
 pub fn webhook_router(state: Arc<WebhookState>) -> Router {
     let path = state.config.path.clone();
-    Router::new().route(&path, post(handle_webhook)).with_state(state)
+    Router::new()
+        .route(&path, post(handle_webhook))
+        .with_state(state)
 }
 
 /// Handle incoming GitHub webhook.
@@ -227,12 +238,13 @@ async fn handle_webhook(
     };
 
     // Use configured runner_scope, or default to the repository from the webhook
-    let runner_scope = mapping.runner_scope.clone().unwrap_or_else(|| {
-        RunnerScope::Repository {
+    let runner_scope = mapping
+        .runner_scope
+        .clone()
+        .unwrap_or_else(|| RunnerScope::Repository {
             owner: event.repository.owner.login.clone(),
             repo: event.repository.name.clone(),
-        }
-    });
+        });
 
     info!(
         "Matched job {} to runner scope {:?} (mapping labels: {:?})",
@@ -241,8 +253,8 @@ async fn handle_webhook(
 
     // Send request to fleet manager (non-blocking)
     let request = WebhookRunnerRequest {
-        job_labels: event.workflow_job.labels,
-        agent_labels: mapping.labels.clone(),
+        job_labels: event.workflow_job.labels.clone(),
+        agent_labels: event.workflow_job.labels,
         runner_scope,
         runner_group: mapping.runner_group.clone(),
         job_id: event.workflow_job.id,
@@ -281,6 +293,21 @@ mod tests {
         assert!(validate_signature(secret, payload, &header));
         assert!(!validate_signature("wrong-secret", payload, &header));
         assert!(!validate_signature(secret, b"wrong payload", &header));
+    }
+
+    #[test]
+    fn test_validate_signature_github_example() {
+        // Official test values from GitHub webhook documentation
+        // https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
+        let secret = "It's a Secret to Everybody";
+        let payload = b"Hello, World!";
+        let expected_signature =
+            "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17";
+
+        assert!(
+            validate_signature(secret, payload, expected_signature),
+            "GitHub's official test case should validate correctly"
+        );
     }
 
     #[test]
@@ -407,6 +434,11 @@ mod tests {
         assert_eq!(event.action, "queued");
         assert_eq!(event.workflow_job.id, 12345);
         assert_eq!(event.workflow_job.labels.len(), 3);
-        assert!(event.workflow_job.labels.contains(&"self-hosted".to_string()));
+        assert!(
+            event
+                .workflow_job
+                .labels
+                .contains(&"self-hosted".to_string())
+        );
     }
 }
