@@ -211,62 +211,82 @@ async fn handle_webhook(
         }
     };
 
-    // Only handle "queued" action
-    if event.action != "queued" {
-        debug!(
-            "Ignoring workflow_job action: {} for job {}",
-            event.action, event.workflow_job.id
-        );
-        return StatusCode::OK;
-    }
-
-    info!(
-        "Received workflow_job.queued for job {} with labels {:?}",
-        event.workflow_job.id, event.workflow_job.labels
-    );
-
-    // Match labels to find runner scope
-    let mapping = match match_labels(&event.workflow_job.labels, &state.config.label_mappings) {
-        Some(m) => m,
-        None => {
+    // Handle different workflow_job actions
+    match event.action.as_str() {
+        "queued" => {
             info!(
-                "No label mapping matches job {} labels {:?} - ignoring (probably a GitHub-hosted runner job)",
+                "Received workflow_job.queued for job {} with labels {:?}",
                 event.workflow_job.id, event.workflow_job.labels
             );
-            return StatusCode::OK;
+
+            // Match labels to find runner scope
+            let mapping =
+                match match_labels(&event.workflow_job.labels, &state.config.label_mappings) {
+                    Some(m) => m,
+                    None => {
+                        info!(
+                        "No label mapping matches job {} labels {:?} - ignoring (probably a GitHub-hosted runner job)",
+                        event.workflow_job.id, event.workflow_job.labels
+                    );
+                        return StatusCode::OK;
+                    }
+                };
+
+            // Use configured runner_scope, or default to the repository from the webhook
+            let runner_scope = mapping
+                .runner_scope
+                .clone()
+                .unwrap_or_else(|| RunnerScope::Repository {
+                    owner: event.repository.owner.login.clone(),
+                    repo: event.repository.name.clone(),
+                });
+
+            info!(
+                "Matched job {} to runner scope {:?} (mapping labels: {:?})",
+                event.workflow_job.id, runner_scope, mapping.labels
+            );
+
+            // Send request to fleet manager (non-blocking)
+            let request = WebhookRunnerRequest {
+                job_labels: event.workflow_job.labels.clone(),
+                agent_labels: event.workflow_job.labels,
+                runner_scope,
+                runner_group: mapping.runner_group.clone(),
+                job_id: event.workflow_job.id,
+            };
+
+            if state
+                .notifier
+                .send(WebhookEvent::RunnerRequest(request))
+                .await
+            {
+                info!("Queued runner creation for job {}", event.workflow_job.id);
+            } else {
+                warn!(
+                    "Failed to queue runner creation for job {} (channel full)",
+                    event.workflow_job.id
+                );
+            }
         }
-    };
-
-    // Use configured runner_scope, or default to the repository from the webhook
-    let runner_scope = mapping
-        .runner_scope
-        .clone()
-        .unwrap_or_else(|| RunnerScope::Repository {
-            owner: event.repository.owner.login.clone(),
-            repo: event.repository.name.clone(),
-        });
-
-    info!(
-        "Matched job {} to runner scope {:?} (mapping labels: {:?})",
-        event.workflow_job.id, runner_scope, mapping.labels
-    );
-
-    // Send request to fleet manager (non-blocking)
-    let request = WebhookRunnerRequest {
-        job_labels: event.workflow_job.labels.clone(),
-        agent_labels: event.workflow_job.labels,
-        runner_scope,
-        runner_group: mapping.runner_group.clone(),
-        job_id: event.workflow_job.id,
-    };
-
-    if state.notifier.request_runner(request).await {
-        info!("Queued runner creation for job {}", event.workflow_job.id);
-    } else {
-        warn!(
-            "Failed to queue runner creation for job {} (channel full)",
-            event.workflow_job.id
-        );
+        "completed" | "cancelled" => {
+            // Job finished - notify fleet manager to clean up deduplication state
+            debug!(
+                "Received workflow_job.{} for job {}",
+                event.action, event.workflow_job.id
+            );
+            let _ = state
+                .notifier
+                .send(WebhookEvent::JobCompleted {
+                    job_id: event.workflow_job.id,
+                })
+                .await;
+        }
+        _ => {
+            debug!(
+                "Ignoring workflow_job action: {} for job {}",
+                event.action, event.workflow_job.id
+            );
+        }
     }
 
     // Always return 200 OK quickly - runner creation is async
