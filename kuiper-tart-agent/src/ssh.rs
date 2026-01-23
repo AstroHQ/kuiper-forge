@@ -450,24 +450,8 @@ pub async fn ensure_runner_installed(
         ip
     );
 
-    // Download URL for macOS runner
-    let download_url = github_runner::download_url(&version, Platform::MacOS, arch);
-
-    // Create directory and download/extract runner
-    let install_cmd = format!(
-        r#"
-        set -e
-        mkdir -p ~/actions-runner
-        cd ~/actions-runner
-        echo "Downloading runner from {url}..."
-        curl -sL -o actions-runner.tar.gz "{url}"
-        echo "Extracting runner..."
-        tar xzf actions-runner.tar.gz
-        rm actions-runner.tar.gz
-        echo "Runner installed successfully"
-        "#,
-        url = download_url
-    );
+    // Generate install script from template
+    let install_cmd = github_runner::install_command("~/actions-runner", &version, Platform::MacOS, arch);
 
     match ssh_exec(ip, config, &install_cmd).await {
         Ok(output) => {

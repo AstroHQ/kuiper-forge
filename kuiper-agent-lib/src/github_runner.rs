@@ -128,6 +128,52 @@ pub fn download_url(version: &str, platform: Platform, arch: Arch) -> String {
     )
 }
 
+// Install scripts embedded at compile time
+const INSTALL_SCRIPT_UNIX: &str = include_str!("../scripts/install_runner_unix.sh");
+const INSTALL_SCRIPT_WINDOWS: &str = include_str!("../scripts/install_runner_windows.ps1");
+
+/// Generate the install command for a GitHub Actions runner.
+///
+/// Returns a shell command string ready to be executed via SSH.
+/// The embedded scripts are invoked with proper arguments.
+///
+/// # Arguments
+/// * `runner_dir` - Directory where the runner will be installed (e.g., "~/actions-runner" or "C:\\actions-runner")
+/// * `version` - The runner version (e.g., "2.321.0")
+/// * `platform` - Target platform
+/// * `arch` - Target architecture
+pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch: Arch) -> String {
+    let url = download_url(version, platform, arch);
+
+    match platform {
+        Platform::Windows => {
+            // PowerShell: invoke script with named parameters via -Command
+            // Strip the param() block since we're inlining values
+            let script_body: String = INSTALL_SCRIPT_WINDOWS
+                .lines()
+                .skip_while(|l| !l.trim().starts_with("$ErrorActionPreference"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            format!(
+                "$RunnerDir = '{}'; $Url = '{}'; {}",
+                runner_dir,
+                url,
+                script_body.replace('\n', "; ").trim()
+            )
+        }
+        Platform::Linux | Platform::MacOS => {
+            // Bash: use heredoc to pass script with arguments
+            format!(
+                "bash -s -- '{}' '{}' << 'INSTALL_RUNNER_EOF'\n{}\nINSTALL_RUNNER_EOF",
+                runner_dir,
+                url,
+                INSTALL_SCRIPT_UNIX
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +222,26 @@ mod tests {
         assert_eq!(Arch::from_uname("aarch64"), Some(Arch::Arm64));
         assert_eq!(Arch::from_uname("  x86_64\n"), Some(Arch::X64));
         assert_eq!(Arch::from_uname("i386"), None);
+    }
+
+    #[test]
+    fn test_install_command_unix() {
+        let cmd = install_command("~/actions-runner", "2.321.0", Platform::Linux, Arch::X64);
+        // Should use heredoc with bash -s
+        assert!(cmd.contains("bash -s -- '~/actions-runner'"));
+        assert!(cmd.contains("actions-runner-linux-x64-2.321.0.tar.gz"));
+        assert!(cmd.contains("INSTALL_RUNNER_EOF"));
+        // Script should use $1, $2 for arguments
+        assert!(cmd.contains("$1"));
+        assert!(cmd.contains("$2"));
+    }
+
+    #[test]
+    fn test_install_command_windows() {
+        let cmd = install_command(r"C:\actions-runner", "2.321.0", Platform::Windows, Arch::X64);
+        // Should set variables and include script body
+        assert!(cmd.contains(r"$RunnerDir = 'C:\actions-runner'"));
+        assert!(cmd.contains("actions-runner-win-x64-2.321.0.zip"));
+        assert!(cmd.contains("Expand-Archive"));
     }
 }

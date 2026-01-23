@@ -526,45 +526,14 @@ impl RunnerConfigBuilder {
         } else {
             github_runner::Platform::Linux
         };
-        let download_url = github_runner::download_url(version, platform, arch);
+
+        let cmd = github_runner::install_command(&self.runner_dir, version, platform, arch);
 
         if self.is_windows {
-            // Use semicolons to separate statements so it works in both cmd.exe and PowerShell shells
-            let ps_cmd = format!(
-                "$ErrorActionPreference = 'Stop'; \
-                Write-Output 'Creating runner directory...'; \
-                New-Item -ItemType Directory -Force -Path '{runner_dir}' | Out-Null; \
-                Set-Location '{runner_dir}'; \
-                Write-Output 'Downloading runner v{version} from {url}...'; \
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
-                Invoke-WebRequest -Uri '{url}' -OutFile 'actions-runner.zip' -UseBasicParsing; \
-                Write-Output 'Extracting runner...'; \
-                Expand-Archive -Path 'actions-runner.zip' -DestinationPath '.' -Force; \
-                Remove-Item 'actions-runner.zip'; \
-                Write-Output 'Runner installed successfully'",
-                runner_dir = self.runner_dir,
-                version = version,
-                url = download_url
-            );
-            self.wrap_powershell(&ps_cmd)
+            // Wrap with powershell invocation if SSH shell is cmd.exe
+            self.wrap_powershell(&cmd)
         } else {
-            format!(
-                r#"
-                set -e
-                echo "Creating runner directory..."
-                mkdir -p {runner_dir}
-                cd {runner_dir}
-                echo "Downloading runner v{version} from {url}..."
-                curl -sL -o actions-runner.tar.gz "{url}"
-                echo "Extracting runner..."
-                tar xzf actions-runner.tar.gz
-                rm actions-runner.tar.gz
-                echo "Runner installed successfully"
-                "#,
-                runner_dir = self.runner_dir,
-                version = version,
-                url = download_url
-            )
+            cmd
         }
     }
 }
