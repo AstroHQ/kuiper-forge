@@ -182,6 +182,19 @@ impl RunnerStateStore {
         self.get_runner(runner_name).await.is_some()
     }
 
+    /// Check if a runner exists for a given job ID.
+    ///
+    /// Used for deduplication in webhook mode to prevent processing
+    /// the same job multiple times.
+    pub async fn has_runner_for_job(&self, job_id: u64) -> bool {
+        let result = sqlx::query(sql::SELECT_RUNNER_BY_JOB_ID)
+            .bind(job_id as i64)
+            .fetch_optional(&self.pool)
+            .await;
+
+        matches!(result, Ok(Some(_)))
+    }
+
     /// Reconcile persisted runners for an agent against the current VM list.
     ///
     /// Returns the names of runners that were removed (VM no longer exists).

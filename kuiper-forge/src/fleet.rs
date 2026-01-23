@@ -6,7 +6,7 @@
 //! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
 //! - Recovering runners when agents reconnect after coordinator restart
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
@@ -21,8 +21,9 @@ use kuiper_agent_proto::{
 use crate::agent_registry::AgentRegistry;
 use crate::config::{Config, ProvisioningMode, RunnerConfig, RunnerScope};
 use crate::github::RunnerTokenProvider;
+use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
-use crate::webhook::{WebhookEvent, WebhookNotifier, WebhookRunnerRequest};
+use crate::webhook::{WebhookEvent, WebhookNotifier};
 
 /// Information about an agent's VMs for recovery.
 #[derive(Debug, Clone)]
@@ -97,6 +98,8 @@ pub struct FleetManager {
     pool: Arc<RwLock<RunnerPool>>,
     /// Persistent runner state for crash recovery
     runner_state: Arc<RunnerStateStore>,
+    /// Persistent pending jobs store (webhook mode only)
+    pending_job_store: Arc<PendingJobStore>,
     /// Channel for receiving reconciliation notifications
     notify_rx: mpsc::Receiver<()>,
     /// Channel for receiving recovery notifications
@@ -105,10 +108,6 @@ pub struct FleetManager {
     runner_event_rx: mpsc::Receiver<AgentRunnerEvent>,
     /// Channel for receiving webhook events (webhook mode only)
     webhook_rx: Option<mpsc::Receiver<WebhookEvent>>,
-    /// Job IDs we've already handled (for webhook deduplication)
-    handled_job_ids: Arc<RwLock<HashSet<u64>>>,
-    /// Pending jobs waiting for agent capacity (webhook mode only)
-    pending_jobs: Arc<RwLock<VecDeque<WebhookRunnerRequest>>>,
 }
 
 impl FleetManager {
@@ -121,6 +120,7 @@ impl FleetManager {
         token_provider: Arc<dyn RunnerTokenProvider>,
         agent_registry: Arc<AgentRegistry>,
         runner_state: Arc<RunnerStateStore>,
+        pending_job_store: Arc<PendingJobStore>,
     ) -> (Self, FleetNotifier, Option<WebhookNotifier>) {
         let (notify_tx, notify_rx) = mpsc::channel(16);
         let (recovery_tx, recovery_rx) = mpsc::channel(16);
@@ -141,12 +141,11 @@ impl FleetManager {
             agent_registry,
             pool: Arc::new(RwLock::new(RunnerPool::default())),
             runner_state,
+            pending_job_store,
             notify_rx,
             recovery_rx,
             runner_event_rx,
             webhook_rx,
-            handled_job_ids: Arc::new(RwLock::new(HashSet::new())),
-            pending_jobs: Arc::new(RwLock::new(VecDeque::new())),
         };
 
         let notifier = FleetNotifier {
@@ -245,6 +244,9 @@ impl FleetManager {
     /// In webhook mode, the fleet manager does not actively create runners.
     /// Instead, it waits for webhook events to trigger runner creation.
     /// This loop still handles recovery and runner lifecycle events.
+    ///
+    /// A periodic check ensures pending jobs are processed even if notifications
+    /// are lost (e.g., channel was full when webhook handler tried to notify).
     async fn run_webhook_loop(&mut self) {
         // On startup, log any persisted runners (from previous coordinator run)
         match self.runner_state.get_all_runners().await {
@@ -268,11 +270,22 @@ impl FleetManager {
 
         info!("Webhook provisioning mode active - waiting for webhook events");
 
+        // Process any pending jobs from previous run on startup
+        self.process_pending_jobs().await;
+
+        // Periodic check interval - ensures pending jobs are processed even if
+        // notifications are lost (belt-and-suspenders with the DB-backed queue)
+        let check_interval = Duration::from_secs(30);
+        let mut ticker = tokio::time::interval(check_interval);
+
         loop {
             tokio::select! {
+                _ = ticker.tick() => {
+                    // Periodic check for pending jobs (in case notifications were lost)
+                    self.process_pending_jobs().await;
+                }
                 Some(()) = self.notify_rx.recv() => {
-                    // In webhook mode, we don't reconcile on agent connect
-                    // (no target counts to maintain), but we do process pending jobs.
+                    // Agent connected - check if we can assign pending jobs
                     debug!("Agent connected - checking pending job queue");
                     self.process_pending_jobs().await;
                 }
@@ -298,34 +311,18 @@ impl FleetManager {
         }
     }
 
-    /// Handle a webhook event (runner request or job completion).
+    /// Handle a webhook event (new job notification or job completion).
     async fn handle_webhook_event(&self, event: WebhookEvent) {
         match event {
-            WebhookEvent::RunnerRequest(request) => {
-                self.handle_runner_request(request).await;
+            WebhookEvent::NewJobAvailable => {
+                // New job(s) persisted to DB by webhook handler - process them
+                debug!("Received NewJobAvailable notification - processing pending jobs");
+                self.process_pending_jobs().await;
             }
             WebhookEvent::JobCompleted { job_id } => {
-                // Clean up deduplication state
-                let removed = self.handled_job_ids.write().await.remove(&job_id);
-                if removed {
-                    debug!(
-                        "Cleaned up deduplication state for completed job {}",
-                        job_id
-                    );
-                }
-
                 // Remove from pending queue if it was waiting
-                {
-                    let mut pending = self.pending_jobs.write().await;
-                    let before_len = pending.len();
-                    pending.retain(|req| req.job_id != job_id);
-                    if pending.len() < before_len {
-                        debug!(
-                            "Removed completed job {} from pending queue",
-                            job_id
-                        );
-                    }
-                }
+                self.pending_job_store.remove_job(job_id).await;
+                debug!("Cleaned up state for completed job {}", job_id);
 
                 // Job completed means an agent may be free - try pending jobs
                 self.process_pending_jobs().await;
@@ -333,66 +330,22 @@ impl FleetManager {
         }
     }
 
-    /// Handle a webhook-triggered runner creation request.
-    async fn handle_runner_request(&self, request: WebhookRunnerRequest) {
-        // Deduplicate: skip if we've already handled this job
-        {
-            let mut handled = self.handled_job_ids.write().await;
-            if !handled.insert(request.job_id) {
-                info!(
-                    "Ignoring duplicate webhook for job {} (already handled)",
-                    request.job_id
-                );
-                return;
-            }
-        }
-
-        info!(
-            "Processing webhook runner request for job {} with labels {:?}",
-            request.job_id, request.job_labels
-        );
-
-        match self
-            .create_runner_on_demand(
-                &request.agent_labels,
-                &request.runner_scope,
-                request.runner_group.as_deref(),
-                request.job_id,
-            )
-            .await
-        {
-            Ok(()) => {}
-            Err(e) => {
-                // Check if this is a capacity issue (no available agent)
-                let err_msg = e.to_string();
-                if err_msg.contains("No available agent") {
-                    info!(
-                        "No capacity for job {} - adding to pending queue",
-                        request.job_id
-                    );
-                    self.pending_jobs.write().await.push_back(request);
-                } else {
-                    error!(
-                        "Failed to create runner for webhook job {}: {}",
-                        request.job_id, e
-                    );
-                }
-            }
-        }
-    }
-
     /// Process pending jobs when capacity becomes available.
     async fn process_pending_jobs(&self) {
-        loop {
-            // Peek at the front of the queue
-            let request = {
-                let pending = self.pending_jobs.read().await;
-                pending.front().cloned()
-            };
+        // Get all pending jobs from DB (ordered by created_at, FIFO)
+        let pending_requests = self.pending_job_store.get_pending_requests().await;
 
-            let Some(request) = request else {
-                return;
-            };
+        for request in pending_requests {
+            // Skip if a runner already exists for this job (crash recovery edge case:
+            // runner was created but pending job wasn't removed before crash)
+            if self.runner_state.has_runner_for_job(request.job_id).await {
+                debug!(
+                    "Pending job {} already has active runner - removing from queue",
+                    request.job_id
+                );
+                self.pending_job_store.remove_job(request.job_id).await;
+                continue;
+            }
 
             // Try to create a runner for this job
             match self
@@ -405,26 +358,19 @@ impl FleetManager {
                 .await
             {
                 Ok(()) => {
-                    // Success - remove from queue and continue
-                    self.pending_jobs.write().await.pop_front();
-                    info!(
-                        "Created runner for pending job {} (queue size: {})",
-                        request.job_id,
-                        self.pending_jobs.read().await.len()
-                    );
+                    // Success - remove from DB
+                    self.pending_job_store.remove_job(request.job_id).await;
+                    info!("Created runner for pending job {}", request.job_id);
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
                     if err_msg.contains("No available agent") {
-                        // Still no capacity - stop processing
-                        debug!(
-                            "Still no capacity for pending jobs (queue size: {})",
-                            self.pending_jobs.read().await.len()
-                        );
+                        // No more capacity - stop processing
+                        debug!("No more capacity for pending jobs");
                         return;
                     } else {
                         // Different error - remove from queue and log
-                        self.pending_jobs.write().await.pop_front();
+                        self.pending_job_store.remove_job(request.job_id).await;
                         error!(
                             "Failed to create runner for pending job {}: {}",
                             request.job_id, e
@@ -516,19 +462,9 @@ impl FleetManager {
         let runner_name_clone = runner_name.clone();
         let runner_state = self.runner_state.clone();
         let agent_id_clone = agent_id.clone();
-        let handled_job_ids = self.handled_job_ids.clone();
 
         // Spawn task to send command and handle response
         tokio::spawn(async move {
-            // Helper to clean up job_id from deduplication set on failure (allows retry)
-            let cleanup_job_id = || async {
-                if handled_job_ids.write().await.remove(&job_id) {
-                    info!(
-                        "Removed job {} from deduplication set (runner failed, allowing retry)",
-                        job_id
-                    );
-                }
-            };
             let timeout = Duration::from_secs(30);
 
             match agent_registry
@@ -557,8 +493,8 @@ impl FleetManager {
                                     runner_name_clone, e
                                 );
                             }
+                            // Removing the runner from state makes the job_id available for retry
                             runner_state.remove_runner(&runner_name_clone).await;
-                            cleanup_job_id().await;
                         }
                     }
                     Some(AgentPayload::Result(result)) => {
@@ -568,7 +504,6 @@ impl FleetManager {
                             info!("Runner {} completed successfully (webhook)", runner_name_clone);
                         } else {
                             warn!("Runner {} failed: {}", runner_name_clone, result.error);
-                            cleanup_job_id().await;
                         }
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)
@@ -597,7 +532,6 @@ impl FleetManager {
                             );
                         }
                         runner_state.remove_runner(&runner_name_clone).await;
-                        cleanup_job_id().await;
                     }
                 },
                 Err(e) => {
@@ -613,7 +547,6 @@ impl FleetManager {
                         );
                     }
                     runner_state.remove_runner(&runner_name_clone).await;
-                    cleanup_job_id().await;
                 }
             }
         });
@@ -766,15 +699,8 @@ impl FleetManager {
                             error = %event.event.error,
                             "Runner failed"
                         );
-                        // Clean up job_id from deduplication set to allow retry
-                        if let Some(job_id) = runner_info.job_id {
-                            if self.handled_job_ids.write().await.remove(&job_id) {
-                                info!(
-                                    "Removed job {} from deduplication set (runner failed, allowing retry)",
-                                    job_id
-                                );
-                            }
-                        }
+                        // Removing the runner from state makes the job_id available for retry
+                        // (deduplication is now DB-backed via has_runner_for_job)
                     }
                     RunnerEventType::Destroyed => {
                         info!(

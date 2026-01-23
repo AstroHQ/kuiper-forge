@@ -10,6 +10,7 @@ pub mod db;
 pub mod fleet;
 pub mod github;
 pub mod management;
+pub mod pending_jobs;
 pub mod runner_state;
 pub mod server;
 mod sql;

@@ -21,6 +21,7 @@ use kuiper_forge::db::Database;
 use kuiper_forge::fleet;
 use kuiper_forge::github;
 use kuiper_forge::management::{self, ManagementClient};
+use kuiper_forge::pending_jobs;
 use kuiper_forge::runner_state;
 use kuiper_forge::server::{run_server, ServerConfig};
 
@@ -242,6 +243,10 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     let runner_state = Arc::new(runner_state::RunnerStateStore::new(db.pool()));
     runner_state.load_and_log().await;
 
+    // Initialize persistent pending job store for webhook mode (using shared database)
+    let pending_job_store = Arc::new(pending_jobs::PendingJobStore::new(db.pool()));
+    pending_job_store.load_and_log().await;
+
     // Start management socket server for CLI communication
     let mgmt_socket_path = management::default_socket_path(data_dir);
     let mgmt_socket_path_cleanup = mgmt_socket_path.clone();
@@ -263,6 +268,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
             token_provider,
             agent_registry.clone(),
             runner_state.clone(),
+            pending_job_store.clone(),
         );
         (Some(fm), Some(notifier), wh_notifier)
     } else {
@@ -284,6 +290,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
             token_provider,
             agent_registry.clone(),
             runner_state.clone(),
+            pending_job_store.clone(),
         );
         (Some(fm), Some(notifier), wh_notifier)
     };
@@ -356,7 +363,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Run fleet manager (if enabled) and server concurrently, with graceful shutdown
     let result = if let Some(fm) = fleet_manager {
         tokio::select! {
-            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier, Some(runner_state), webhook_config) => {
+            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier, Some(runner_state), Some(pending_job_store), webhook_config) => {
                 result
             }
             _ = fm.run() => {
@@ -370,7 +377,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         }
     } else {
         tokio::select! {
-            result = run_server(server_config, auth_manager, agent_registry, None, None, None) => {
+            result = run_server(server_config, auth_manager, agent_registry, None, None, None, None) => {
                 result
             }
             _ = shutdown_signal() => {

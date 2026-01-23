@@ -39,6 +39,7 @@ use crate::agent_registry::{AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::{TlsConfig, WebhookConfig};
 use crate::fleet::FleetNotifier;
+use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{self, WebhookNotifier, WebhookState};
 
@@ -488,6 +489,7 @@ pub async fn run_server(
     agent_registry: Arc<AgentRegistry>,
     fleet_notifier: Option<FleetNotifier>,
     runner_state: Option<Arc<RunnerStateStore>>,
+    pending_job_store: Option<Arc<PendingJobStore>>,
     webhook_config: Option<(WebhookConfig, WebhookNotifier)>,
 ) -> Result<()> {
     // If no webhook config, use the simple gRPC-only path
@@ -503,6 +505,7 @@ pub async fn run_server(
     }
 
     let (wh_config, wh_notifier) = webhook_config.unwrap();
+    let pending_job_store = pending_job_store.expect("pending_job_store required in webhook mode");
 
     // Load TLS credentials
     let server_cert = std::fs::read_to_string(&config.tls.server_cert)
@@ -560,6 +563,7 @@ pub async fn run_server(
     let webhook_state = Arc::new(WebhookState {
         config: wh_config.clone(),
         notifier: wh_notifier,
+        pending_job_store,
     });
     let http_router = webhook::webhook_router(webhook_state);
 

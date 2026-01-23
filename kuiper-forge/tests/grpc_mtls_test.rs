@@ -85,8 +85,8 @@ impl TestFixture {
             tls: tls_config,
         };
 
-        // Create webhook config if needed
-        let webhook_config = if webhook_mode {
+        // Create webhook config and pending job store if needed
+        let (webhook_config, pending_job_store) = if webhook_mode {
             let (tx, _rx) = tokio::sync::mpsc::channel(32);
             let webhook_notifier = kuiper_forge::webhook::WebhookNotifier::new(tx);
             let wh_config = WebhookConfig {
@@ -94,9 +94,11 @@ impl TestFixture {
                 secret: "test-secret".to_string(),
                 label_mappings: vec![],
             };
-            Some((wh_config, webhook_notifier))
+            let pending_store =
+                Arc::new(kuiper_forge::pending_jobs::PendingJobStore::new(db.pool()));
+            (Some((wh_config, webhook_notifier)), Some(pending_store))
         } else {
-            None
+            (None, None)
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -111,6 +113,7 @@ impl TestFixture {
                 agent_registry_clone,
                 None, // fleet_notifier
                 None, // runner_state
+                pending_job_store,
                 webhook_config,
             );
 

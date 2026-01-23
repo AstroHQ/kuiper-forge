@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::config::{LabelMapping, RunnerScope, WebhookConfig};
+use crate::pending_jobs::PendingJobStore;
 
 /// GitHub webhook event types we care about
 const WORKFLOW_JOB_EVENT: &str = "workflow_job";
@@ -91,12 +92,16 @@ pub struct WebhookRunnerRequest {
     pub job_id: u64,
 }
 
-/// Event types sent from webhook handler to fleet manager
+/// Event types sent from webhook handler to fleet manager.
+///
+/// These are lightweight notifications - the actual job data is persisted
+/// to the database by the webhook handler, so losing a notification doesn't
+/// lose the job.
 #[derive(Debug, Clone)]
 pub enum WebhookEvent {
-    /// Job queued - create a runner
-    RunnerRequest(WebhookRunnerRequest),
-    /// Job completed/cancelled - clean up deduplication state
+    /// New job(s) available in pending queue - check and process
+    NewJobAvailable,
+    /// Job completed/cancelled - clean up state and check pending queue
     JobCompleted { job_id: u64 },
 }
 
@@ -120,6 +125,8 @@ impl WebhookNotifier {
 pub struct WebhookState {
     pub config: WebhookConfig,
     pub notifier: WebhookNotifier,
+    /// Persistent store for pending jobs - webhook handler writes directly to DB
+    pub pending_job_store: Arc<PendingJobStore>,
 }
 
 /// Validate HMAC-SHA256 signature from GitHub.
@@ -248,7 +255,7 @@ async fn handle_webhook(
                 event.workflow_job.id, runner_scope, mapping.labels
             );
 
-            // Send request to fleet manager (non-blocking)
+            // Build request and persist to DB first (this is the critical path)
             // Use job labels for agent matching - agents with a superset of these labels will match
             let request = WebhookRunnerRequest {
                 job_labels: event.workflow_job.labels.clone(),
@@ -258,18 +265,21 @@ async fn handle_webhook(
                 job_id: event.workflow_job.id,
             };
 
-            if state
-                .notifier
-                .send(WebhookEvent::RunnerRequest(request))
-                .await
-            {
-                info!("Queued runner creation for job {}", event.workflow_job.id);
-            } else {
+            // Persist to database - this ensures we don't lose the job
+            if !state.pending_job_store.add_job(&request).await {
+                // DB write failed - return 503 so GitHub will retry
                 warn!(
-                    "Failed to queue runner creation for job {} (channel full)",
+                    "Failed to persist job {} to database - returning 503 for retry",
                     event.workflow_job.id
                 );
+                return StatusCode::SERVICE_UNAVAILABLE;
             }
+
+            info!("Persisted job {} to pending queue", event.workflow_job.id);
+
+            // Notify fleet manager (non-blocking, can fail safely since job is in DB)
+            // If notification fails, FleetManager will pick up the job on next event or poll
+            let _ = state.notifier.send(WebhookEvent::NewJobAvailable).await;
         }
         "completed" | "cancelled" => {
             // Job finished - notify fleet manager to clean up deduplication state
