@@ -2,17 +2,17 @@
 //!
 //! Tracks active runners so we can clean them up from GitHub if the
 //! coordinator restarts while runners are active.
-
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+//!
+//! State is persisted to the database (SQLite or PostgreSQL).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use sqlx::Row;
 use tracing::{debug, error, info, warn};
 
 use crate::config::RunnerScope;
+use crate::db::DbPool;
+use crate::sql;
 
 /// Information about an active runner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,83 +35,37 @@ pub struct RunnerInfo {
 /// This allows the coordinator to recover after a restart and clean up
 /// any runners that completed or whose agents disconnected while we were down.
 pub struct RunnerStateStore {
-    /// Path to the state file
-    state_file: PathBuf,
-    /// In-memory state (runner_name -> info)
-    runners: Arc<RwLock<HashMap<String, RunnerInfo>>>,
+    /// Database pool
+    pool: DbPool,
 }
 
 impl RunnerStateStore {
-    /// Create a new runner state store.
-    ///
-    /// Loads existing state from disk if available.
-    pub fn new(data_dir: &Path) -> Self {
-        let state_file = data_dir.join("runner_state.json");
-        let runners = Self::load_from_file(&state_file).unwrap_or_default();
+    /// Create a new runner state store using the provided database pool.
+    pub fn new(pool: DbPool) -> Self {
+        Self { pool }
+    }
 
-        if !runners.is_empty() {
-            info!(
-                "Loaded {} active runner(s) from state file",
-                runners.len()
-            );
-            for (name, info) in &runners {
-                debug!(
-                    "  {} on agent {} (created {})",
-                    name, info.agent_id, info.created_at
+    /// Load initial state and log what we found.
+    pub async fn load_and_log(&self) {
+        match self.get_all_runners().await {
+            Ok(runners) if !runners.is_empty() => {
+                info!(
+                    "Loaded {} active runner(s) from database",
+                    runners.len()
                 );
-            }
-        }
-
-        Self {
-            state_file,
-            runners: Arc::new(RwLock::new(runners)),
-        }
-    }
-
-    /// Load state from file.
-    fn load_from_file(path: &Path) -> Option<HashMap<String, RunnerInfo>> {
-        if !path.exists() {
-            return None;
-        }
-
-        match std::fs::read_to_string(path) {
-            Ok(content) => match serde_json::from_str(&content) {
-                Ok(state) => Some(state),
-                Err(e) => {
-                    warn!("Failed to parse runner state file: {}", e);
-                    None
+                for (name, info) in &runners {
+                    debug!(
+                        "  {} on agent {} (created {})",
+                        name, info.agent_id, info.created_at
+                    );
                 }
-            },
+            }
+            Ok(_) => {
+                debug!("No active runners in database");
+            }
             Err(e) => {
-                warn!("Failed to read runner state file: {}", e);
-                None
+                error!("Failed to load runners from database: {}", e);
             }
-        }
-    }
-
-    /// Save state to file.
-    async fn save(&self) {
-        let runners = self.runners.read().await;
-        let content = match serde_json::to_string_pretty(&*runners) {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to serialize runner state: {}", e);
-                return;
-            }
-        };
-
-        // Ensure parent directory exists
-        if let Some(parent) = self.state_file.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                error!("Failed to create state directory: {}", e);
-                return;
-            }
-        }
-
-        if let Err(e) = std::fs::write(&self.state_file, content) {
-            error!("Failed to write runner state file: {}", e);
-        } else {
-            debug!("Saved runner state ({} runners)", runners.len());
         }
     }
 
@@ -124,65 +78,108 @@ impl RunnerStateStore {
         runner_scope: RunnerScope,
         job_id: Option<u64>,
     ) {
-        let info = RunnerInfo {
-            agent_id,
-            vm_name,
-            runner_scope,
-            created_at: Utc::now(),
-            job_id,
+        let created_at = Utc::now();
+        let scope_json = match serde_json::to_string(&runner_scope) {
+            Ok(json) => json,
+            Err(e) => {
+                error!("Failed to serialize runner scope: {}", e);
+                return;
+            }
         };
+        let created_at_str = created_at.to_rfc3339();
+        let job_id_i64 = job_id.map(|id| id as i64);
 
-        {
-            let mut runners = self.runners.write().await;
-            runners.insert(runner_name.clone(), info);
+        let result = sqlx::query(sql::INSERT_RUNNER)
+            .bind(&runner_name)
+            .bind(&agent_id)
+            .bind(&vm_name)
+            .bind(&scope_json)
+            .bind(&created_at_str)
+            .bind(job_id_i64)
+            .execute(&self.pool)
+            .await;
+
+        match result {
+            Ok(_) => {
+                debug!("Added runner {} to database (job_id={:?})", runner_name, job_id);
+            }
+            Err(e) => {
+                error!("Failed to add runner {} to database: {}", runner_name, e);
+            }
         }
-
-        debug!("Added runner {} to state (job_id={:?})", runner_name, job_id);
-        self.save().await;
     }
 
     /// Remove a runner from the state.
     pub async fn remove_runner(&self, runner_name: &str) {
-        let removed = {
-            let mut runners = self.runners.write().await;
-            runners.remove(runner_name).is_some()
-        };
+        let result = sqlx::query(sql::DELETE_RUNNER)
+            .bind(runner_name)
+            .execute(&self.pool)
+            .await;
 
-        if removed {
-            debug!("Removed runner {} from state", runner_name);
-            self.save().await;
+        match result {
+            Ok(r) if r.rows_affected() > 0 => {
+                debug!("Removed runner {} from database", runner_name);
+            }
+            Ok(_) => {
+                // Runner wasn't in the database - that's fine
+            }
+            Err(e) => {
+                error!("Failed to remove runner {} from database: {}", runner_name, e);
+            }
         }
     }
 
     /// Get all runners for a specific agent.
     pub async fn get_runners_for_agent(&self, agent_id: &str) -> Vec<(String, RunnerInfo)> {
-        let runners = self.runners.read().await;
-        runners
-            .iter()
-            .filter(|(_, info)| info.agent_id == agent_id)
-            .map(|(name, info)| (name.clone(), info.clone()))
-            .collect()
+        let result = sqlx::query(sql::SELECT_RUNNERS_BY_AGENT)
+            .bind(agent_id)
+            .fetch_all(&self.pool)
+            .await;
+
+        match result {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| self.row_to_runner_info(row))
+                .collect(),
+            Err(e) => {
+                error!("Failed to get runners for agent {}: {}", agent_id, e);
+                Vec::new()
+            }
+        }
     }
 
     /// Get all runners (for startup recovery).
-    pub async fn get_all_runners(&self) -> Vec<(String, RunnerInfo)> {
-        let runners = self.runners.read().await;
-        runners
-            .iter()
-            .map(|(name, info)| (name.clone(), info.clone()))
-            .collect()
+    pub async fn get_all_runners(&self) -> Result<Vec<(String, RunnerInfo)>, sqlx::Error> {
+        let rows = sqlx::query(sql::SELECT_ALL_RUNNERS)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| self.row_to_runner_info(row))
+            .collect())
     }
 
     /// Get a single runner by name.
     pub async fn get_runner(&self, runner_name: &str) -> Option<RunnerInfo> {
-        let runners = self.runners.read().await;
-        runners.get(runner_name).cloned()
+        let result = sqlx::query(sql::SELECT_RUNNER)
+            .bind(runner_name)
+            .fetch_optional(&self.pool)
+            .await;
+
+        match result {
+            Ok(Some(row)) => self.row_to_runner_info(row).map(|(_, info)| info),
+            Ok(None) => None,
+            Err(e) => {
+                error!("Failed to get runner {}: {}", runner_name, e);
+                None
+            }
+        }
     }
 
     /// Check if a runner exists in the state.
     pub async fn has_runner(&self, runner_name: &str) -> bool {
-        let runners = self.runners.read().await;
-        runners.contains_key(runner_name)
+        self.get_runner(runner_name).await.is_some()
     }
 
     /// Reconcile persisted runners for an agent against the current VM list.
@@ -207,14 +204,46 @@ impl RunnerStateStore {
 
         // Remove the completed runners from state
         for (runner_name, _) in &removed {
-            let mut runners = self.runners.write().await;
-            runners.remove(runner_name);
-        }
-
-        if !removed.is_empty() {
-            self.save().await;
+            self.remove_runner(runner_name).await;
         }
 
         removed
+    }
+
+    /// Convert a database row to a (runner_name, RunnerInfo) tuple.
+    fn row_to_runner_info(&self, row: crate::db::DbRow) -> Option<(String, RunnerInfo)> {
+        let runner_name: String = row.try_get("runner_name").ok()?;
+        let agent_id: String = row.try_get("agent_id").ok()?;
+        let vm_name: String = row.try_get("vm_name").ok()?;
+        let scope_json: String = row.try_get("runner_scope").ok()?;
+        let created_at_str: String = row.try_get("created_at").ok()?;
+        let job_id: Option<i64> = row.try_get("job_id").ok()?;
+
+        let runner_scope: RunnerScope = match serde_json::from_str(&scope_json) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to deserialize runner scope for {}: {}", runner_name, e);
+                return None;
+            }
+        };
+
+        let created_at = match DateTime::parse_from_rfc3339(&created_at_str) {
+            Ok(dt) => dt.with_timezone(&Utc),
+            Err(e) => {
+                warn!("Failed to parse created_at for {}: {}", runner_name, e);
+                return None;
+            }
+        };
+
+        Some((
+            runner_name,
+            RunnerInfo {
+                agent_id,
+                vm_name,
+                runner_scope,
+                created_at,
+                job_id: job_id.map(|id| id as u64),
+            },
+        ))
     }
 }

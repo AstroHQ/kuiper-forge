@@ -88,3 +88,48 @@ pub const CHECK_AGENT_VALID: &str =
 #[cfg(feature = "postgres")]
 pub const CHECK_AGENT_VALID: &str =
     "SELECT 1 FROM registered_agents WHERE agent_id = $1 AND revoked = 0 AND expires_at > $2";
+
+// Active runners queries
+
+#[cfg(feature = "sqlite")]
+pub const INSERT_RUNNER: &str = r#"
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+"#;
+
+#[cfg(feature = "postgres")]
+pub const INSERT_RUNNER: &str = r#"
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id)
+    VALUES ($1, $2, $3, $4, $5, $6)
+"#;
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = $1";
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_RUNNER: &str =
+    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_RUNNER: &str =
+    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = $1";
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_RUNNERS_BY_AGENT: &str =
+    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_RUNNERS_BY_AGENT: &str =
+    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = $1";
+
+pub const SELECT_ALL_RUNNERS: &str =
+    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agent_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agent_id = $1";

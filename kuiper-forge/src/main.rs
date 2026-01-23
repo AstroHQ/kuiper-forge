@@ -241,8 +241,9 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Initialize agent registry
     let agent_registry = Arc::new(AgentRegistry::new());
 
-    // Initialize persistent runner state for crash recovery
-    let runner_state = Arc::new(runner_state::RunnerStateStore::new(&data_dir));
+    // Initialize persistent runner state for crash recovery (using shared database)
+    let runner_state = Arc::new(runner_state::RunnerStateStore::new(db.pool()));
+    runner_state.load_and_log().await;
 
     // Start management socket server for CLI communication
     let mgmt_socket_path = management::default_socket_path(data_dir);

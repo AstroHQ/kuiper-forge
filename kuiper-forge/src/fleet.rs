@@ -198,17 +198,22 @@ impl FleetManager {
         let mut ticker = tokio::time::interval(check_interval);
 
         // On startup, log any persisted runners (from previous coordinator run)
-        let persisted = self.runner_state.get_all_runners().await;
-        if !persisted.is_empty() {
-            info!(
-                "Found {} persisted runner(s) from previous run - will recover when agents reconnect",
-                persisted.len()
-            );
-            for (name, info) in &persisted {
+        match self.runner_state.get_all_runners().await {
+            Ok(persisted) if !persisted.is_empty() => {
                 info!(
-                    "  Persisted runner '{}' on agent '{}' (created {})",
-                    name, info.agent_id, info.created_at
+                    "Found {} persisted runner(s) from previous run - will recover when agents reconnect",
+                    persisted.len()
                 );
+                for (name, info) in &persisted {
+                    info!(
+                        "  Persisted runner '{}' on agent '{}' (created {})",
+                        name, info.agent_id, info.created_at
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                error!("Failed to load persisted runners: {}", e);
             }
         }
 
@@ -242,17 +247,22 @@ impl FleetManager {
     /// This loop still handles recovery and runner lifecycle events.
     async fn run_webhook_loop(&mut self) {
         // On startup, log any persisted runners (from previous coordinator run)
-        let persisted = self.runner_state.get_all_runners().await;
-        if !persisted.is_empty() {
-            info!(
-                "Found {} persisted runner(s) from previous run - will recover when agents reconnect",
-                persisted.len()
-            );
-            for (name, info) in &persisted {
+        match self.runner_state.get_all_runners().await {
+            Ok(persisted) if !persisted.is_empty() => {
                 info!(
-                    "  Persisted runner '{}' on agent '{}' (created {})",
-                    name, info.agent_id, info.created_at
+                    "Found {} persisted runner(s) from previous run - will recover when agents reconnect",
+                    persisted.len()
                 );
+                for (name, info) in &persisted {
+                    info!(
+                        "  Persisted runner '{}' on agent '{}' (created {})",
+                        name, info.agent_id, info.created_at
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                error!("Failed to load persisted runners: {}", e);
             }
         }
 
