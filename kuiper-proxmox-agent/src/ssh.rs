@@ -19,53 +19,8 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-/// Fallback GitHub Actions runner version if API fetch fails.
-pub const FALLBACK_RUNNER_VERSION: &str = "2.321.0";
-
-/// Fetch the latest GitHub Actions runner version from the GitHub API.
-/// Returns the fallback version if the fetch fails.
-pub async fn fetch_latest_runner_version() -> String {
-    let url = "https://api.github.com/repos/actions/runner/releases/latest";
-    debug!("Fetching latest runner version from GitHub API");
-
-    let output = match tokio::process::Command::new("curl")
-        .args(["-sL", "-H", "Accept: application/vnd.github.v3+json", url])
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(e) => {
-            warn!("Failed to run curl for runner version: {}", e);
-            return FALLBACK_RUNNER_VERSION.to_string();
-        }
-    };
-
-    if !output.status.success() {
-        warn!("GitHub API request failed, using fallback version");
-        return FALLBACK_RUNNER_VERSION.to_string();
-    }
-
-    let body = String::from_utf8_lossy(&output.stdout);
-
-    // Parse JSON to extract tag_name (e.g., "v2.321.0")
-    for line in body.lines() {
-        let line = line.trim();
-        if line.starts_with("\"tag_name\"") {
-            // Extract version from: "tag_name": "v2.321.0",
-            if let Some(start) = line.find(": \"v") {
-                let version_start = start + 4; // skip `: "v`
-                if let Some(end) = line[version_start..].find('"') {
-                    let version = &line[version_start..version_start + end];
-                    info!("Latest GitHub Actions runner version: v{}", version);
-                    return version.to_string();
-                }
-            }
-        }
-    }
-
-    warn!("Could not parse runner version from GitHub API, using fallback");
-    FALLBACK_RUNNER_VERSION.to_string()
-}
+// Re-export github_runner module for use in vm_manager
+pub use kuiper_agent_lib::github_runner;
 
 /// SSH authentication method.
 #[derive(Debug, Clone)]
@@ -561,12 +516,19 @@ impl RunnerConfigBuilder {
     }
 
     /// Build command to download and install the runner.
-    pub fn install_command(&self, version: &str) -> String {
+    ///
+    /// # Arguments
+    /// * `version` - The runner version (e.g., "2.321.0")
+    /// * `arch` - The target architecture
+    pub fn install_command(&self, version: &str, arch: github_runner::Arch) -> String {
+        let platform = if self.is_windows {
+            github_runner::Platform::Windows
+        } else {
+            github_runner::Platform::Linux
+        };
+        let download_url = github_runner::download_url(version, platform, arch);
+
         if self.is_windows {
-            let download_url = format!(
-                "https://github.com/actions/runner/releases/download/v{}/actions-runner-win-x64-{}.zip",
-                version, version
-            );
             // Use semicolons to separate statements so it works in both cmd.exe and PowerShell shells
             let ps_cmd = format!(
                 "$ErrorActionPreference = 'Stop'; \
@@ -586,10 +548,6 @@ impl RunnerConfigBuilder {
             );
             self.wrap_powershell(&ps_cmd)
         } else {
-            let download_url = format!(
-                "https://github.com/actions/runner/releases/download/v{}/actions-runner-linux-x64-{}.tar.gz",
-                version, version
-            );
             format!(
                 r#"
                 set -e

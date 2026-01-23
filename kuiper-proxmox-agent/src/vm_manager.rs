@@ -272,13 +272,31 @@ impl VmManager {
         if check_output.stdout.trim() != "installed" {
             // Determine version to install
             let version = if self.vm_config.runner_version.is_empty() || self.vm_config.runner_version == "latest" {
-                crate::ssh::fetch_latest_runner_version().await
+                match crate::ssh::github_runner::fetch_latest_version().await {
+                    Some(v) => v,
+                    None => {
+                        info!(
+                            "Could not fetch latest runner version, using fallback v{}",
+                            crate::ssh::github_runner::FALLBACK_VERSION
+                        );
+                        crate::ssh::github_runner::FALLBACK_VERSION.to_string()
+                    }
+                }
             } else {
                 self.vm_config.runner_version.clone()
             };
 
-            info!("GitHub Actions runner not installed on VM {}, installing v{}...", vmid, version);
-            let install_cmd = builder.install_command(&version);
+            // Detect architecture - for Windows, default to x64; for Linux, detect via uname
+            let arch = if is_windows {
+                crate::ssh::github_runner::Arch::X64
+            } else {
+                let uname_output = session.execute("uname -m").await?;
+                crate::ssh::github_runner::Arch::from_uname(&uname_output.stdout)
+                    .unwrap_or(crate::ssh::github_runner::Arch::X64)
+            };
+
+            info!("GitHub Actions runner not installed on VM {}, installing v{} ({})...", vmid, version, arch.as_str());
+            let install_cmd = builder.install_command(&version, arch);
             let install_output = session.execute(&install_cmd).await?;
             if install_output.exit_code != 0 {
                 error!("Runner installation failed: stdout={}, stderr={}", install_output.stdout, install_output.stderr);

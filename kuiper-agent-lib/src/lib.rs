@@ -5,10 +5,12 @@
 //! - gRPC connection handling with mTLS
 //! - Registration token exchange
 //! - Automatic reconnection with backoff
+//! - GitHub Actions runner version fetching and download URL construction
 
 mod certs;
 mod connector;
 mod error;
+pub mod github_runner;
 
 pub use certs::AgentCertStore;
 pub use connector::{AgentConfig, AgentConnector, RegistrationTlsMode};

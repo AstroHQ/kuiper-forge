@@ -395,52 +395,7 @@ pub async fn ssh_exec_with_logging(
     }
 }
 
-/// Fallback GitHub Actions runner version if API fetch fails.
-const FALLBACK_RUNNER_VERSION: &str = "2.321.0";
-
-/// Fetch the latest GitHub Actions runner version from the GitHub API.
-/// Returns None if the fetch fails (will fall back to configured/default version).
-async fn fetch_latest_runner_version() -> Option<String> {
-    // Use curl on the VM or locally - we'll do it via the VM since we're already SSHing
-    // Actually, let's do it locally since we have network access
-    let url = "https://api.github.com/repos/actions/runner/releases/latest";
-
-    debug!("Fetching latest runner version from GitHub API");
-
-    // Simple HTTP GET using the VM's curl (we could also use reqwest but this avoids adding deps)
-    let output = tokio::process::Command::new("curl")
-        .args(["-sL", "-H", "Accept: application/vnd.github.v3+json", url])
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
-        debug!("Failed to fetch latest runner version from GitHub API");
-        return None;
-    }
-
-    let body = String::from_utf8_lossy(&output.stdout);
-
-    // Parse JSON to extract tag_name (e.g., "v2.321.0")
-    // Simple parsing without adding serde_json dependency to this module
-    for line in body.lines() {
-        let line = line.trim();
-        if line.starts_with("\"tag_name\"") {
-            // Extract version from: "tag_name": "v2.321.0",
-            if let Some(start) = line.find(": \"v") {
-                let version_start = start + 4; // skip `: "v`
-                if let Some(end) = line[version_start..].find('"') {
-                    let version = &line[version_start..version_start + end];
-                    info!("Latest GitHub Actions runner version: v{}", version);
-                    return Some(version.to_string());
-                }
-            }
-        }
-    }
-
-    debug!("Could not parse runner version from GitHub API response");
-    None
-}
+use kuiper_agent_lib::github_runner::{self, Arch, Platform};
 
 /// Ensure the GitHub Actions runner is installed on the VM.
 /// Downloads and extracts the runner if not present.
@@ -465,14 +420,14 @@ pub async fn ensure_runner_installed(
     // Determine which version to install
     let version = if runner_version.is_empty() || runner_version == "latest" {
         // Fetch latest version from GitHub API
-        match fetch_latest_runner_version().await {
+        match github_runner::fetch_latest_version().await {
             Some(v) => v,
             None => {
                 info!(
                     "Could not fetch latest runner version, using fallback v{}",
-                    FALLBACK_RUNNER_VERSION
+                    github_runner::FALLBACK_VERSION
                 );
-                FALLBACK_RUNNER_VERSION.to_string()
+                github_runner::FALLBACK_VERSION.to_string()
             }
         }
     } else {
@@ -481,28 +436,22 @@ pub async fn ensure_runner_installed(
 
     // Detect architecture
     let arch_output = ssh_exec(ip, config, "uname -m").await?;
-    let arch = arch_output.trim();
-    let runner_arch = match arch {
-        "arm64" | "aarch64" => "arm64",
-        "x86_64" => "x64",
-        _ => {
-            return Err(Error::Ssh(format!(
-                "Unsupported architecture: {}. Expected arm64 or x86_64.",
-                arch
-            )));
-        }
-    };
+    let arch = Arch::from_uname(&arch_output).ok_or_else(|| {
+        Error::Ssh(format!(
+            "Unsupported architecture: {}. Expected arm64 or x86_64.",
+            arch_output.trim()
+        ))
+    })?;
 
     info!(
         "Installing GitHub Actions runner v{} for osx-{} on {}",
-        version, runner_arch, ip
+        version,
+        arch.as_str(),
+        ip
     );
 
     // Download URL for macOS runner
-    let download_url = format!(
-        "https://github.com/actions/runner/releases/download/v{}/actions-runner-osx-{}-{}.tar.gz",
-        version, runner_arch, version
-    );
+    let download_url = github_runner::download_url(&version, Platform::MacOS, arch);
 
     // Create directory and download/extract runner
     let install_cmd = format!(
