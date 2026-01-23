@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::signal;
 use tracing::{debug, info, warn, Level};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -245,6 +246,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
 
     // Start management socket server for CLI communication
     let mgmt_socket_path = management::default_socket_path(data_dir);
+    let mgmt_socket_path_cleanup = mgmt_socket_path.clone();
     let mgmt_auth = auth_manager.clone();
     tokio::spawn(async move {
         if let Err(e) = management::run_management_server(mgmt_auth, mgmt_socket_path).await {
@@ -353,8 +355,8 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         }
     });
 
-    // Run fleet manager (if enabled) and server concurrently
-    if let Some(fm) = fleet_manager {
+    // Run fleet manager (if enabled) and server concurrently, with graceful shutdown
+    let result = if let Some(fm) = fleet_manager {
         tokio::select! {
             result = run_server(server_config, auth_manager, agent_registry, fleet_notifier, Some(runner_state), webhook_config) => {
                 result
@@ -363,10 +365,58 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
                 // Fleet manager runs forever, shouldn't exit
                 Ok(())
             }
+            _ = shutdown_signal() => {
+                info!("Shutdown signal received");
+                Ok(())
+            }
         }
     } else {
-        // No fleet manager, just run the server
-        run_server(server_config, auth_manager, agent_registry, None, None, None).await
+        tokio::select! {
+            result = run_server(server_config, auth_manager, agent_registry, None, None, None) => {
+                result
+            }
+            _ = shutdown_signal() => {
+                info!("Shutdown signal received");
+                Ok(())
+            }
+        }
+    };
+
+    // Cleanup: remove the management socket
+    if mgmt_socket_path_cleanup.exists() {
+        if let Err(e) = std::fs::remove_file(&mgmt_socket_path_cleanup) {
+            warn!("Failed to remove management socket: {}", e);
+        } else {
+            debug!("Removed management socket: {}", mgmt_socket_path_cleanup.display());
+        }
+    }
+
+    info!("Coordinator shutdown complete");
+    result
+}
+
+/// Wait for shutdown signal (Ctrl+C or SIGTERM)
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }
 
