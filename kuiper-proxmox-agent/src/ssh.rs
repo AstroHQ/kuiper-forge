@@ -309,62 +309,6 @@ impl SshSession {
         Ok(output)
     }
 
-    /// Execute a command in the background (nohup-style).
-    ///
-    /// This is useful for starting the GitHub runner which should continue
-    /// running after the SSH session ends.
-    pub async fn execute_background(&mut self, command: &str) -> Result<()> {
-        debug!("Executing background command: {}", command);
-
-        let mut channel = self.handle.channel_open_session().await.map_err(|e| {
-            Error::ssh(format!("Failed to open SSH channel: {}", e))
-        })?;
-
-        // Use nohup and redirect output to prevent hangups
-        let bg_command = format!("nohup {} > /dev/null 2>&1 &", command);
-        channel.exec(true, bg_command.as_str()).await.map_err(|e| {
-            Error::ssh(format!("Failed to execute background command: {}", e))
-        })?;
-
-        // Wait for channel to close
-        loop {
-            match channel.wait().await {
-                Some(ChannelMsg::Eof) | None => break,
-                _ => {}
-            }
-        }
-
-        debug!("Background command started");
-        Ok(())
-    }
-
-    /// Check if the GitHub runner process is still running.
-    ///
-    /// For Windows, `shell_is_powershell` indicates whether the SSH shell is PowerShell (true)
-    /// or cmd.exe (false). This determines whether to wrap PowerShell commands.
-    pub async fn is_runner_running(&mut self, is_windows: bool, shell_is_powershell: bool) -> Result<bool> {
-        let output = if is_windows {
-            // List all Runner-related processes for debugging
-            let ps_cmd = "Get-Process | Where-Object { $_.Name -like '*Runner*' } | Select-Object Name,Id | Format-Table -AutoSize | Out-String";
-            let cmd = if shell_is_powershell {
-                ps_cmd.to_string()
-            } else {
-                format!(r#"powershell -Command "{}""#, ps_cmd)
-            };
-            self.execute(&cmd).await?
-        } else {
-            // On Linux, use pgrep to list runner processes
-            self.execute("pgrep -af 'Runner' || true").await?
-        };
-        let found = !output.stdout.trim().is_empty();
-        if found {
-            debug!("Runner processes found:\n{}", output.stdout.trim());
-        } else {
-            debug!("No runner processes found");
-        }
-        Ok(found)
-    }
-
     /// Close the SSH session.
     pub async fn close(self) -> Result<()> {
         self.handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.map_err(|e| {
@@ -468,19 +412,6 @@ impl RunnerConfigBuilder {
                 r#"cd {} && ./config.sh --url {} --token {} --labels {} --name {} --ephemeral --unattended"#,
                 self.runner_dir, url, token, labels_str, name
             )
-        }
-    }
-
-    /// Build the runner start command for background execution.
-    pub fn run_command_background(&self) -> String {
-        if self.is_windows {
-            let ps_cmd = format!(
-                "Start-Process -FilePath '{}\\run.cmd' -WindowStyle Hidden -WorkingDirectory '{}'",
-                self.runner_dir, self.runner_dir
-            );
-            self.wrap_powershell(&ps_cmd)
-        } else {
-            format!(r#"cd {} && nohup ./run.sh > runner.log 2>&1 &"#, self.runner_dir)
         }
     }
 
@@ -594,18 +525,4 @@ mod tests {
         assert!(cmd.contains("--unattended"));
     }
 
-    #[test]
-    fn test_windows_run_command_background() {
-        // cmd.exe shell should wrap with powershell
-        let builder_cmd = RunnerConfigBuilder::windows(r"C:\actions-runner");
-        let cmd = builder_cmd.run_command_background();
-        assert!(cmd.starts_with("powershell -Command"));
-        assert!(cmd.contains("Start-Process"));
-
-        // PowerShell shell should not need wrapper
-        let builder_ps = RunnerConfigBuilder::windows_powershell(r"C:\actions-runner");
-        let cmd_ps = builder_ps.run_command_background();
-        assert!(!cmd_ps.starts_with("powershell -Command"));
-        assert!(cmd_ps.contains("Start-Process"));
-    }
 }

@@ -361,57 +361,6 @@ impl VmManager {
         Ok((is_windows, shell_is_powershell))
     }
 
-    /// Wait for the runner to complete.
-    ///
-    /// Polls the VM until the runner process exits.
-    pub async fn wait_for_runner_completion(
-        &self,
-        vmid: u32,
-        ip: &str,
-        timeout: Duration,
-        is_windows: bool,
-        shell_is_powershell: bool,
-    ) -> Result<()> {
-        info!("Waiting for runner completion on VM {} (timeout: {:?})", vmid, timeout);
-
-        let ssh_client = SshClient::new(self.ssh_config.clone()).await?;
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_secs(10);
-
-        while start.elapsed() < timeout {
-            // Try to connect and check runner status
-            match ssh_client.connect(ip).await {
-                Ok(mut session) => {
-                    match session.is_runner_running(is_windows, shell_is_powershell).await {
-                        Ok(running) => {
-                            if !running {
-                                info!("Runner completed on VM {}", vmid);
-                                let _ = session.close().await;
-                                return Ok(());
-                            }
-                            debug!("Runner still running on VM {}", vmid);
-                            let _ = session.close().await;
-                        }
-                        Err(e) => {
-                            warn!("Failed to check runner status: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Connection failed - VM might be shutting down
-                    debug!("SSH connection failed (VM may be stopping): {}", e);
-                }
-            }
-
-            tokio::time::sleep(poll_interval).await;
-        }
-
-        Err(Error::timeout(format!(
-            "Runner on VM {} did not complete within {:?}",
-            vmid, timeout
-        )))
-    }
-
     /// Destroy a VM.
     pub async fn destroy_vm(&self, vmid: u32) -> Result<()> {
         info!("Destroying VM {}", vmid);
