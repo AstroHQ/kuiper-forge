@@ -19,6 +19,54 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+/// Fallback GitHub Actions runner version if API fetch fails.
+pub const FALLBACK_RUNNER_VERSION: &str = "2.321.0";
+
+/// Fetch the latest GitHub Actions runner version from the GitHub API.
+/// Returns the fallback version if the fetch fails.
+pub async fn fetch_latest_runner_version() -> String {
+    let url = "https://api.github.com/repos/actions/runner/releases/latest";
+    debug!("Fetching latest runner version from GitHub API");
+
+    let output = match tokio::process::Command::new("curl")
+        .args(["-sL", "-H", "Accept: application/vnd.github.v3+json", url])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!("Failed to run curl for runner version: {}", e);
+            return FALLBACK_RUNNER_VERSION.to_string();
+        }
+    };
+
+    if !output.status.success() {
+        warn!("GitHub API request failed, using fallback version");
+        return FALLBACK_RUNNER_VERSION.to_string();
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+
+    // Parse JSON to extract tag_name (e.g., "v2.321.0")
+    for line in body.lines() {
+        let line = line.trim();
+        if line.starts_with("\"tag_name\"") {
+            // Extract version from: "tag_name": "v2.321.0",
+            if let Some(start) = line.find(": \"v") {
+                let version_start = start + 4; // skip `: "v`
+                if let Some(end) = line[version_start..].find('"') {
+                    let version = &line[version_start..version_start + end];
+                    info!("Latest GitHub Actions runner version: v{}", version);
+                    return version.to_string();
+                }
+            }
+        }
+    }
+
+    warn!("Could not parse runner version from GitHub API, using fallback");
+    FALLBACK_RUNNER_VERSION.to_string()
+}
+
 /// SSH authentication method.
 #[derive(Debug, Clone)]
 pub enum SshAuth {
@@ -336,10 +384,30 @@ impl SshSession {
     }
 
     /// Check if the GitHub runner process is still running.
-    pub async fn is_runner_running(&mut self) -> Result<bool> {
-        // Check for the runner process (Runner.Listener on Linux, Runner.Listener.exe on Windows)
-        let output = self.execute("pgrep -f 'Runner.Listener' || true").await?;
-        Ok(!output.stdout.trim().is_empty())
+    ///
+    /// For Windows, `shell_is_powershell` indicates whether the SSH shell is PowerShell (true)
+    /// or cmd.exe (false). This determines whether to wrap PowerShell commands.
+    pub async fn is_runner_running(&mut self, is_windows: bool, shell_is_powershell: bool) -> Result<bool> {
+        let output = if is_windows {
+            // List all Runner-related processes for debugging
+            let ps_cmd = "Get-Process | Where-Object { $_.Name -like '*Runner*' } | Select-Object Name,Id | Format-Table -AutoSize | Out-String";
+            let cmd = if shell_is_powershell {
+                ps_cmd.to_string()
+            } else {
+                format!(r#"powershell -Command "{}""#, ps_cmd)
+            };
+            self.execute(&cmd).await?
+        } else {
+            // On Linux, use pgrep to list runner processes
+            self.execute("pgrep -af 'Runner' || true").await?
+        };
+        let found = !output.stdout.trim().is_empty();
+        if found {
+            debug!("Runner processes found:\n{}", output.stdout.trim());
+        } else {
+            debug!("No runner processes found");
+        }
+        Ok(found)
     }
 
     /// Close the SSH session.
@@ -381,6 +449,8 @@ impl Handler for ClientHandler {
 pub struct RunnerConfigBuilder {
     runner_dir: String,
     is_windows: bool,
+    /// If Windows, whether the SSH shell is PowerShell (true) or cmd.exe (false)
+    shell_is_powershell: bool,
 }
 
 impl RunnerConfigBuilder {
@@ -389,14 +459,36 @@ impl RunnerConfigBuilder {
         Self {
             runner_dir: runner_dir.to_string(),
             is_windows: false,
+            shell_is_powershell: false,
         }
     }
 
-    /// Create a new runner config builder for Windows.
+    /// Create a new runner config builder for Windows with cmd.exe as the SSH shell.
     pub fn windows(runner_dir: &str) -> Self {
         Self {
             runner_dir: runner_dir.to_string(),
             is_windows: true,
+            shell_is_powershell: false,
+        }
+    }
+
+    /// Create a new runner config builder for Windows with PowerShell as the SSH shell.
+    pub fn windows_powershell(runner_dir: &str) -> Self {
+        Self {
+            runner_dir: runner_dir.to_string(),
+            is_windows: true,
+            shell_is_powershell: true,
+        }
+    }
+
+    /// Wrap a PowerShell command appropriately based on the shell type.
+    /// If the shell is already PowerShell, returns the command as-is.
+    /// If the shell is cmd.exe, wraps with `powershell -Command "..."`.
+    fn wrap_powershell(&self, ps_command: &str) -> String {
+        if self.shell_is_powershell {
+            ps_command.to_string()
+        } else {
+            format!(r#"powershell -Command "{}""#, ps_command)
         }
     }
 
@@ -411,10 +503,11 @@ impl RunnerConfigBuilder {
         let labels_str = labels.join(",");
 
         if self.is_windows {
-            format!(
-                r#"cd {}; .\config.cmd --url {} --token {} --labels {} --name {} --ephemeral --unattended"#,
+            let ps_cmd = format!(
+                "Set-Location '{}'; .\\config.cmd --url '{}' --token '{}' --labels '{}' --name '{}' --ephemeral --unattended",
                 self.runner_dir, url, token, labels_str, name
-            )
+            );
+            self.wrap_powershell(&ps_cmd)
         } else {
             format!(
                 r#"cd {} && ./config.sh --url {} --token {} --labels {} --name {} --ephemeral --unattended"#,
@@ -426,13 +519,94 @@ impl RunnerConfigBuilder {
     /// Build the runner start command for background execution.
     pub fn run_command_background(&self) -> String {
         if self.is_windows {
-            // On Windows, use Start-Process for background execution
-            format!(
-                r#"Start-Process -FilePath "{}\run.cmd" -WindowStyle Hidden -WorkingDirectory "{}""#,
+            let ps_cmd = format!(
+                "Start-Process -FilePath '{}\\run.cmd' -WindowStyle Hidden -WorkingDirectory '{}'",
                 self.runner_dir, self.runner_dir
-            )
+            );
+            self.wrap_powershell(&ps_cmd)
         } else {
             format!(r#"cd {} && nohup ./run.sh > runner.log 2>&1 &"#, self.runner_dir)
+        }
+    }
+
+    /// Build the runner command for direct (blocking) execution.
+    /// This runs the runner and waits for it to complete - simpler for ephemeral runners.
+    pub fn run_command_direct(&self) -> String {
+        if self.is_windows {
+            // Run directly - will block until runner completes
+            let ps_cmd = format!(
+                "Set-Location '{}'; .\\run.cmd",
+                self.runner_dir
+            );
+            self.wrap_powershell(&ps_cmd)
+        } else {
+            format!(r#"cd {} && ./run.sh"#, self.runner_dir)
+        }
+    }
+
+    /// Build command to check if runner is installed.
+    pub fn check_installed_command(&self) -> String {
+        if self.is_windows {
+            let ps_cmd = format!(
+                "if (Test-Path '{}\\run.cmd') {{ Write-Output 'installed' }}",
+                self.runner_dir
+            );
+            self.wrap_powershell(&ps_cmd)
+        } else {
+            format!(
+                "test -d {} && test -f {}/run.sh && echo 'installed'",
+                self.runner_dir, self.runner_dir
+            )
+        }
+    }
+
+    /// Build command to download and install the runner.
+    pub fn install_command(&self, version: &str) -> String {
+        if self.is_windows {
+            let download_url = format!(
+                "https://github.com/actions/runner/releases/download/v{}/actions-runner-win-x64-{}.zip",
+                version, version
+            );
+            // Use semicolons to separate statements so it works in both cmd.exe and PowerShell shells
+            let ps_cmd = format!(
+                "$ErrorActionPreference = 'Stop'; \
+                Write-Output 'Creating runner directory...'; \
+                New-Item -ItemType Directory -Force -Path '{runner_dir}' | Out-Null; \
+                Set-Location '{runner_dir}'; \
+                Write-Output 'Downloading runner v{version} from {url}...'; \
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
+                Invoke-WebRequest -Uri '{url}' -OutFile 'actions-runner.zip' -UseBasicParsing; \
+                Write-Output 'Extracting runner...'; \
+                Expand-Archive -Path 'actions-runner.zip' -DestinationPath '.' -Force; \
+                Remove-Item 'actions-runner.zip'; \
+                Write-Output 'Runner installed successfully'",
+                runner_dir = self.runner_dir,
+                version = version,
+                url = download_url
+            );
+            self.wrap_powershell(&ps_cmd)
+        } else {
+            let download_url = format!(
+                "https://github.com/actions/runner/releases/download/v{}/actions-runner-linux-x64-{}.tar.gz",
+                version, version
+            );
+            format!(
+                r#"
+                set -e
+                echo "Creating runner directory..."
+                mkdir -p {runner_dir}
+                cd {runner_dir}
+                echo "Downloading runner v{version} from {url}..."
+                curl -sL -o actions-runner.tar.gz "{url}"
+                echo "Extracting runner..."
+                tar xzf actions-runner.tar.gz
+                rm actions-runner.tar.gz
+                echo "Runner installed successfully"
+                "#,
+                runner_dir = self.runner_dir,
+                version = version,
+                url = download_url
+            )
         }
     }
 }
@@ -459,6 +633,7 @@ mod tests {
 
     #[test]
     fn test_windows_config_command() {
+        // Test with cmd.exe as SSH shell (wraps with powershell -Command)
         let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
         let cmd = builder.config_command(
             "https://github.com/org/repo",
@@ -467,8 +642,43 @@ mod tests {
             "runner-001",
         );
 
-        assert!(cmd.contains(".\\config.cmd"));
+        assert!(cmd.starts_with("powershell -Command"));
+        assert!(cmd.contains("config.cmd"));
         assert!(cmd.contains("--ephemeral"));
         assert!(cmd.contains("--unattended"));
+    }
+
+    #[test]
+    fn test_windows_powershell_config_command() {
+        // Test with PowerShell as SSH shell (no wrapper needed)
+        let builder = RunnerConfigBuilder::windows_powershell(r"C:\actions-runner");
+        let cmd = builder.config_command(
+            "https://github.com/org/repo",
+            "TOKEN123",
+            &["self-hosted".to_string(), "windows".to_string()],
+            "runner-001",
+        );
+
+        // Should NOT start with "powershell -Command" since shell is already PowerShell
+        assert!(!cmd.starts_with("powershell -Command"));
+        assert!(cmd.contains("Set-Location"));
+        assert!(cmd.contains("config.cmd"));
+        assert!(cmd.contains("--ephemeral"));
+        assert!(cmd.contains("--unattended"));
+    }
+
+    #[test]
+    fn test_windows_run_command_background() {
+        // cmd.exe shell should wrap with powershell
+        let builder_cmd = RunnerConfigBuilder::windows(r"C:\actions-runner");
+        let cmd = builder_cmd.run_command_background();
+        assert!(cmd.starts_with("powershell -Command"));
+        assert!(cmd.contains("Start-Process"));
+
+        // PowerShell shell should not need wrapper
+        let builder_ps = RunnerConfigBuilder::windows_powershell(r"C:\actions-runner");
+        let cmd_ps = builder_ps.run_command_background();
+        assert!(!cmd_ps.starts_with("powershell -Command"));
+        assert!(cmd_ps.contains("Start-Process"));
     }
 }

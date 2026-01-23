@@ -92,6 +92,9 @@ pub struct VmConfig {
     /// Template mappings for label-based selection (first match wins)
     #[serde(default)]
     pub template_mappings: Vec<TemplateMapping>,
+    /// GitHub Actions runner version to install (e.g., "2.321.0")
+    #[serde(default = "default_runner_version")]
+    pub runner_version: String,
 }
 
 fn default_linked_clone() -> bool {
@@ -108,6 +111,10 @@ fn default_ip_timeout() -> u64 {
 
 fn default_clone_timeout() -> u64 {
     300
+}
+
+fn default_runner_version() -> String {
+    "latest".to_string()
 }
 
 /// SSH configuration for connecting to VMs.

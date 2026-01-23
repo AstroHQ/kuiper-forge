@@ -51,23 +51,28 @@ pub struct Snapshot {
     pub snaptime: Option<usize>,
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Error within reqwest library
-    #[error("API error with reqwest: {0}")]
+    #[error("Proxmox API request failed: {0}")]
     ReqwestError(#[from] reqwest::Error),
+
     /// Error returned by server
-    #[error("HTTP Error from API: {0}")]
+    #[error("HTTP error from API: {0}")]
     HttpError(StatusCode),
+
     /// Task failed
     #[error("Task failed with status: {0}")]
     TaskFailed(String),
+
     /// Unknown task status
     #[error("Unknown task status: {0}")]
     UnknownTaskStatus(String),
+
     /// Timeout waiting for condition
     #[error("Timeout: {0}")]
     Timeout(String),
+
     /// Guest agent not available
     #[error("Guest agent not available")]
     GuestAgentUnavailable,

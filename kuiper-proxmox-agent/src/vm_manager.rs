@@ -212,6 +212,10 @@ impl VmManager {
     }
 
     /// Configure the GitHub runner on a VM.
+    ///
+    /// Returns `(is_windows, shell_is_powershell)`:
+    /// - `is_windows`: true if the VM is running Windows
+    /// - `shell_is_powershell`: true if Windows SSH shell is PowerShell (vs cmd.exe)
     pub async fn configure_runner(
         &self,
         vmid: u32,
@@ -220,7 +224,7 @@ impl VmManager {
         labels: &[String],
         runner_scope_url: &str,
         runner_name: &str,
-    ) -> Result<()> {
+    ) -> Result<(bool, bool)> {
         // Update state
         if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
             vm.state = VmState::Configuring;
@@ -232,9 +236,18 @@ impl VmManager {
         let ssh_client = SshClient::new(self.ssh_config.clone()).await?;
         let mut session = ssh_client.connect(ip).await?;
 
-        // Detect OS type
-        let is_windows = self.detect_os_type(&mut session).await?;
-        debug!("VM {} is running {}", vmid, if is_windows { "Windows" } else { "Linux" });
+        // Detect OS type and shell type
+        let (is_windows, shell_is_powershell) = self.detect_os_type(&mut session).await?;
+        info!(
+            "VM {} detected as {} (shell: {})",
+            vmid,
+            if is_windows { "Windows" } else { "Linux" },
+            if is_windows {
+                if shell_is_powershell { "PowerShell" } else { "cmd.exe" }
+            } else {
+                "bash/sh"
+            }
+        );
 
         // Build runner commands
         let runner_dir = if is_windows {
@@ -244,10 +257,40 @@ impl VmManager {
         };
 
         let builder = if is_windows {
-            RunnerConfigBuilder::windows(runner_dir)
+            if shell_is_powershell {
+                RunnerConfigBuilder::windows_powershell(runner_dir)
+            } else {
+                RunnerConfigBuilder::windows(runner_dir)
+            }
         } else {
             RunnerConfigBuilder::linux(runner_dir)
         };
+
+        // Check if runner is installed
+        let check_cmd = builder.check_installed_command();
+        let check_output = session.execute(&check_cmd).await?;
+        if check_output.stdout.trim() != "installed" {
+            // Determine version to install
+            let version = if self.vm_config.runner_version.is_empty() || self.vm_config.runner_version == "latest" {
+                crate::ssh::fetch_latest_runner_version().await
+            } else {
+                self.vm_config.runner_version.clone()
+            };
+
+            info!("GitHub Actions runner not installed on VM {}, installing v{}...", vmid, version);
+            let install_cmd = builder.install_command(&version);
+            let install_output = session.execute(&install_cmd).await?;
+            if install_output.exit_code != 0 {
+                error!("Runner installation failed: stdout={}, stderr={}", install_output.stdout, install_output.stderr);
+                return Err(Error::runner(format!(
+                    "Failed to install runner: {}",
+                    install_output.stderr
+                )));
+            }
+            info!("Runner installed successfully: {}", install_output.stdout.trim());
+        } else {
+            debug!("GitHub Actions runner already installed on VM {}", vmid);
+        }
 
         // Configure runner
         let config_cmd = builder.config_command(
@@ -260,35 +303,44 @@ impl VmManager {
         info!("Running configuration command on VM {}", vmid);
         let output = session.execute(&config_cmd).await?;
         if output.exit_code != 0 {
-            error!("Runner configuration failed: {}", output.stderr);
+            error!("Runner configuration failed (exit {}): stdout={}, stderr={}", output.exit_code, output.stdout, output.stderr);
             return Err(Error::runner(format!(
-                "Configuration failed with exit code {}: {}",
-                output.exit_code, output.stderr
+                "Configuration failed with exit code {}:\nstdout: {}\nstderr: {}",
+                output.exit_code, output.stdout, output.stderr
             )));
         }
-
-        // Start runner in background
-        info!("Starting runner on VM {}", vmid);
-        let run_cmd = builder.run_command_background();
-        session.execute_background(&run_cmd).await?;
+        if !output.stdout.is_empty() {
+            info!("Config output: {}", output.stdout.trim());
+        }
 
         // Update state
         if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
             vm.state = VmState::RunnerActive;
         }
 
-        // Give runner time to start
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Run the runner directly and wait for it to complete
+        // This is simpler and more reliable than backgrounding + polling for ephemeral runners
+        info!("Running ephemeral runner on VM {} (will block until job completes)", vmid);
+        let run_cmd = builder.run_command_direct();
+        let output = session.execute(&run_cmd).await?;
 
-        // Verify runner started
-        if !session.is_runner_running().await? {
-            return Err(Error::runner("Runner process failed to start"));
+        info!("Runner completed on VM {} with exit code {}", vmid, output.exit_code);
+        if !output.stdout.is_empty() {
+            debug!("Runner stdout: {}", output.stdout);
+        }
+        if !output.stderr.is_empty() {
+            debug!("Runner stderr: {}", output.stderr);
         }
 
-        info!("Runner started successfully on VM {}", vmid);
-        session.close().await?;
+        if output.exit_code != 0 {
+            return Err(Error::runner(format!(
+                "Runner exited with code {}: {}",
+                output.exit_code, output.stderr
+            )));
+        }
 
-        Ok(())
+        session.close().await?;
+        Ok((is_windows, shell_is_powershell))
     }
 
     /// Wait for the runner to complete.
@@ -299,6 +351,8 @@ impl VmManager {
         vmid: u32,
         ip: &str,
         timeout: Duration,
+        is_windows: bool,
+        shell_is_powershell: bool,
     ) -> Result<()> {
         info!("Waiting for runner completion on VM {} (timeout: {:?})", vmid, timeout);
 
@@ -310,7 +364,7 @@ impl VmManager {
             // Try to connect and check runner status
             match ssh_client.connect(ip).await {
                 Ok(mut session) => {
-                    match session.is_runner_running().await {
+                    match session.is_runner_running(is_windows, shell_is_powershell).await {
                         Ok(running) => {
                             if !running {
                                 info!("Runner completed on VM {}", vmid);
@@ -428,25 +482,57 @@ impl VmManager {
         }
     }
 
-    /// Detect OS type by running a command via SSH.
-    async fn detect_os_type(&self, session: &mut SshSession) -> Result<bool> {
-        // Try Windows-specific command first
-        let output = session.execute("ver 2>nul || echo NOTWINDOWS").await?;
-        let is_windows = !output.stdout.contains("NOTWINDOWS") &&
-                         (output.stdout.contains("Windows") || output.stdout.contains("Microsoft"));
+    /// Detect OS type and shell type by running commands via SSH.
+    ///
+    /// Returns `(is_windows, shell_is_powershell)`:
+    /// - `is_windows`: true if the VM is running Windows
+    /// - `shell_is_powershell`: true if the SSH default shell is PowerShell (only relevant for Windows)
+    async fn detect_os_type(&self, session: &mut SshSession) -> Result<(bool, bool)> {
+        // First, try to detect if the shell is PowerShell by checking $PSVersionTable
+        // This only exists in PowerShell, not in cmd.exe
+        let ps_check = session.execute("echo $PSVersionTable").await?;
+        let shell_is_powershell = ps_check.stdout.contains("PSVersion");
 
-        if is_windows {
-            return Ok(true);
+        if shell_is_powershell {
+            // Shell is PowerShell - we're on Windows and can use PS commands directly
+            info!("Detected PowerShell as SSH default shell (Windows)");
+            return Ok((true, true));
         }
 
-        // Check for Linux
-        let output = session.execute("uname -s 2>/dev/null || echo UNKNOWN").await?;
-        if output.stdout.contains("Linux") || output.stdout.contains("Darwin") {
-            return Ok(false);
+        // Try to detect Windows via cmd.exe environment variable
+        let output = session.execute("echo %OS%").await?;
+        if output.stdout.trim() == "Windows_NT" || output.stdout.contains("Windows_NT") {
+            info!("Detected Windows OS via %OS% (cmd.exe shell)");
+            return Ok((true, false));
         }
 
-        // Default to Linux
-        Ok(false)
+        // Try PowerShell-specific detection (for Windows with cmd.exe shell)
+        let output = session.execute("powershell -Command \"Write-Output $env:OS\"").await?;
+        if output.stdout.contains("Windows") {
+            info!("Detected Windows OS via PowerShell probe (cmd.exe shell)");
+            return Ok((true, false));
+        }
+
+        // Check for Linux/Unix
+        let output = session.execute("uname -s").await?;
+        if output.stdout.contains("Linux") {
+            info!("Detected Linux OS");
+            return Ok((false, false));
+        }
+        if output.stdout.contains("Darwin") {
+            info!("Detected macOS");
+            return Ok((false, false));
+        }
+
+        // If uname works but returns something else, it's Unix-like
+        if output.exit_code == 0 && !output.stdout.trim().is_empty() {
+            info!("Detected Unix-like OS: {}", output.stdout.trim());
+            return Ok((false, false));
+        }
+
+        // Default to Windows with cmd.exe if nothing else matches (since uname failed)
+        info!("Could not detect OS, defaulting to Windows with cmd.exe shell");
+        Ok((true, false))
     }
 
     /// Run the complete runner lifecycle for a create command.
@@ -455,9 +541,8 @@ impl VmManager {
     /// 1. Creates a VM from template
     /// 2. Starts the VM and waits for IP
     /// 3. Waits for SSH to be available
-    /// 4. Configures the GitHub runner
-    /// 5. Waits for the runner to complete
-    /// 6. Destroys the VM
+    /// 4. Configures and runs the GitHub runner (blocks until job completes)
+    /// 5. Destroys the VM
     pub async fn run_complete_lifecycle(
         &self,
         vm_name: &str,
@@ -505,8 +590,8 @@ impl VmManager {
         // 3. Wait for SSH
         self.wait_for_ssh(&ip).await?;
 
-        // 4. Configure runner
-        self.configure_runner(
+        // 4. Configure and run the runner (blocks until job completes for ephemeral runners)
+        let _os_info = self.configure_runner(
             vmid,
             &ip,
             registration_token,
@@ -515,10 +600,7 @@ impl VmManager {
             vm_name,
         ).await?;
 
-        // 5. Wait for runner completion (1 hour timeout)
-        let runner_timeout = Duration::from_secs(3600);
-        self.wait_for_runner_completion(vmid, &ip, runner_timeout).await?;
-
+        // Runner has completed - VM will be cleaned up by caller
         Ok((vmid, ip))
     }
 }
