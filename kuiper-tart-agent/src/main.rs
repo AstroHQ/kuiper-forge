@@ -711,8 +711,12 @@ fn init_logging(data_dir: &PathBuf) -> anyhow::Result<()> {
     // Leak the guard to keep the writer alive for the lifetime of the program
     std::mem::forget(_guard);
 
-    let filter = EnvFilter::from_default_env()
-        .add_directive(tracing::Level::INFO.into());
+    // Base filter suppresses noisy libraries, RUST_LOG layers on top (can override if explicit)
+    let base = "russh=warn,hyper=warn,reqwest=warn,h2=warn,rustls=warn,tonic=warn";
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(env) => EnvFilter::new(format!("{base},{env}")),
+        Err(_) => EnvFilter::new(format!("{base},info")),
+    };
 
     tracing_subscriber::registry()
         .with(filter)

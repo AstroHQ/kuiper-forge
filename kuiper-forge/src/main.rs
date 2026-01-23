@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -36,10 +36,6 @@ struct Cli {
     /// Data directory for certificates and state
     #[arg(short, long, default_value_os_t = Config::default_data_dir())]
     data_dir: PathBuf,
-
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -140,10 +136,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging based on command type
-    let filter = if cli.verbose {
-        EnvFilter::from_default_env().add_directive(Level::DEBUG.into())
-    } else {
-        EnvFilter::from_default_env().add_directive(Level::INFO.into())
+    // Base filter suppresses noisy libraries, RUST_LOG layers on top (can override if explicit)
+    let base = "hyper=warn,reqwest=warn,h2=warn,rustls=warn,tonic=warn";
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(env) => EnvFilter::new(format!("{base},{env}")),
+        Err(_) => EnvFilter::new(format!("{base},info")),
     };
 
     match cli.command {

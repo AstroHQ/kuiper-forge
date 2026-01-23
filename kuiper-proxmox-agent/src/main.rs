@@ -43,10 +43,6 @@ struct Args {
     /// Registration token from coordinator (single-use, for first-time registration)
     #[arg(long)]
     token: Option<String>,
-
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
 }
 
 #[tokio::main]
@@ -55,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize logging with file output
     let data_dir = Config::default_data_dir();
-    init_logging(&data_dir, args.verbose)?;
+    init_logging(&data_dir)?;
 
     info!("Starting kuiper-proxmox-agent");
 
@@ -580,7 +576,7 @@ impl ProxmoxAgent {
 }
 
 /// Initialize logging with file output and stdout.
-fn init_logging(data_dir: &PathBuf, verbose: bool) -> anyhow::Result<()> {
+fn init_logging(data_dir: &PathBuf) -> anyhow::Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
@@ -597,10 +593,11 @@ fn init_logging(data_dir: &PathBuf, verbose: bool) -> anyhow::Result<()> {
     // Leak the guard to keep the writer alive for the lifetime of the program
     std::mem::forget(_guard);
 
-    let filter = if verbose {
-        EnvFilter::try_new("debug,russh=info,hyper=info,reqwest=info")?
-    } else {
-        EnvFilter::try_new("info,russh=warn")?
+    // Base filter suppresses noisy libraries, RUST_LOG layers on top (can override if explicit)
+    let base = "russh=warn,hyper=warn,reqwest=warn,h2=warn,rustls=warn,tonic=warn";
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(env) => EnvFilter::new(format!("{base},{env}")),
+        Err(_) => EnvFilter::new(format!("{base},info")),
     };
 
     tracing_subscriber::registry()
