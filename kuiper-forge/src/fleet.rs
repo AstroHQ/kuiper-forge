@@ -470,13 +470,14 @@ impl FleetManager {
         let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
         let command_id = Uuid::new_v4().to_string();
 
-        // Save runner state for crash recovery
+        // Save runner state for crash recovery (include job_id for dedup cleanup on failure)
         self.runner_state
             .add_runner(
                 runner_name.clone(),
                 agent_id.clone(),
                 runner_name.clone(), // vm_name is same as runner_name
                 runner_scope.clone(),
+                Some(job_id),
             )
             .await;
 
@@ -505,9 +506,19 @@ impl FleetManager {
         let runner_name_clone = runner_name.clone();
         let runner_state = self.runner_state.clone();
         let agent_id_clone = agent_id.clone();
+        let handled_job_ids = self.handled_job_ids.clone();
 
         // Spawn task to send command and handle response
         tokio::spawn(async move {
+            // Helper to clean up job_id from deduplication set on failure (allows retry)
+            let cleanup_job_id = || async {
+                if handled_job_ids.write().await.remove(&job_id) {
+                    info!(
+                        "Removed job {} from deduplication set (runner failed, allowing retry)",
+                        job_id
+                    );
+                }
+            };
             let timeout = Duration::from_secs(30);
 
             match agent_registry
@@ -537,6 +548,7 @@ impl FleetManager {
                                 );
                             }
                             runner_state.remove_runner(&runner_name_clone).await;
+                            cleanup_job_id().await;
                         }
                     }
                     Some(AgentPayload::Result(result)) => {
@@ -546,6 +558,7 @@ impl FleetManager {
                             info!("Runner {} completed successfully (webhook)", runner_name_clone);
                         } else {
                             warn!("Runner {} failed: {}", runner_name_clone, result.error);
+                            cleanup_job_id().await;
                         }
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)
@@ -574,6 +587,7 @@ impl FleetManager {
                             );
                         }
                         runner_state.remove_runner(&runner_name_clone).await;
+                        cleanup_job_id().await;
                     }
                 },
                 Err(e) => {
@@ -589,6 +603,7 @@ impl FleetManager {
                         );
                     }
                     runner_state.remove_runner(&runner_name_clone).await;
+                    cleanup_job_id().await;
                 }
             }
         });
@@ -741,6 +756,15 @@ impl FleetManager {
                             error = %event.event.error,
                             "Runner failed"
                         );
+                        // Clean up job_id from deduplication set to allow retry
+                        if let Some(job_id) = runner_info.job_id {
+                            if self.handled_job_ids.write().await.remove(&job_id) {
+                                info!(
+                                    "Removed job {} from deduplication set (runner failed, allowing retry)",
+                                    job_id
+                                );
+                            }
+                        }
                     }
                     RunnerEventType::Destroyed => {
                         info!(
@@ -1028,13 +1052,14 @@ impl FleetManager {
                 *pool.pending_runners.entry(config_idx).or_insert(0) += 1;
             }
 
-            // Save runner state for crash recovery
+            // Save runner state for crash recovery (no job_id in fixed capacity mode)
             self.runner_state
                 .add_runner(
                     runner_name.clone(),
                     agent_id.clone(),
                     runner_name.clone(), // vm_name is same as runner_name
                     runner_config.runner_scope.clone(),
+                    None,
                 )
                 .await;
 

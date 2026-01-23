@@ -25,6 +25,9 @@ pub struct RunnerInfo {
     pub runner_scope: RunnerScope,
     /// When the runner was created
     pub created_at: DateTime<Utc>,
+    /// GitHub job ID (webhook mode only, for deduplication cleanup on failure)
+    #[serde(default)]
+    pub job_id: Option<u64>,
 }
 
 /// Persistent store for active runner state.
@@ -119,12 +122,14 @@ impl RunnerStateStore {
         agent_id: String,
         vm_name: String,
         runner_scope: RunnerScope,
+        job_id: Option<u64>,
     ) {
         let info = RunnerInfo {
             agent_id,
             vm_name,
             runner_scope,
             created_at: Utc::now(),
+            job_id,
         };
 
         {
@@ -132,7 +137,7 @@ impl RunnerStateStore {
             runners.insert(runner_name.clone(), info);
         }
 
-        debug!("Added runner {} to state", runner_name);
+        debug!("Added runner {} to state (job_id={:?})", runner_name, job_id);
         self.save().await;
     }
 

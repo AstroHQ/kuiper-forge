@@ -81,7 +81,7 @@ pub struct Organization {
 pub struct WebhookRunnerRequest {
     /// Job labels from the webhook (the labels the job requested)
     pub job_labels: Vec<String>,
-    /// Agent labels to match (from the LabelMapping)
+    /// Labels to use for agent matching (typically same as job_labels)
     pub agent_labels: Vec<String>,
     /// Runner scope determined by label matching
     pub runner_scope: RunnerScope,
@@ -232,14 +232,16 @@ async fn handle_webhook(
                     }
                 };
 
-            // Use configured runner_scope, or default to the repository from the webhook
-            let runner_scope = mapping
-                .runner_scope
-                .clone()
-                .unwrap_or_else(|| RunnerScope::Repository {
-                    owner: event.repository.owner.login.clone(),
-                    repo: event.repository.name.clone(),
-                });
+            // Use configured runner_scope, or default to the organization from the webhook
+            let runner_scope = mapping.runner_scope.clone().unwrap_or_else(|| {
+                // Prefer organization login if available, fall back to repository owner
+                let org_name = event
+                    .organization
+                    .as_ref()
+                    .map(|o| o.login.clone())
+                    .unwrap_or_else(|| event.repository.owner.login.clone());
+                RunnerScope::Organization { name: org_name }
+            });
 
             info!(
                 "Matched job {} to runner scope {:?} (mapping labels: {:?})",
@@ -247,6 +249,7 @@ async fn handle_webhook(
             );
 
             // Send request to fleet manager (non-blocking)
+            // Use job labels for agent matching - agents with a superset of these labels will match
             let request = WebhookRunnerRequest {
                 job_labels: event.workflow_job.labels.clone(),
                 agent_labels: event.workflow_job.labels,

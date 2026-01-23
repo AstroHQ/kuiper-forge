@@ -146,7 +146,7 @@ pub struct LabelMapping {
 
     /// The runner scope to use for jobs matching these labels.
     ///
-    /// If not specified, defaults to the repository that triggered the webhook.
+    /// If not specified, defaults to the organization that triggered the webhook.
     #[serde(default)]
     pub runner_scope: Option<RunnerScope>,
 
