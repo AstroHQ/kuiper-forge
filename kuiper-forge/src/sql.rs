@@ -128,8 +128,11 @@ pub const SELECT_RUNNERS_BY_AGENT: &str =
 pub const SELECT_ALL_RUNNERS: &str =
     "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners";
 
+// Bulk delete for agent disconnect cleanup (not yet used, but available)
+#[allow(dead_code)]
 #[cfg(feature = "sqlite")]
 pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agent_id = ?";
 
+#[allow(dead_code)]
 #[cfg(feature = "postgres")]
 pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agent_id = $1";
