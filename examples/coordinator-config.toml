@@ -31,5 +31,20 @@ ca_key = "UPDATE_THIS_PATH/ca.key"
 server_cert = "UPDATE_THIS_PATH/server.crt"
 server_key = "UPDATE_THIS_PATH/server.key"
 
+# Database configuration (optional - defaults work for local testing)
+# The database backend is selected at compile time:
+#   --features sqlite (default): stores data in coordinator.db
+#   --features postgres: connects to PostgreSQL
+[database]
+# SQLite (default): uncomment to customize path
+# path = "UPDATE_THIS_PATH/coordinator.db"
+
+# PostgreSQL: uncomment these when using --features postgres
+# host = "localhost"
+# port = 5432
+# user = "kuiper"
+# password = "secret"
+# database = "kuiper_forge"
+
 # No runners configured for basic registration testing
 # Add runner configs when you have a working GitHub App

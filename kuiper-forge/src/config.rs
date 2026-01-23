@@ -168,6 +168,10 @@ pub struct Config {
     /// TLS certificate paths
     pub tls: TlsConfig,
 
+    /// Database configuration.
+    #[serde(default)]
+    pub database: DatabaseConfig,
+
     /// Provisioning mode and settings.
     ///
     /// Controls how runners are created:
@@ -239,6 +243,80 @@ impl TlsConfig {
             ca_key: dir.join("ca.key"),
             server_cert: dir.join("server.crt"),
             server_key: dir.join("server.key"),
+        }
+    }
+}
+
+// =============================================================================
+// Database Configuration (compile-time feature selection)
+// =============================================================================
+
+/// SQLite database configuration (used when compiled with `sqlite` feature).
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DatabaseConfig {
+    /// Path to the SQLite database file.
+    /// If not specified, defaults to `coordinator.db` in the data directory.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+}
+
+#[cfg(feature = "sqlite")]
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self { path: None }
+    }
+}
+
+/// PostgreSQL database configuration (used when compiled with `postgres` feature).
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DatabaseConfig {
+    /// Database host (default: "localhost")
+    #[serde(default = "default_postgres_host")]
+    pub host: String,
+
+    /// Database port (default: 5432)
+    #[serde(default = "default_postgres_port")]
+    pub port: u16,
+
+    /// Database user
+    #[serde(default)]
+    pub user: String,
+
+    /// Database password
+    #[serde(default)]
+    pub password: String,
+
+    /// Database name (default: "kuiper_forge")
+    #[serde(default = "default_postgres_database")]
+    pub database: String,
+}
+
+#[cfg(feature = "postgres")]
+fn default_postgres_host() -> String {
+    "localhost".to_string()
+}
+
+#[cfg(feature = "postgres")]
+fn default_postgres_port() -> u16 {
+    5432
+}
+
+#[cfg(feature = "postgres")]
+fn default_postgres_database() -> String {
+    "kuiper_forge".to_string()
+}
+
+#[cfg(feature = "postgres")]
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            host: default_postgres_host(),
+            port: default_postgres_port(),
+            user: String::new(),
+            password: String::new(),
+            database: default_postgres_database(),
         }
     }
 }
@@ -392,6 +470,7 @@ impl Config {
             },
             grpc: GrpcConfig::default(),
             tls: TlsConfig::with_defaults(data_dir),
+            database: DatabaseConfig::default(),
             provisioning: ProvisioningConfig::default(),
             // Default test runners for dry-run mode
             runners: vec![
@@ -460,6 +539,29 @@ ca_cert = "{data_dir_str}/ca.crt"
 ca_key = "{data_dir_str}/ca.key"
 server_cert = "{data_dir_str}/server.crt"
 server_key = "{data_dir_str}/server.key"
+
+# =============================================================================
+# Database Configuration
+# =============================================================================
+#
+# The coordinator stores authentication data (tokens, agents) in a database.
+# The database backend is selected at compile time via cargo features:
+#   - cargo build -p kuiper-forge --features sqlite (default)
+#   - cargo build -p kuiper-forge --features postgres --no-default-features
+#
+# Configuration below depends on which feature was enabled at compile time.
+
+# SQLite configuration (when compiled with --features sqlite)
+[database]
+# path = "{data_dir_str}/coordinator.db"  # Optional, defaults to data_dir/coordinator.db
+
+# PostgreSQL configuration (when compiled with --features postgres)
+# [database]
+# host = "localhost"
+# port = 5432
+# user = "kuiper"
+# password = "secret"
+# database = "kuiper_forge"
 
 # =============================================================================
 # Provisioning Mode

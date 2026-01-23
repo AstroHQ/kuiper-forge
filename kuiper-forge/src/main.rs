@@ -16,8 +16,10 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{export_ca_cert, generate_server_cert, init_ca, AuthManager, AuthStore};
 use kuiper_forge::config::{self, Config, ProvisioningMode};
+use kuiper_forge::db::Database;
 use kuiper_forge::fleet;
 use kuiper_forge::github;
+use kuiper_forge::management::{self, ManagementClient};
 use kuiper_forge::runner_state;
 use kuiper_forge::server::{run_server, ServerConfig};
 
@@ -224,9 +226,11 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
             config.grpc.listen_addr.parse().expect("Invalid listen address in config")
         });
 
-    // Initialize auth store and manager (file-backed for persistence)
-    let auth_store_path = data_dir.join("auth_store.json");
-    let auth_store = Arc::new(AuthStore::new(&auth_store_path)?);
+    // Initialize database (shared across components)
+    let db = Arc::new(Database::new(&config.database, &data_dir).await?);
+
+    // Initialize auth store using shared database
+    let auth_store = Arc::new(AuthStore::new(db.pool().clone()));
     let auth_manager = Arc::new(AuthManager::new(
         auth_store,
         &config.tls.ca_cert,
@@ -238,6 +242,15 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
 
     // Initialize persistent runner state for crash recovery
     let runner_state = Arc::new(runner_state::RunnerStateStore::new(&data_dir));
+
+    // Start management socket server for CLI communication
+    let mgmt_socket_path = management::default_socket_path(data_dir);
+    let mgmt_auth = auth_manager.clone();
+    tokio::spawn(async move {
+        if let Err(e) = management::run_management_server(mgmt_auth, mgmt_socket_path).await {
+            tracing::error!("Management server error: {}", e);
+        }
+    });
 
     // Initialize token provider and fleet manager
     // In dry-run mode, use mock tokens instead of GitHub API
@@ -417,32 +430,20 @@ async fn handle_ca_command(command: CaCommands, data_dir: &PathBuf) -> Result<()
 
 /// Handle token subcommands
 async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Result<()> {
-    ensure_data_dir(data_dir)?;
+    let socket_path = management::default_socket_path(data_dir);
 
-    // Use the shared file-backed auth store
-    let auth_store_path = data_dir.join("auth_store.json");
-    let auth_store = Arc::new(AuthStore::new(&auth_store_path)?);
-
-    let ca_cert_path = data_dir.join("ca.crt");
-    let ca_key_path = data_dir.join("ca.key");
-
-    let auth_manager = AuthManager::new(
-        auth_store.clone(),
-        &ca_cert_path,
-        &ca_key_path,
-    )?;
+    let mut client = ManagementClient::connect(&socket_path).await?;
 
     match command {
         TokenCommands::Create { expires } => {
             let ttl = parse_duration(&expires)?;
+            let expires_secs = ttl.num_seconds() as u64;
 
-            let token = auth_manager
-                .create_registration_token(ttl, "cli")
-                .await?;
+            let resp = client.create_token(expires_secs, "cli").await?;
 
             println!("Registration token created:");
-            println!("  Token:   {}", token.token);
-            println!("  Expires: {} (in {})", token.expires_at.format("%Y-%m-%d %H:%M:%S UTC"), expires);
+            println!("  Token:   {}", resp.token);
+            println!("  Expires: {} (in {})", resp.expires_at, expires);
             println!();
             println!("Copy this token to the agent configuration to register it.");
             println!("Warning: Token is single-use and expires in {}. Generate new tokens as needed.", expires);
@@ -451,9 +452,9 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
         }
 
         TokenCommands::List => {
-            let tokens = auth_manager.list_tokens().await;
+            let resp = client.list_tokens().await?;
 
-            if tokens.is_empty() {
+            if resp.tokens.is_empty() {
                 println!("No pending registration tokens.");
                 return Ok(());
             }
@@ -462,14 +463,19 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
                 "TOKEN", "CREATED", "EXPIRES", "CREATED BY");
             println!("{}", "-".repeat(80));
 
-            for token in tokens {
-                let created = token.created_at.format("%Y-%m-%d %H:%M");
-                let expires = token.expires_at.format("%Y-%m-%d %H:%M");
+            for token in resp.tokens {
                 let token_short = if token.token.len() > 20 {
                     format!("{}...", &token.token[..20])
                 } else {
                     token.token.clone()
                 };
+                // Parse RFC3339 timestamps and format them nicely
+                let created = chrono::DateTime::parse_from_rfc3339(&token.created_at)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or(token.created_at.clone());
+                let expires = chrono::DateTime::parse_from_rfc3339(&token.expires_at)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or(token.expires_at.clone());
                 println!("{:<25} {:<20} {:<20} {:<10}",
                     token_short, created, expires, token.created_by);
             }
@@ -478,7 +484,8 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
         }
 
         TokenCommands::Revoke { token } => {
-            if auth_manager.delete_token(&token).await? {
+            let resp = client.delete_token(&token).await?;
+            if resp.deleted {
                 println!("Token revoked successfully.");
             } else {
                 println!("Token not found.");
@@ -490,26 +497,15 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
 
 /// Handle agent subcommands
 async fn handle_agent_command(command: AgentCommands, data_dir: &PathBuf) -> Result<()> {
-    ensure_data_dir(data_dir)?;
+    let socket_path = management::default_socket_path(data_dir);
 
-    // Use the shared file-backed auth store
-    let auth_store_path = data_dir.join("auth_store.json");
-    let auth_store = Arc::new(AuthStore::new(&auth_store_path)?);
-
-    let ca_cert_path = data_dir.join("ca.crt");
-    let ca_key_path = data_dir.join("ca.key");
-
-    let auth_manager = AuthManager::new(
-        auth_store,
-        &ca_cert_path,
-        &ca_key_path,
-    )?;
+    let mut client = ManagementClient::connect(&socket_path).await?;
 
     match command {
         AgentCommands::List => {
-            let agents = auth_manager.list_agents().await;
+            let resp = client.list_agents().await?;
 
-            if agents.is_empty() {
+            if resp.agents.is_empty() {
                 println!("No registered agents.");
                 return Ok(());
             }
@@ -518,13 +514,22 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &PathBuf) -> Res
                 "AGENT ID", "TYPE", "HOSTNAME", "MAX_VMS", "CREATED", "EXPIRES", "STATUS");
             println!("{}", "-".repeat(105));
 
-            for agent in agents {
+            for agent in &resp.agents {
                 let status = if agent.revoked {
                     "revoked"
-                } else if agent.expires_at < chrono::Utc::now() {
-                    "expired"
                 } else {
-                    "valid"
+                    // Parse expires_at to check if expired
+                    let expires_dt = chrono::DateTime::parse_from_rfc3339(&agent.expires_at)
+                        .map(|dt| dt.with_timezone(&chrono::Utc));
+                    if let Ok(exp) = expires_dt {
+                        if exp < chrono::Utc::now() {
+                            "expired"
+                        } else {
+                            "valid"
+                        }
+                    } else {
+                        "valid"
+                    }
                 };
                 let id_short = if agent.agent_id.len() > 28 {
                     format!("{}...", &agent.agent_id[..28])
@@ -536,8 +541,13 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &PathBuf) -> Res
                 } else {
                     agent.hostname.clone()
                 };
-                let created = agent.created_at.format("%Y-%m-%d");
-                let expires = agent.expires_at.format("%Y-%m-%d");
+                // Parse RFC3339 timestamps
+                let created = chrono::DateTime::parse_from_rfc3339(&agent.created_at)
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or(agent.created_at.clone());
+                let expires = chrono::DateTime::parse_from_rfc3339(&agent.expires_at)
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or(agent.expires_at.clone());
                 println!("{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
                     id_short, agent.agent_type, hostname_short, agent.max_vms, created, expires, status);
             }
@@ -545,7 +555,7 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &PathBuf) -> Res
             // Show labels in a second pass for readability
             println!();
             println!("Labels:");
-            for agent in auth_manager.list_agents().await {
+            for agent in &resp.agents {
                 let id_short = if agent.agent_id.len() > 28 {
                     format!("{}...", &agent.agent_id[..28])
                 } else {
@@ -558,7 +568,8 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &PathBuf) -> Res
         }
 
         AgentCommands::Revoke { agent_id } => {
-            if auth_manager.revoke_agent(&agent_id).await? {
+            let resp = client.revoke_agent(&agent_id).await?;
+            if resp.revoked {
                 println!("Agent certificate revoked. Agent will be disconnected and must re-register.");
             } else {
                 println!("Agent not found.");

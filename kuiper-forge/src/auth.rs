@@ -6,7 +6,8 @@
 //! - Agent certificate signing
 //! - Registration token management (create, validate, consume)
 
-
+use crate::db::DbPool;
+use crate::sql;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rand::distributions::Alphanumeric;
@@ -15,11 +16,10 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
-use std::collections::HashMap;
+use sqlx::Row;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Registration token for agent bootstrap
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -58,142 +58,219 @@ pub struct RegisteredAgent {
     pub revoked: bool,
 }
 
-/// Persistent data structure for auth store
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct AuthStoreData {
-    tokens: HashMap<String, RegistrationToken>,
-    agents: HashMap<String, RegisteredAgent>,
-}
-
-/// File-backed storage for tokens and agents.
-/// Data is persisted to a JSON file on each write operation.
-#[derive(Debug)]
+/// Database-backed storage for tokens and agents.
 pub struct AuthStore {
-    data: RwLock<AuthStoreData>,
-    file_path: std::path::PathBuf,
+    pool: DbPool,
 }
 
 impl AuthStore {
-    /// Create a new AuthStore backed by the given file.
-    /// If the file exists, data is loaded from it.
-    pub fn new(file_path: impl Into<std::path::PathBuf>) -> Result<Self> {
-        let file_path = file_path.into();
-        let data = if file_path.exists() {
-            let content = fs::read_to_string(&file_path)
-                .with_context(|| format!("Failed to read auth store: {}", file_path.display()))?;
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse auth store: {}", file_path.display()))?
-        } else {
-            AuthStoreData::default()
-        };
-
-        Ok(Self {
-            data: RwLock::new(data),
-            file_path,
-        })
-    }
-
-    /// Save current state to file
-    async fn save(&self) -> Result<()> {
-        let data = self.data.read().await;
-        let content = serde_json::to_string_pretty(&*data)
-            .context("Failed to serialize auth store")?;
-        fs::write(&self.file_path, content)
-            .with_context(|| format!("Failed to write auth store: {}", self.file_path.display()))?;
-        Ok(())
+    /// Create a new AuthStore using the given database pool.
+    ///
+    /// The pool should be obtained from a shared `Database` instance.
+    pub fn new(pool: DbPool) -> Self {
+        Self { pool }
     }
 
     /// Store a registration token
     pub async fn store_token(&self, token: RegistrationToken) -> Result<()> {
-        {
-            let mut data = self.data.write().await;
-            data.tokens.insert(token.token.clone(), token);
-        }
-        self.save().await
+        sqlx::query(sql::STORE_TOKEN)
+            .bind(&token.token)
+            .bind(token.expires_at.to_rfc3339())
+            .bind(&token.created_by)
+            .bind(token.created_at.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .context("Failed to store registration token")?;
+
+        Ok(())
     }
 
     /// Get and remove a registration token (single-use)
     pub async fn consume_token(&self, token_str: &str) -> Result<Option<RegistrationToken>> {
-        let token = {
-            let mut data = self.data.write().await;
-            data.tokens.remove(token_str)
+        let row = sqlx::query(sql::SELECT_TOKEN)
+            .bind(token_str)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        let token = match row {
+            Some(row) => {
+                let token = RegistrationToken {
+                    token: row.get("token"),
+                    expires_at: DateTime::parse_from_rfc3339(row.get("expires_at"))
+                        .context("Invalid expires_at timestamp")?
+                        .with_timezone(&Utc),
+                    created_by: row.get("created_by"),
+                    created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
+                        .context("Invalid created_at timestamp")?
+                        .with_timezone(&Utc),
+                };
+
+                // Delete the token (consume it)
+                sqlx::query(sql::DELETE_TOKEN)
+                    .bind(token_str)
+                    .execute(&self.pool)
+                    .await?;
+
+                Some(token)
+            }
+            None => None,
         };
-        if token.is_some() {
-            self.save().await?;
-        }
+
         Ok(token)
     }
 
     /// Get a token without consuming it (for inspection)
     #[allow(dead_code)]
     pub async fn get_token(&self, token_str: &str) -> Option<RegistrationToken> {
-        let data = self.data.read().await;
-        data.tokens.get(token_str).cloned()
+        let row = sqlx::query(sql::SELECT_TOKEN)
+            .bind(token_str)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+
+        Some(RegistrationToken {
+            token: row.get("token"),
+            expires_at: DateTime::parse_from_rfc3339(row.get("expires_at"))
+                .ok()?
+                .with_timezone(&Utc),
+            created_by: row.get("created_by"),
+            created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
+                .ok()?
+                .with_timezone(&Utc),
+        })
     }
 
     /// List all pending registration tokens
     pub async fn list_tokens(&self) -> Vec<RegistrationToken> {
-        let data = self.data.read().await;
-        data.tokens.values().cloned().collect()
+        let rows = sqlx::query(
+            "SELECT token, expires_at, created_by, created_at FROM registration_tokens",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+
+        rows.into_iter()
+            .filter_map(|row| {
+                Some(RegistrationToken {
+                    token: row.get("token"),
+                    expires_at: DateTime::parse_from_rfc3339(row.get("expires_at"))
+                        .ok()?
+                        .with_timezone(&Utc),
+                    created_by: row.get("created_by"),
+                    created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
+                        .ok()?
+                        .with_timezone(&Utc),
+                })
+            })
+            .collect()
     }
 
     /// Delete a specific token
     pub async fn delete_token(&self, token_str: &str) -> Result<bool> {
-        let removed = {
-            let mut data = self.data.write().await;
-            data.tokens.remove(token_str).is_some()
-        };
-        if removed {
-            self.save().await?;
-        }
-        Ok(removed)
+        let result = sqlx::query(sql::DELETE_TOKEN)
+            .bind(token_str)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Store a registered agent
     pub async fn store_agent(&self, agent: RegisteredAgent) -> Result<()> {
-        {
-            let mut data = self.data.write().await;
-            data.agents.insert(agent.agent_id.clone(), agent);
-        }
-        self.save().await
+        let labels_json = serde_json::to_string(&agent.labels)?;
+
+        sqlx::query(sql::STORE_AGENT)
+            .bind(&agent.agent_id)
+            .bind(&agent.hostname)
+            .bind(&agent.agent_type)
+            .bind(&labels_json)
+            .bind(agent.max_vms as i64)
+            .bind(&agent.serial_number)
+            .bind(agent.created_at.to_rfc3339())
+            .bind(agent.expires_at.to_rfc3339())
+            .bind(agent.revoked as i32)
+            .execute(&self.pool)
+            .await
+            .context("Failed to store agent")?;
+
+        Ok(())
     }
 
     /// Get a registered agent by ID
     pub async fn get_agent(&self, agent_id: &str) -> Option<RegisteredAgent> {
-        let data = self.data.read().await;
-        data.agents.get(agent_id).cloned()
+        let row = sqlx::query(sql::SELECT_AGENT)
+            .bind(agent_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+
+        Some(RegisteredAgent {
+            agent_id: row.get("agent_id"),
+            hostname: row.get("hostname"),
+            agent_type: row.get("agent_type"),
+            labels: serde_json::from_str(row.get("labels")).ok()?,
+            max_vms: row.get::<i64, _>("max_vms") as u32,
+            serial_number: row.get("serial_number"),
+            created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
+                .ok()?
+                .with_timezone(&Utc),
+            expires_at: DateTime::parse_from_rfc3339(row.get("expires_at"))
+                .ok()?
+                .with_timezone(&Utc),
+            revoked: row.get::<i32, _>("revoked") != 0,
+        })
     }
 
     /// List all registered agents
     pub async fn list_agents(&self) -> Vec<RegisteredAgent> {
-        let data = self.data.read().await;
-        data.agents.values().cloned().collect()
+        let rows = sqlx::query("SELECT * FROM registered_agents ORDER BY created_at DESC")
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+
+        rows.into_iter()
+            .filter_map(|row| {
+                Some(RegisteredAgent {
+                    agent_id: row.get("agent_id"),
+                    hostname: row.get("hostname"),
+                    agent_type: row.get("agent_type"),
+                    labels: serde_json::from_str(row.get("labels")).ok()?,
+                    max_vms: row.get::<i64, _>("max_vms") as u32,
+                    serial_number: row.get("serial_number"),
+                    created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
+                        .ok()?
+                        .with_timezone(&Utc),
+                    expires_at: DateTime::parse_from_rfc3339(row.get("expires_at"))
+                        .ok()?
+                        .with_timezone(&Utc),
+                    revoked: row.get::<i32, _>("revoked") != 0,
+                })
+            })
+            .collect()
     }
 
     /// Mark an agent as revoked
     pub async fn revoke_agent(&self, agent_id: &str) -> Result<bool> {
-        let revoked = {
-            let mut data = self.data.write().await;
-            if let Some(agent) = data.agents.get_mut(agent_id) {
-                agent.revoked = true;
-                true
-            } else {
-                false
-            }
-        };
-        if revoked {
-            self.save().await?;
-        }
-        Ok(revoked)
+        let result = sqlx::query(sql::REVOKE_AGENT)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Check if an agent is valid (exists and not revoked)
     pub async fn is_agent_valid(&self, agent_id: &str) -> bool {
-        let data = self.data.read().await;
-        data.agents
-            .get(agent_id)
-            .map(|a| !a.revoked && a.expires_at > Utc::now())
-            .unwrap_or(false)
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(sql::CHECK_AGENT_VALID)
+            .bind(agent_id)
+            .bind(&now)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 }
 
@@ -606,9 +683,11 @@ fn extract_ca_subject(ca_cert_pem: &str) -> Result<CaSubject> {
     Ok(CaSubject { org_name })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
+    use crate::config::DatabaseConfig;
+    use crate::db::Database;
     use tempfile::TempDir;
 
     #[test]
@@ -661,8 +740,9 @@ mod tests {
     #[tokio::test]
     async fn test_token_lifecycle() {
         let temp = TempDir::new().unwrap();
-        let store_path = temp.path().join("auth_store.json");
-        let store = Arc::new(AuthStore::new(&store_path).unwrap());
+        let config = DatabaseConfig::default();
+        let db = Database::new(&config, temp.path()).await.unwrap();
+        let store = Arc::new(AuthStore::new(db.pool()));
 
         // Create a token
         let token = RegistrationToken {

@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package cirunner.management;
+
+// ============================================================================
+// Management Service
+// - Localhost-only via Unix socket (no authentication required)
+// - Used by CLI commands to communicate with running coordinator
+// - Future: Can be exposed over TCP with mTLS for remote management
+// ============================================================================
+
+service ManagementService {
+    // Token management
+    rpc CreateToken(CreateTokenRequest) returns (CreateTokenResponse);
+    rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
+    rpc DeleteToken(DeleteTokenRequest) returns (DeleteTokenResponse);
+
+    // Agent management
+    rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+    rpc RevokeAgent(RevokeAgentRequest) returns (RevokeAgentResponse);
+}
+
+// ============================================================================
+// Token Messages
+// ============================================================================
+
+message CreateTokenRequest {
+    uint64 expires_secs = 1;  // TTL in seconds
+    string created_by = 2;    // Who created this token (e.g., "cli")
+}
+
+message CreateTokenResponse {
+    string token = 1;
+    string expires_at = 2;   // RFC3339 timestamp
+    string created_at = 3;   // RFC3339 timestamp
+}
+
+message ListTokensRequest {}
+
+message ListTokensResponse {
+    repeated TokenInfo tokens = 1;
+}
+
+message TokenInfo {
+    string token = 1;
+    string expires_at = 2;   // RFC3339 timestamp
+    string created_by = 3;
+    string created_at = 4;   // RFC3339 timestamp
+}
+
+message DeleteTokenRequest {
+    string token = 1;
+}
+
+message DeleteTokenResponse {
+    bool deleted = 1;
+}
+
+// ============================================================================
+// Agent Messages
+// ============================================================================
+
+message ListAgentsRequest {}
+
+message ListAgentsResponse {
+    repeated AgentInfo agents = 1;
+}
+
+message AgentInfo {
+    string agent_id = 1;
+    string hostname = 2;
+    string agent_type = 3;
+    repeated string labels = 4;
+    uint32 max_vms = 5;
+    string created_at = 6;   // RFC3339 timestamp
+    string expires_at = 7;   // RFC3339 timestamp
+    bool revoked = 8;
+}
+
+message RevokeAgentRequest {
+    string agent_id = 1;
+}
+
+message RevokeAgentResponse {
+    bool revoked = 1;
+}

@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "KuiperForge - CI runner coordinator for ephemeral VMs"
 
+[features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+
 [dependencies]
 # CLI
 clap = { workspace = true }
@@ -26,6 +31,9 @@ figment = { version = "0.10", features = ["toml", "env"] }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 async-trait = { workspace = true }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "chrono"] }
 
 # gRPC
 tonic = { workspace = true }

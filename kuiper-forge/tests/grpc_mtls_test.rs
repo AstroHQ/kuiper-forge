@@ -31,14 +31,14 @@ impl TestFixture {
     /// Create test CA, server cert, and client cert
     async fn new(webhook_mode: bool) -> Self {
         use kuiper_forge::auth::{generate_server_cert, init_ca, AuthManager, AuthStore};
-        use kuiper_forge::config::{TlsConfig, WebhookConfig};
+        use kuiper_forge::config::{DatabaseConfig, TlsConfig, WebhookConfig};
+        use kuiper_forge::db::Database;
 
         let temp_dir = TempDir::new().unwrap();
         let ca_cert_path = temp_dir.path().join("ca.crt");
         let ca_key_path = temp_dir.path().join("ca.key");
         let server_cert_path = temp_dir.path().join("server.crt");
         let server_key_path = temp_dir.path().join("server.key");
-        let auth_store_path = temp_dir.path().join("auth_store.json");
 
         // Initialize CA
         init_ca(&ca_cert_path, &ca_key_path, "Test Org").unwrap();
@@ -55,8 +55,10 @@ impl TestFixture {
 
         let ca_cert_pem = std::fs::read_to_string(&ca_cert_path).unwrap();
 
-        // Create auth components
-        let auth_store = Arc::new(AuthStore::new(&auth_store_path).unwrap());
+        // Create database and auth components
+        let db_config = DatabaseConfig::default();
+        let db = Arc::new(Database::new(&db_config, temp_dir.path()).await.unwrap());
+        let auth_store = Arc::new(AuthStore::new(db.pool().clone()));
         let auth_manager = Arc::new(
             AuthManager::new(auth_store.clone(), &ca_cert_path, &ca_key_path).unwrap(),
         );
