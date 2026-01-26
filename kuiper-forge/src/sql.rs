@@ -38,6 +38,12 @@ pub const DELETE_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = ?"
 pub const DELETE_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = $1";
 
 #[cfg(feature = "sqlite")]
+pub const DELETE_EXPIRED_TOKENS: &str = "DELETE FROM registration_tokens WHERE expires_at < ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_EXPIRED_TOKENS: &str = "DELETE FROM registration_tokens WHERE expires_at < $1";
+
+#[cfg(feature = "sqlite")]
 pub const STORE_AGENT: &str = r#"
     INSERT INTO registered_agents
         (agent_id, hostname, agent_type, labels, max_vms, serial_number, created_at, expires_at, revoked)

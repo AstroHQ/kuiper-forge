@@ -175,6 +175,24 @@ impl AuthStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Remove all expired registration tokens from the database.
+    ///
+    /// Returns the number of tokens removed.
+    pub async fn cleanup_expired_tokens(&self) -> u64 {
+        let now = Utc::now().to_rfc3339();
+        match sqlx::query(sql::DELETE_EXPIRED_TOKENS)
+            .bind(&now)
+            .execute(&self.pool)
+            .await
+        {
+            Ok(result) => result.rows_affected(),
+            Err(e) => {
+                tracing::error!("Failed to cleanup expired tokens: {}", e);
+                0
+            }
+        }
+    }
+
     /// Store a registered agent
     pub async fn store_agent(&self, agent: RegisteredAgent) -> Result<()> {
         let labels_json = serde_json::to_string(&agent.labels)?;

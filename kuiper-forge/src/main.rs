@@ -231,7 +231,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
     // Initialize auth store using shared database
     let auth_store = Arc::new(AuthStore::new(db.pool().clone()));
     let auth_manager = Arc::new(AuthManager::new(
-        auth_store,
+        auth_store.clone(),
         &config.tls.ca_cert,
         &config.tls.ca_key,
     )?);
@@ -329,6 +329,21 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
             let removed = cleanup_registry.remove_stale(stale_timeout).await;
             if !removed.is_empty() {
                 warn!("Removed {} stale agents: {:?}", removed.len(), removed);
+            }
+        }
+    });
+
+    // Spawn expired token cleanup task
+    let cleanup_auth_store = auth_store.clone();
+    tokio::spawn(async move {
+        let cleanup_interval = std::time::Duration::from_secs(3600); // hourly
+        let mut ticker = tokio::time::interval(cleanup_interval);
+
+        loop {
+            ticker.tick().await;
+            let removed = cleanup_auth_store.cleanup_expired_tokens().await;
+            if removed > 0 {
+                info!("Cleaned up {} expired registration token(s)", removed);
             }
         }
     });
