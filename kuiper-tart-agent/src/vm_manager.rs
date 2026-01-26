@@ -272,7 +272,7 @@ impl VmManager {
 
         // Create log file path for this runner with date
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
-        let log_file = self.log_dir.join(format!("runner-{}-{}.log", vm_id, timestamp));
+        let log_file = self.log_dir.join(format!("runner-{vm_id}-{timestamp}.log"));
 
         // Start the runner and wait for it to complete, streaming output to log file
         ssh::start_runner_and_wait(ip, &self.ssh_config, &log_file).await?;
@@ -424,7 +424,7 @@ impl VmManager {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(Error::TartError(format!("delete failed: {}", stderr)))
+            Err(Error::TartError(format!("delete failed: {stderr}")))
         }
     }
 

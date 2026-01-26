@@ -22,20 +22,17 @@ use crate::error::{Error, Result};
 
 /// SSH authentication method.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub enum SshAuth {
     /// Password-based authentication
     Password(String),
     /// Key-based authentication with path to private key file
     KeyFile(PathBuf),
     /// No explicit auth - will try agent or default keys
+    #[default]
     None,
 }
 
-impl Default for SshAuth {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 /// SSH configuration for connecting to VMs.
 #[derive(Debug, Clone)]
@@ -122,7 +119,7 @@ impl Handler for SshHandler {
 /// Wait for SSH port to become available.
 pub async fn wait_for_ssh(ip: Ipv4Addr, timeout: Duration) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
-    let addr = format!("{}:22", ip);
+    let addr = format!("{ip}:22");
 
     debug!("Waiting for SSH on {}", addr);
 
@@ -145,15 +142,15 @@ pub async fn wait_for_ssh(ip: Ipv4Addr, timeout: Duration) -> Result<()> {
 /// Load a private key from a file.
 fn load_key(path: &PathBuf) -> Result<PrivateKey> {
     let key_data =
-        std::fs::read_to_string(path).map_err(|e| Error::Ssh(format!("Failed to read key: {}", e)))?;
-    PrivateKey::from_openssh(&key_data).map_err(|e| Error::Ssh(format!("Failed to parse key: {}", e)))
+        std::fs::read_to_string(path).map_err(|e| Error::Ssh(format!("Failed to read key: {e}")))?;
+    PrivateKey::from_openssh(&key_data).map_err(|e| Error::Ssh(format!("Failed to parse key: {e}")))
 }
 
 /// Establish an SSH connection to a remote host.
 async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>> {
     let ssh_config = Config::default();
 
-    let addr = format!("{}:22", ip);
+    let addr = format!("{ip}:22");
     debug!("Connecting to SSH at {}", addr);
 
     let timeout_result =
@@ -162,7 +159,7 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
 
     let mut session = match timeout_result {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(Error::Ssh(format!("Failed to connect: {}", e))),
+        Ok(Err(e)) => return Err(Error::Ssh(format!("Failed to connect: {e}"))),
         Err(_) => return Err(Error::Timeout("SSH connection")),
     };
 
@@ -173,7 +170,7 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
             session
                 .authenticate_password(&config.username, password)
                 .await
-                .map_err(|e| Error::Ssh(format!("Password auth failed: {}", e)))?
+                .map_err(|e| Error::Ssh(format!("Password auth failed: {e}")))?
         }
         SshAuth::KeyFile(key_path) => {
             debug!(
@@ -185,7 +182,7 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
             session
                 .authenticate_publickey(&config.username, key_with_hash)
                 .await
-                .map_err(|e| Error::Ssh(format!("Key auth failed: {}", e)))?
+                .map_err(|e| Error::Ssh(format!("Key auth failed: {e}")))?
         }
         SshAuth::None => {
             // Try to find default SSH key
@@ -208,7 +205,7 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
                 session
                     .authenticate_publickey(&config.username, key_with_hash)
                     .await
-                    .map_err(|e| Error::Ssh(format!("Key auth failed: {}", e)))?
+                    .map_err(|e| Error::Ssh(format!("Key auth failed: {e}")))?
             } else {
                 return Err(Error::Ssh(
                     "No authentication method specified and no default SSH key found".to_string(),
@@ -234,12 +231,12 @@ pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result
     let mut channel = session
         .channel_open_session()
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to open channel: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to open channel: {e}")))?;
 
     channel
         .exec(true, command)
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to exec command: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to exec command: {e}")))?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -272,8 +269,7 @@ pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result
     } else {
         let stderr_str = String::from_utf8_lossy(&stderr).to_string();
         Err(Error::Ssh(format!(
-            "SSH command failed: {} (exit code: {})",
-            stderr_str, exit_code
+            "SSH command failed: {stderr_str} (exit code: {exit_code})"
         )))
     }
 }
@@ -298,7 +294,7 @@ pub async fn ssh_exec_with_logging(
         .append(true)
         .open(log_path)
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to open log file: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to open log file: {e}")))?;
 
     // Write header with timestamp
     let header = format!(
@@ -309,17 +305,17 @@ pub async fn ssh_exec_with_logging(
     log_file
         .write_all(header.as_bytes())
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to write to log file: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to write to log file: {e}")))?;
 
     let mut channel = session
         .channel_open_session()
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to open channel: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to open channel: {e}")))?;
 
     channel
         .exec(true, command)
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to exec command: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to exec command: {e}")))?;
 
     let mut exit_status = None;
 
@@ -331,7 +327,7 @@ pub async fn ssh_exec_with_logging(
                 log_file
                     .write_all(&data)
                     .await
-                    .map_err(|e| Error::Ssh(format!("Failed to write stdout to log: {}", e)))?;
+                    .map_err(|e| Error::Ssh(format!("Failed to write stdout to log: {e}")))?;
                 // Also log to tracing at debug level for real-time visibility
                 if let Ok(text) = std::str::from_utf8(&data) {
                     for line in text.lines() {
@@ -349,7 +345,7 @@ pub async fn ssh_exec_with_logging(
                     log_file
                         .write_all(&prefixed)
                         .await
-                        .map_err(|e| Error::Ssh(format!("Failed to write stderr to log: {}", e)))?;
+                        .map_err(|e| Error::Ssh(format!("Failed to write stderr to log: {e}")))?;
                     // Log stderr at info level since it's often important
                     if let Ok(text) = std::str::from_utf8(&data) {
                         for line in text.lines() {
@@ -376,13 +372,13 @@ pub async fn ssh_exec_with_logging(
     log_file
         .write_all(footer.as_bytes())
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to write to log file: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to write to log file: {e}")))?;
 
     // Ensure everything is flushed
     log_file
         .flush()
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to flush log file: {}", e)))?;
+        .map_err(|e| Error::Ssh(format!("Failed to flush log file: {e}")))?;
 
     if exit_code == 0 {
         Ok(())
@@ -502,11 +498,7 @@ pub async fn configure_runner(
 
     // Configure the runner
     let config_cmd = format!(
-        "cd ~/actions-runner && ./config.sh --url '{}' --token '{}' --name '{}' --labels '{}' --ephemeral --unattended",
-        runner_scope_url,
-        registration_token,
-        runner_name,
-        labels_str
+        "cd ~/actions-runner && ./config.sh --url '{runner_scope_url}' --token '{registration_token}' --name '{runner_name}' --labels '{labels_str}' --ephemeral --unattended"
     );
 
     match ssh_exec(ip, config, &config_cmd).await {

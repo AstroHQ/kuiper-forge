@@ -196,7 +196,7 @@ impl Config {
         })?;
 
         let mut config: Config = toml::from_str(&content).map_err(|e| {
-            ConfigError::ParseError(format!("Failed to parse config: {}", e))
+            ConfigError::ParseError(format!("Failed to parse config: {e}"))
         })?;
 
         // Expand ~ in paths
@@ -226,8 +226,7 @@ impl Config {
         }
 
         Err(ConfigError::NotFound(format!(
-            "No config file found. Searched: {:?}",
-            candidates
+            "No config file found. Searched: {candidates:?}"
         )))
     }
 
@@ -307,13 +306,11 @@ pub enum ConfigError {
 
 /// Expand ~ to the user's home directory.
 fn expand_tilde(path: &Path) -> PathBuf {
-    if let Some(path_str) = path.to_str() {
-        if path_str.starts_with("~/") {
-            if let Some(home) = dirs::home_dir() {
+    if let Some(path_str) = path.to_str()
+        && path_str.starts_with("~/")
+            && let Some(home) = dirs::home_dir() {
                 return home.join(&path_str[2..]);
             }
-        }
-    }
     path.to_path_buf()
 }
 

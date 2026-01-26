@@ -247,16 +247,16 @@ impl Config {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                Error::Config(format!("Failed to create config directory: {}", e))
+                Error::Config(format!("Failed to create config directory: {e}"))
             })?;
         }
 
         let content = toml::to_string_pretty(self).map_err(|e| {
-            Error::Config(format!("Failed to serialize config: {}", e))
+            Error::Config(format!("Failed to serialize config: {e}"))
         })?;
 
         std::fs::write(path, content).map_err(|e| {
-            Error::Config(format!("Failed to write config file: {}", e))
+            Error::Config(format!("Failed to write config file: {e}"))
         })?;
 
         Ok(())
@@ -286,13 +286,11 @@ impl Config {
 
 /// Expand ~ to the user's home directory.
 fn expand_tilde(path: &Path) -> PathBuf {
-    if let Some(path_str) = path.to_str() {
-        if path_str.starts_with("~/") {
-            if let Some(home) = dirs::home_dir() {
+    if let Some(path_str) = path.to_str()
+        && path_str.starts_with("~/")
+            && let Some(home) = dirs::home_dir() {
                 return home.join(&path_str[2..]);
             }
-        }
-    }
     path.to_path_buf()
 }
 

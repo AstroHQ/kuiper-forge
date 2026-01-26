@@ -146,23 +146,21 @@ impl VmManager {
             name,
             self.vm_config.linked_clone,
             storage,
-        ).await.map_err(|e| {
+        ).await.inspect_err(|_e| {
             // Remove from tracking on failure
             let vms = self.active_vms.clone();
             tokio::spawn(async move {
                 vms.write().await.remove(&vmid);
             });
-            e
         })?;
 
         // Wait for clone to complete
         let clone_timeout = Duration::from_secs(self.vm_config.clone_timeout_secs);
-        self.proxmox.wait_for_task_with_timeout(&task, clone_timeout).await.map_err(|e| {
+        self.proxmox.wait_for_task_with_timeout(&task, clone_timeout).await.inspect_err(|_e| {
             let vms = self.active_vms.clone();
             tokio::spawn(async move {
                 vms.write().await.remove(&vmid);
             });
-            e
         })?;
 
         info!("VM {} cloned successfully", vmid);
@@ -405,7 +403,7 @@ impl VmManager {
     /// Force destroy a VM by ID string.
     pub async fn force_destroy(&self, vm_id: &str) -> Result<()> {
         let vmid: u32 = vm_id.parse().map_err(|_| {
-            Error::vm(format!("Invalid VM ID: {}", vm_id))
+            Error::vm(format!("Invalid VM ID: {vm_id}"))
         })?;
 
         self.destroy_vm(vmid).await

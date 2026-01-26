@@ -87,7 +87,7 @@ impl RegistrationService for RegistrationServiceImpl {
             .await
             .map_err(|e| {
                 warn!(error = %e, "Registration failed");
-                Status::unauthenticated(format!("Registration failed: {}", e))
+                Status::unauthenticated(format!("Registration failed: {e}"))
             })?;
 
         info!(
@@ -171,7 +171,7 @@ impl AgentServiceImpl {
 
         // Parse the certificate to extract CN
         let (_, cert) = x509_parser::parse_x509_certificate(&cert_der)
-            .map_err(|e| Status::unauthenticated(format!("Invalid client certificate: {}", e)))?;
+            .map_err(|e| Status::unauthenticated(format!("Invalid client certificate: {e}")))?;
 
         // Extract CN from subject
         let cn = cert
@@ -216,7 +216,7 @@ impl AgentService for AgentServiceImpl {
             .next()
             .await
             .ok_or_else(|| Status::invalid_argument("No initial message received"))?
-            .map_err(|e| Status::internal(format!("Stream error: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Stream error: {e}")))?;
 
         // Extract metadata from status message (identity comes from cert, not message)
         let (hostname, agent_type, labels, max_vms, vm_names) = match &first_msg.payload {
@@ -644,13 +644,12 @@ pub async fn run_server(
                                 let (parts, body) = resp.into_parts();
                                 let body: UnsyncBody = body
                                     .map_err(|e| {
-                                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                                        std::io::Error::other(e.to_string())
                                     })
                                     .boxed_unsync();
                                 Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
+                            Err(e) => Err(std::io::Error::other(
                                 e.to_string(),
                             )),
                         }
@@ -665,12 +664,12 @@ pub async fn run_server(
                                 let (parts, body) = resp.into_parts();
                                 let body: UnsyncBody = body
                                     .map_err(|e| {
-                                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                                        std::io::Error::other(e.to_string())
                                     })
                                     .boxed_unsync();
                                 Ok(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                            Err(e) => Err(std::io::Error::other(e)),
                         }
                     }
                 }

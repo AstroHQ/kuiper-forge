@@ -475,8 +475,7 @@ impl ProxmoxVEAPI {
         loop {
             if start.elapsed() > timeout {
                 return Err(Error::Timeout(format!(
-                    "Task {} did not complete within {:?}",
-                    upid, timeout
+                    "Task {upid} did not complete within {timeout:?}"
                 )));
             }
 
@@ -542,8 +541,7 @@ impl ProxmoxVEAPI {
         }
 
         Err(Error::Timeout(format!(
-            "VM {} did not get an IP address within {:?}",
-            vmid, timeout
+            "VM {vmid} did not get an IP address within {timeout:?}"
         )))
     }
 

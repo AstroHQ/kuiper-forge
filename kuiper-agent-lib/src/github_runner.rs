@@ -93,13 +93,11 @@ pub async fn fetch_latest_version() -> Option<String> {
         if let Some(v_idx) = after_tag
             .find(':')
             .and_then(|colon| after_tag[colon..].find("\"v").map(|v| colon + v + 2))
-        {
-            if let Some(end) = after_tag[v_idx..].find('"') {
+            && let Some(end) = after_tag[v_idx..].find('"') {
                 let version = &after_tag[v_idx..v_idx + end];
                 info!("Latest GitHub Actions runner version: v{}", version);
                 return Some(version.to_string());
             }
-        }
     }
 
     debug!("Could not parse runner version from GitHub API response");
@@ -165,10 +163,7 @@ pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch
         Platform::Linux | Platform::MacOS => {
             // Bash: use heredoc to pass script with arguments
             format!(
-                "bash -s -- '{}' '{}' << 'INSTALL_RUNNER_EOF'\n{}\nINSTALL_RUNNER_EOF",
-                runner_dir,
-                url,
-                INSTALL_SCRIPT_UNIX
+                "bash -s -- '{runner_dir}' '{url}' << 'INSTALL_RUNNER_EOF'\n{INSTALL_SCRIPT_UNIX}\nINSTALL_RUNNER_EOF"
             )
         }
     }

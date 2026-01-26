@@ -120,7 +120,7 @@ impl TestFixture {
             tokio::select! {
                 result = server_fut => {
                     if let Err(e) = result {
-                        eprintln!("Server error: {}", e);
+                        eprintln!("Server error: {e}");
                     }
                 }
                 _ = shutdown_rx => {

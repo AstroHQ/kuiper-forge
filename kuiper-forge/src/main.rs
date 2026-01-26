@@ -233,7 +233,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         });
 
     // Initialize database (shared across components)
-    let db = Arc::new(Database::new(&config.database, &data_dir).await?);
+    let db = Arc::new(Database::new(&config.database, data_dir).await?);
 
     // Initialize auth store using shared database
     let auth_store = Arc::new(AuthStore::new(db.pool().clone()));
@@ -500,7 +500,7 @@ async fn handle_ca_command(command: CaCommands, data_dir: &PathBuf) -> Result<()
         CaCommands::Export => {
             let ca_cert_path = data_dir.join("ca.crt");
             let cert = export_ca_cert(&ca_cert_path)?;
-            print!("{}", cert);
+            print!("{cert}");
             Ok(())
         }
     }
@@ -524,7 +524,7 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
             println!("  Expires: {} (in {})", resp.expires_at, expires);
             println!();
             println!("Copy this token to the agent configuration to register it.");
-            println!("Warning: Token is single-use and expires in {}. Generate new tokens as needed.", expires);
+            println!("Warning: Token is single-use and expires in {expires}. Generate new tokens as needed.");
 
             Ok(())
         }
@@ -667,7 +667,7 @@ fn generate_config(output: Option<PathBuf>) -> Result<()> {
             println!("Configuration written to: {}", path.display());
         }
         None => {
-            print!("{}", config);
+            print!("{config}");
         }
     }
 

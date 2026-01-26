@@ -43,7 +43,7 @@ impl ManagementService for ManagementServiceImpl {
             .auth_manager
             .create_registration_token(ttl, &req.created_by)
             .await
-            .map_err(|e| Status::internal(format!("Failed to create token: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to create token: {e}")))?;
 
         Ok(Response::new(CreateTokenResponse {
             token: token.token,
@@ -83,7 +83,7 @@ impl ManagementService for ManagementServiceImpl {
             .auth_manager
             .delete_token(&req.token)
             .await
-            .map_err(|e| Status::internal(format!("Failed to delete token: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to delete token: {e}")))?;
 
         Ok(Response::new(DeleteTokenResponse { deleted }))
     }
@@ -123,7 +123,7 @@ impl ManagementService for ManagementServiceImpl {
             .auth_manager
             .revoke_agent(&req.agent_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to revoke agent: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to revoke agent: {e}")))?;
 
         Ok(Response::new(RevokeAgentResponse { revoked }))
     }

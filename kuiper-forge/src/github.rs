@@ -45,7 +45,7 @@ impl RunnerTokenProvider for MockTokenProvider {
     async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
         let fake_token = format!(
             "dry-run-token-{}",
-            uuid::Uuid::new_v4().to_string()[..8].to_string()
+            &uuid::Uuid::new_v4().to_string()[..8]
         );
         info!(
             "DRY-RUN: Generated fake registration token for {:?}: {}",
@@ -249,12 +249,12 @@ impl GitHubClient {
     async fn discover_installations(&self) -> Result<()> {
         let jwt = self.generate_jwt()?;
 
-        let url = format!("{}/app/installations", GITHUB_API_URL);
+        let url = format!("{GITHUB_API_URL}/app/installations");
 
         let response = self
             .http_client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", jwt))
+            .header("Authorization", format!("Bearer {jwt}"))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
@@ -326,25 +326,23 @@ impl GitHubClient {
         // Check if we have a valid cached token
         {
             let cached = self.cached_tokens.read().await;
-            if let Some(token) = cached.get(&installation_id) {
-                if token.is_valid() {
+            if let Some(token) = cached.get(&installation_id)
+                && token.is_valid() {
                     return Ok(token.token.clone());
                 }
-            }
         }
 
         // Need to get a new token
         let jwt = self.generate_jwt()?;
 
         let url = format!(
-            "{}/app/installations/{}/access_tokens",
-            GITHUB_API_URL, installation_id
+            "{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens"
         );
 
         let response = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", jwt))
+            .header("Authorization", format!("Bearer {jwt}"))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
@@ -395,7 +393,7 @@ impl GitHubClient {
         let response = self
             .http_client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
@@ -431,7 +429,7 @@ impl GitHubClient {
         let response = self
             .http_client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
@@ -463,7 +461,7 @@ impl GitHubClient {
         let response = self
             .http_client
             .delete(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()

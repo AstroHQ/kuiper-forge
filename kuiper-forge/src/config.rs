@@ -291,6 +291,7 @@ impl TlsConfig {
 /// SQLite database configuration (used when compiled with `sqlite` feature).
 #[cfg(feature = "sqlite")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Default)]
 pub struct DatabaseConfig {
     /// Path to the SQLite database file.
     /// If not specified, defaults to `coordinator.db` in the data directory.
@@ -299,11 +300,6 @@ pub struct DatabaseConfig {
 }
 
 #[cfg(feature = "sqlite")]
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        Self { path: None }
-    }
-}
 
 /// PostgreSQL database configuration (used when compiled with `postgres` feature).
 #[cfg(feature = "postgres")]
@@ -396,10 +392,10 @@ impl RunnerScope {
     pub fn to_url(&self) -> String {
         match self {
             RunnerScope::Organization { name } => {
-                format!("https://github.com/{}", name)
+                format!("https://github.com/{name}")
             }
             RunnerScope::Repository { owner, repo } => {
-                format!("https://github.com/{}/{}", owner, repo)
+                format!("https://github.com/{owner}/{repo}")
             }
         }
     }
@@ -408,12 +404,11 @@ impl RunnerScope {
     pub fn registration_token_path(&self) -> String {
         match self {
             RunnerScope::Organization { name } => {
-                format!("/orgs/{}/actions/runners/registration-token", name)
+                format!("/orgs/{name}/actions/runners/registration-token")
             }
             RunnerScope::Repository { owner, repo } => {
                 format!(
-                    "/repos/{}/{}/actions/runners/registration-token",
-                    owner, repo
+                    "/repos/{owner}/{repo}/actions/runners/registration-token"
                 )
             }
         }
@@ -423,10 +418,10 @@ impl RunnerScope {
     pub fn runners_list_path(&self) -> String {
         match self {
             RunnerScope::Organization { name } => {
-                format!("/orgs/{}/actions/runners", name)
+                format!("/orgs/{name}/actions/runners")
             }
             RunnerScope::Repository { owner, repo } => {
-                format!("/repos/{}/{}/actions/runners", owner, repo)
+                format!("/repos/{owner}/{repo}/actions/runners")
             }
         }
     }
@@ -435,10 +430,10 @@ impl RunnerScope {
     pub fn runner_delete_path(&self, runner_id: u64) -> String {
         match self {
             RunnerScope::Organization { name } => {
-                format!("/orgs/{}/actions/runners/{}", name, runner_id)
+                format!("/orgs/{name}/actions/runners/{runner_id}")
             }
             RunnerScope::Repository { owner, repo } => {
-                format!("/repos/{}/{}/actions/runners/{}", owner, repo, runner_id)
+                format!("/repos/{owner}/{repo}/actions/runners/{runner_id}")
             }
         }
     }

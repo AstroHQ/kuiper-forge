@@ -173,7 +173,7 @@ fn create_proxmox_client(config: &Config) -> Result<ProxmoxVEAPI> {
         &config.proxmox.api_url,
         &config.proxmox.node,
         config.proxmox.accept_invalid_certs,
-    ).map_err(|e| Error::Vm(format!("Failed to create Proxmox client: {}", e)))
+    ).map_err(|e| Error::Vm(format!("Failed to create Proxmox client: {e}")))
 }
 
 /// The main Proxmox agent.
@@ -303,7 +303,7 @@ impl ProxmoxAgent {
         let response = client
             .agent_stream(ReceiverStream::new(rx))
             .await
-            .map_err(|e| Error::Grpc(e))?;
+            .map_err(Error::Grpc)?;
 
         let mut inbound = response.into_inner();
 
@@ -376,7 +376,7 @@ impl ProxmoxAgent {
                     "Received CreateRunner command: {} ({})",
                     cmd.command_id, cmd.vm_name
                 );
-                send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await?;
+                send_command_ack(tx, cmd.command_id.clone(), true, String::new()).await?;
                 self.handle_create_runner(cmd, tx.clone()).await;
             }
             CoordinatorPayload::DestroyRunner(cmd) => {
@@ -384,7 +384,7 @@ impl ProxmoxAgent {
                     "Received DestroyRunner command: {} ({})",
                     cmd.command_id, cmd.vm_id
                 );
-                send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await?;
+                send_command_ack(tx, cmd.command_id.clone(), true, String::new()).await?;
                 self.handle_destroy_runner(cmd, tx.clone()).await;
             }
             CoordinatorPayload::Ping(Ping {}) => {

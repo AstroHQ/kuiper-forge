@@ -321,7 +321,7 @@ mod tests {
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(payload);
         let signature = hex::encode(mac.finalize().into_bytes());
-        let header = format!("sha256={}", signature);
+        let header = format!("sha256={signature}");
 
         assert!(validate_signature(secret, payload, &header));
         assert!(!validate_signature("wrong-secret", payload, &header));

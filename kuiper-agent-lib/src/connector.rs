@@ -103,7 +103,7 @@ async fn make_insecure_channel(url: &str) -> Result<Channel> {
     use tower::Service;
 
     // Parse URL to get host and port
-    let uri: Uri = url.parse().map_err(|e| Error::Certificate(format!("Invalid URL: {}", e)))?;
+    let uri: Uri = url.parse().map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?;
     let host = uri.host().ok_or_else(|| Error::Certificate("No host in URL".to_string()))?.to_string();
     let port = uri.port_u16().unwrap_or(443);
 
@@ -136,7 +136,7 @@ async fn make_insecure_channel(url: &str) -> Result<Channel> {
             let port = self.port;
 
             Box::pin(async move {
-                let addr = format!("{}:{}", host, port);
+                let addr = format!("{host}:{port}");
                 tracing::debug!("TCP connecting to {}", addr);
 
                 let tcp = match tokio::net::TcpStream::connect(&addr).await {
@@ -154,7 +154,7 @@ async fn make_insecure_channel(url: &str) -> Result<Channel> {
                     Ok(name) => name,
                     Err(e) => {
                         tracing::error!("Invalid server name '{}': {:?}", host, e);
-                        return Err(format!("Invalid server name: {}", host).into());
+                        return Err(format!("Invalid server name: {host}").into());
                     }
                 };
 
@@ -184,9 +184,9 @@ async fn make_insecure_channel(url: &str) -> Result<Channel> {
 
     // Use http:// scheme for the endpoint since we handle TLS in our connector.
     // Tonic checks the scheme and complains about "HTTPS without TLS enabled" otherwise.
-    let endpoint_url = format!("http://{}:{}", host, port);
+    let endpoint_url = format!("http://{host}:{port}");
     let endpoint = Endpoint::from_shared(endpoint_url.clone())
-        .map_err(|e| Error::Certificate(format!("Invalid endpoint: {}", e)))?;
+        .map_err(|e| Error::Certificate(format!("Invalid endpoint: {e}")))?;
 
     debug!("Creating gRPC channel to {} (via custom TLS connector)", endpoint_url);
 
@@ -304,7 +304,7 @@ impl AgentConnector {
                 let tls = ClientTlsConfig::new()
                     .domain_name(&self.config.coordinator_hostname);
                 Channel::from_shared(self.config.coordinator_url.clone())
-                    .map_err(|e| Error::Certificate(format!("Invalid URL: {}", e)))?
+                    .map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?
                     .tls_config(tls)?
                     .connect()
                     .await?
@@ -316,7 +316,7 @@ impl AgentConnector {
                     .ca_certificate(ca_cert)
                     .domain_name(&self.config.coordinator_hostname);
                 Channel::from_shared(self.config.coordinator_url.clone())
-                    .map_err(|e| Error::Certificate(format!("Invalid URL: {}", e)))?
+                    .map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?
                     .tls_config(tls)?
                     .connect()
                     .await?
@@ -392,7 +392,7 @@ impl AgentConnector {
             .domain_name(&self.config.coordinator_hostname);
 
         let channel = Channel::from_shared(self.config.coordinator_url.clone())
-            .map_err(|e| Error::Certificate(format!("Invalid URL: {}", e)))?
+            .map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?
             .tls_config(tls)?
             .connect()
             .await?;

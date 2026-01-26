@@ -490,7 +490,7 @@ impl AuthManager {
 fn create_ca_params(org_name: &str) -> Result<CertificateParams> {
     let mut params = CertificateParams::default();
     let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, &format!("{} CA", org_name));
+    dn.push(DnType::CommonName, format!("{org_name} CA"));
     dn.push(DnType::OrganizationName, org_name);
     params.distinguished_name = dn;
 

@@ -11,4 +11,4 @@ run = [
 ]
 
 [tasks.clippy-fix]
-run = "cargo clippy --all-targets --all-features --fix --allow-dirty -- -D clippy::uninlined_format_args"
+run = "cargo clippy --all-targets --fix --allow-dirty -- -D clippy::uninlined_format_args"

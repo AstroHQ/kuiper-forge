@@ -71,16 +71,16 @@ impl SshClient {
     /// Load a private key from a file.
     async fn load_private_key(path: &Path) -> Result<PrivateKey> {
         let key_bytes = tokio::fs::read(path).await.map_err(|e| {
-            Error::ssh(format!("Failed to read private key {:?}: {}", path, e))
+            Error::ssh(format!("Failed to read private key {path:?}: {e}"))
         })?;
 
         let key_str = String::from_utf8(key_bytes).map_err(|e| {
-            Error::ssh(format!("Invalid UTF-8 in key file: {}", e))
+            Error::ssh(format!("Invalid UTF-8 in key file: {e}"))
         })?;
 
         // Try to decode the key (supports both encrypted and unencrypted keys)
         russh_keys::PrivateKey::from_openssh(&key_str).map_err(|e| {
-            Error::ssh(format!("Failed to decode private key: {}", e))
+            Error::ssh(format!("Failed to decode private key: {e}"))
         })
     }
 
@@ -88,7 +88,7 @@ impl SshClient {
     pub async fn connect(&self, ip: &str) -> Result<SshSession> {
         let addr: SocketAddr = format!("{}:{}", ip, self.config.port)
             .parse()
-            .map_err(|e| Error::ssh(format!("Invalid address: {}", e)))?;
+            .map_err(|e| Error::ssh(format!("Invalid address: {e}")))?;
 
         let connect_timeout = Duration::from_secs(self.config.timeout_secs);
         let mut last_error = None;
@@ -129,8 +129,8 @@ impl SshClient {
         // Connect with timeout
         let stream = timeout(connect_timeout, TcpStream::connect(addr))
             .await
-            .map_err(|_| Error::timeout(format!("Connection to {} timed out", addr)))?
-            .map_err(|e| Error::ssh(format!("TCP connection failed: {}", e)))?;
+            .map_err(|_| Error::timeout(format!("Connection to {addr} timed out")))?
+            .map_err(|e| Error::ssh(format!("TCP connection failed: {e}")))?;
 
         // Create SSH connection
         let mut handle = timeout(
@@ -139,7 +139,7 @@ impl SshClient {
         )
         .await
         .map_err(|_| Error::timeout("SSH handshake timed out"))?
-        .map_err(|e| Error::ssh(format!("SSH handshake failed: {}", e)))?;
+        .map_err(|e| Error::ssh(format!("SSH handshake failed: {e}")))?;
 
         // Authenticate based on configured method
         let authenticated = self
@@ -201,7 +201,7 @@ impl SshClient {
         )
         .await
         .map_err(|_| Error::timeout("SSH public key authentication timed out"))?
-        .map_err(|e| Error::ssh(format!("SSH public key authentication error: {}", e)))
+        .map_err(|e| Error::ssh(format!("SSH public key authentication error: {e}")))
     }
 
     /// Authenticate with password.
@@ -217,14 +217,14 @@ impl SshClient {
         )
         .await
         .map_err(|_| Error::timeout("SSH password authentication timed out"))?
-        .map_err(|e| Error::ssh(format!("SSH password authentication error: {}", e)))
+        .map_err(|e| Error::ssh(format!("SSH password authentication error: {e}")))
     }
 
     /// Wait for SSH to become available on a VM.
     pub async fn wait_for_ssh(&self, ip: &str, timeout_duration: Duration) -> Result<()> {
         let addr: SocketAddr = format!("{}:{}", ip, self.config.port)
             .parse()
-            .map_err(|e| Error::ssh(format!("Invalid address: {}", e)))?;
+            .map_err(|e| Error::ssh(format!("Invalid address: {e}")))?;
 
         let start = std::time::Instant::now();
         let check_interval = Duration::from_secs(2);
@@ -243,8 +243,7 @@ impl SshClient {
         }
 
         Err(Error::timeout(format!(
-            "SSH not available on {} within {:?}",
-            addr, timeout_duration
+            "SSH not available on {addr} within {timeout_duration:?}"
         )))
     }
 }
@@ -261,11 +260,11 @@ impl SshSession {
         debug!("Executing SSH command: {}", command);
 
         let mut channel = self.handle.channel_open_session().await.map_err(|e| {
-            Error::ssh(format!("Failed to open SSH channel: {}", e))
+            Error::ssh(format!("Failed to open SSH channel: {e}"))
         })?;
 
         channel.exec(true, command).await.map_err(|e| {
-            Error::ssh(format!("Failed to execute command: {}", e))
+            Error::ssh(format!("Failed to execute command: {e}"))
         })?;
 
         let mut stdout = Vec::new();
@@ -312,7 +311,7 @@ impl SshSession {
     /// Close the SSH session.
     pub async fn close(self) -> Result<()> {
         self.handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.map_err(|e| {
-            Error::ssh(format!("Failed to close SSH session: {}", e))
+            Error::ssh(format!("Failed to close SSH session: {e}"))
         })?;
         Ok(())
     }
@@ -387,7 +386,7 @@ impl RunnerConfigBuilder {
         if self.shell_is_powershell {
             ps_command.to_string()
         } else {
-            format!(r#"powershell -Command "{}""#, ps_command)
+            format!(r#"powershell -Command "{ps_command}""#)
         }
     }
 

@@ -277,11 +277,10 @@ impl AgentRegistry {
             .filter_map(|(id, agent)| {
                 // We need to check labels without await here
                 // So we'll use try_read for a quick check
-                if let Ok(agent) = agent.try_read() {
-                    if agent.matches_labels(labels) {
+                if let Ok(agent) = agent.try_read()
+                    && agent.matches_labels(labels) {
                         return Some(id.clone());
                     }
-                }
                 None
             })
             .collect()
