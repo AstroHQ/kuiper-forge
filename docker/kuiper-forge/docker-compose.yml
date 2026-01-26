@@ -32,6 +32,7 @@ services:
       KUIPER_SERVER_HOSTNAME: "${KUIPER_SERVER_HOSTNAME:-kuiper-forge}"
       # GitHub App
       KUIPER_GITHUB__APP_ID: "${GITHUB_APP_ID}"
+      KUIPER_GITHUB__PRIVATE_KEY: "${GITHUB_PRIVATE_KEY}"
       # Database
       KUIPER_DATABASE__HOST: postgres
       KUIPER_DATABASE__PORT: "5432"

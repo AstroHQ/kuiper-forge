@@ -279,9 +279,10 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         );
         (Some(fm), Some(notifier), wh_notifier)
     } else {
-        let github_client = github::GitHubClient::new(
+        let private_key = config.github.private_key_content()?;
+        let github_client = github::GitHubClient::from_key(
             config.github.app_id,
-            &config.github.private_key_path,
+            private_key,
         )?;
 
         // Validate GitHub API access before starting

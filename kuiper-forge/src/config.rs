@@ -16,6 +16,7 @@
 //!
 //! - `KUIPER_GITHUB__APP_ID` → `github.app_id`
 //! - `KUIPER_GITHUB__PRIVATE_KEY_PATH` → `github.private_key_path`
+//! - `KUIPER_GITHUB__PRIVATE_KEY` → `github.private_key` (raw PEM content)
 //! - `KUIPER_GRPC__LISTEN_ADDR` → `grpc.listen_addr`
 //! - `KUIPER_TLS__CA_CERT` → `tls.ca_cert`
 //! - `KUIPER_PROVISIONING__MODE` → `provisioning.mode`
@@ -189,13 +190,49 @@ pub struct Config {
 }
 
 /// GitHub App authentication configuration.
+///
+/// The private key can be provided either as a file path (`private_key_path`)
+/// or as raw PEM content (`private_key`). The inline form is useful for
+/// container deployments where environment variables are easier than file mounts:
+///
+/// ```bash
+/// export KUIPER_GITHUB__PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GitHubConfig {
     /// GitHub App ID
     pub app_id: u64,
 
-    /// Path to the GitHub App private key PEM file
-    pub private_key_path: PathBuf,
+    /// Path to the GitHub App private key PEM file.
+    #[serde(default)]
+    pub private_key_path: Option<PathBuf>,
+
+    /// Raw PEM content of the GitHub App private key.
+    /// Useful for container deployments via `KUIPER_GITHUB__PRIVATE_KEY` env var.
+    /// Supports `\n` escape sequences for single-line env var values.
+    #[serde(default)]
+    pub private_key: Option<String>,
+}
+
+impl GitHubConfig {
+    /// Resolve the private key content, reading from file if needed.
+    pub fn private_key_content(&self) -> Result<String> {
+        if let Some(ref key) = self.private_key {
+            // Support \n escape sequences (common when passing PEM via env vars)
+            Ok(key.replace("\\n", "\n"))
+        } else if let Some(ref path) = self.private_key_path {
+            std::fs::read_to_string(path).with_context(|| {
+                format!(
+                    "Failed to read GitHub App private key: {}",
+                    path.display()
+                )
+            })
+        } else {
+            Err(anyhow::anyhow!(
+                "Either github.private_key or github.private_key_path must be set"
+            ))
+        }
+    }
 }
 
 /// gRPC server configuration.
@@ -466,7 +503,8 @@ impl Config {
         Ok(Config {
             github: GitHubConfig {
                 app_id: 0,
-                private_key_path: PathBuf::from("/dev/null"),
+                private_key_path: None,
+                private_key: None,
             },
             grpc: GrpcConfig::default(),
             tls: TlsConfig::with_defaults(data_dir),
@@ -528,6 +566,9 @@ pub fn default_config_template() -> String {
 [github]
 app_id = 123456
 private_key_path = "{data_dir_str}/github-app.pem"
+# Or provide the PEM content directly (useful for containers):
+# private_key = "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----"
+# Environment variable: KUIPER_GITHUB__PRIVATE_KEY
 # Note: installation_id is auto-discovered from your GitHub App installations
 
 [grpc]

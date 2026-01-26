@@ -49,12 +49,14 @@ RUN mkdir -p /data && chown kuiper:kuiper /data
 
 USER kuiper
 
-# TLS + GitHub paths default to /data (entrypoint passes --data-dir /data to the binary)
+# TLS paths default to /data (entrypoint passes --data-dir /data to the binary)
 ENV KUIPER_TLS__CA_CERT=/data/ca.crt
 ENV KUIPER_TLS__CA_KEY=/data/ca.key
 ENV KUIPER_TLS__SERVER_CERT=/data/server.crt
 ENV KUIPER_TLS__SERVER_KEY=/data/server.key
-ENV KUIPER_GITHUB__PRIVATE_KEY_PATH=/data/github-app.pem
+# GitHub App private key: provide ONE of these in your compose/env:
+#   KUIPER_GITHUB__PRIVATE_KEY_PATH=/data/github-app.pem  (file mount)
+#   KUIPER_GITHUB__PRIVATE_KEY="-----BEGIN RSA..."         (inline PEM, supports \n escapes)
 ENV KUIPER_GRPC__LISTEN_ADDR=0.0.0.0:9443
 ENV KUIPER_NO_LOG_FILE=true
 
