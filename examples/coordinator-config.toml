@@ -10,7 +10,7 @@
 [github]
 # For testing without GitHub, use placeholder values
 # The coordinator will fail to get runner tokens but agent registration will work
-app_id = "123456"
+app_id = 123456
 private_key_path = "/tmp/fake-github-key.pem"  # Won't be used for registration testing
 # Note: installation_id is auto-discovered from your GitHub App installations
 

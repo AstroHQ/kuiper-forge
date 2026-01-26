@@ -192,7 +192,7 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GitHubConfig {
     /// GitHub App ID
-    pub app_id: String,
+    pub app_id: u64,
 
     /// Path to the GitHub App private key PEM file
     pub private_key_path: PathBuf,
@@ -465,7 +465,7 @@ impl Config {
         tracing::info!("Adding default test runners for common label combinations");
         Ok(Config {
             github: GitHubConfig {
-                app_id: "dry-run".to_string(),
+                app_id: 0,
                 private_key_path: PathBuf::from("/dev/null"),
             },
             grpc: GrpcConfig::default(),
@@ -526,7 +526,7 @@ pub fn default_config_template() -> String {
 # Data directory: {data_dir_str}
 
 [github]
-app_id = "123456"
+app_id = 123456
 private_key_path = "{data_dir_str}/github-app.pem"
 # Note: installation_id is auto-discovered from your GitHub App installations
 
@@ -666,7 +666,7 @@ mod tests {
     fn test_parse_config() {
         let config_str = r#"
 [github]
-app_id = "123456"
+app_id = 123456
 private_key_path = "/etc/ci-runner/github-app.pem"
 
 [grpc]
@@ -687,7 +687,7 @@ name = "my-org"
 "#;
 
         let config = parse_config(config_str);
-        assert_eq!(config.github.app_id, "123456");
+        assert_eq!(config.github.app_id, 123456);
         assert_eq!(config.grpc.listen_addr, "0.0.0.0:9443");
         assert_eq!(config.runners.len(), 1);
     }
@@ -710,7 +710,7 @@ name = "my-org"
     fn test_provisioning_mode_defaults_to_fixed_capacity() {
         let config_str = r#"
 [github]
-app_id = "123456"
+app_id = 123456
 private_key_path = "/etc/ci-runner/github-app.pem"
 
 [tls]
@@ -728,7 +728,7 @@ server_key = "/etc/ci-runner/server.key"
     fn test_provisioning_mode_fixed_capacity() {
         let config_str = r#"
 [github]
-app_id = "123456"
+app_id = 123456
 private_key_path = "/etc/ci-runner/github-app.pem"
 
 [tls]
@@ -749,7 +749,7 @@ mode = "fixed_capacity"
     fn test_provisioning_mode_webhook() {
         let config_str = r#"
 [github]
-app_id = "123456"
+app_id = 123456
 private_key_path = "/etc/ci-runner/github-app.pem"
 
 [tls]
@@ -787,7 +787,7 @@ name = "my-org"
     fn test_webhook_config_default_path() {
         let config_str = r#"
 [github]
-app_id = "123456"
+app_id = 123456
 private_key_path = "/etc/ci-runner/github-app.pem"
 
 [tls]

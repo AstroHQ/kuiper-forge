@@ -1,0 +1,13 @@
+[env]
+KUIPER_CA_ORG = "KuiperOrg"
+GITHUB_APP_ID = "12345"
+
+[tasks.precommit]
+run = [
+    "cargo clippy --all-targets --all-features -- -D clippy::uninlined_format_args",
+    "cargo fmt",
+    "cargo test --all"
+]
+
+[tasks.clippy-fix]
+run = "cargo clippy --all-targets --all-features --fix --allow-dirty -- -D clippy::uninlined_format_args"

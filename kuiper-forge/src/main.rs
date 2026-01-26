@@ -53,6 +53,10 @@ enum Commands {
         /// Dry-run mode: skip GitHub integration (for testing agent registration)
         #[arg(long)]
         dry_run: bool,
+
+        /// Disable file logging (log to stdout/stderr only)
+        #[arg(long, env = "KUIPER_NO_LOG_FILE")]
+        no_log_file: bool,
     },
 
     /// Certificate Authority management
@@ -145,9 +149,12 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Serve { listen, dry_run } => {
-            // For daemon mode: log to both stdout and file with rotation
-            init_daemon_logging(&cli.data_dir, filter)?;
+        Commands::Serve { listen, dry_run, no_log_file } => {
+            if no_log_file {
+                init_cli_logging(filter);
+            } else {
+                init_daemon_logging(&cli.data_dir, filter)?;
+            }
             serve(&cli.config, &cli.data_dir, listen, dry_run).await
         }
         Commands::Ca { command } => {
@@ -273,7 +280,7 @@ async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Optio
         (Some(fm), Some(notifier), wh_notifier)
     } else {
         let github_client = github::GitHubClient::new(
-            config.github.app_id.clone(),
+            config.github.app_id,
             &config.github.private_key_path,
         )?;
 

@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: kuiper
+      POSTGRES_PASSWORD: kuiper
+      POSTGRES_DB: kuiper_forge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kuiper -d kuiper_forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kuiper-forge:
+    build:
+      context: ../..
+      dockerfile: docker/kuiper-forge/Dockerfile
+      args:
+        DB_BACKEND: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9443:9443"
+    volumes:
+      - kuiper-data:/data
+    environment:
+      # First-run: CA + server cert generation
+      KUIPER_CA_ORG: "${KUIPER_CA_ORG}"
+      KUIPER_SERVER_HOSTNAME: "${KUIPER_SERVER_HOSTNAME:-kuiper-forge}"
+      # GitHub App
+      KUIPER_GITHUB__APP_ID: "${GITHUB_APP_ID}"
+      # Database
+      KUIPER_DATABASE__HOST: postgres
+      KUIPER_DATABASE__PORT: "5432"
+      KUIPER_DATABASE__USER: kuiper
+      KUIPER_DATABASE__PASSWORD: kuiper
+      KUIPER_DATABASE__DATABASE: kuiper_forge
+      RUST_LOG: info
+
+volumes:
+  pgdata:
+  kuiper-data:

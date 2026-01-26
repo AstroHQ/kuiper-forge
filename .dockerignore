@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+*.md
+docs/
+examples/
+LICENSE

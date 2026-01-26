@@ -141,7 +141,7 @@ struct InstallationAccount {
 /// GitHub API client for managing runners
 pub struct GitHubClient {
     /// GitHub App ID
-    app_id: String,
+    app_id: u64,
 
     /// GitHub App private key (PEM)
     private_key: String,
@@ -158,7 +158,7 @@ pub struct GitHubClient {
 
 impl GitHubClient {
     /// Create a new GitHub client from configuration
-    pub fn new(app_id: String, private_key_path: &Path) -> Result<Self> {
+    pub fn new(app_id: u64, private_key_path: &Path) -> Result<Self> {
         let private_key = std::fs::read_to_string(private_key_path).with_context(|| {
             format!(
                 "Failed to read GitHub App private key: {}",
@@ -170,7 +170,7 @@ impl GitHubClient {
     }
 
     /// Create a new GitHub client from a private key string
-    pub fn from_key(app_id: String, private_key: String) -> Result<Self> {
+    pub fn from_key(app_id: u64, private_key: String) -> Result<Self> {
         let http_client = Client::builder()
             .user_agent("kuiper-forge")
             .build()
@@ -234,7 +234,7 @@ impl GitHubClient {
             iat: (now - Duration::seconds(60)).timestamp(),
             // Max expiration is 10 minutes
             exp: (now + Duration::minutes(9)).timestamp(),
-            iss: self.app_id.clone(),
+            iss: self.app_id.to_string(),
         };
 
         let key = EncodingKey::from_rsa_pem(self.private_key.as_bytes())
