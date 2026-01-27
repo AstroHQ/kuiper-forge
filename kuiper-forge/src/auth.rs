@@ -86,33 +86,26 @@ impl AuthStore {
     }
 
     /// Get and remove a registration token (single-use)
+    ///
+    /// Uses an atomic DELETE … RETURNING to prevent concurrent requests
+    /// from consuming the same token.
     pub async fn consume_token(&self, token_str: &str) -> Result<Option<RegistrationToken>> {
-        let row = sqlx::query(sql::SELECT_TOKEN)
+        let row = sqlx::query(sql::CONSUME_TOKEN)
             .bind(token_str)
             .fetch_optional(&self.pool)
             .await?;
 
         let token = match row {
-            Some(row) => {
-                let token = RegistrationToken {
-                    token: row.get("token"),
-                    expires_at: DateTime::parse_from_rfc3339(row.get("expires_at"))
-                        .context("Invalid expires_at timestamp")?
-                        .with_timezone(&Utc),
-                    created_by: row.get("created_by"),
-                    created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
-                        .context("Invalid created_at timestamp")?
-                        .with_timezone(&Utc),
-                };
-
-                // Delete the token (consume it)
-                sqlx::query(sql::DELETE_TOKEN)
-                    .bind(token_str)
-                    .execute(&self.pool)
-                    .await?;
-
-                Some(token)
-            }
+            Some(row) => Some(RegistrationToken {
+                token: row.get("token"),
+                expires_at: DateTime::parse_from_rfc3339(row.get("expires_at"))
+                    .context("Invalid expires_at timestamp")?
+                    .with_timezone(&Utc),
+                created_by: row.get("created_by"),
+                created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
+                    .context("Invalid created_at timestamp")?
+                    .with_timezone(&Utc),
+            }),
             None => None,
         };
 

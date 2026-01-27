@@ -38,6 +38,14 @@ pub const DELETE_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = ?"
 pub const DELETE_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = $1";
 
 #[cfg(feature = "sqlite")]
+pub const CONSUME_TOKEN: &str =
+    "DELETE FROM registration_tokens WHERE token = ? RETURNING token, expires_at, created_by, created_at";
+
+#[cfg(feature = "postgres")]
+pub const CONSUME_TOKEN: &str =
+    "DELETE FROM registration_tokens WHERE token = $1 RETURNING token, expires_at, created_by, created_at";
+
+#[cfg(feature = "sqlite")]
 pub const DELETE_EXPIRED_TOKENS: &str = "DELETE FROM registration_tokens WHERE expires_at < ?";
 
 #[cfg(feature = "postgres")]

@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::service::Routes;
@@ -212,9 +213,9 @@ impl AgentService for AgentServiceImpl {
 
         // Wait for first message to get agent metadata (hostname, labels, etc.)
         // Note: agent_id from the message is ignored - we use the cert CN
-        let first_msg = inbound
-            .next()
+        let first_msg = timeout(Duration::from_secs(30), inbound.next())
             .await
+            .map_err(|_| Status::deadline_exceeded("Timed out waiting for initial status message"))?
             .ok_or_else(|| Status::invalid_argument("No initial message received"))?
             .map_err(|e| Status::internal(format!("Stream error: {e}")))?;
 
