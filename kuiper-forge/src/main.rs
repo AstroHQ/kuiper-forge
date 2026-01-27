@@ -4,6 +4,7 @@
 //! across multiple VM providers (Tart for macOS, Proxmox for Windows/Linux).
 
 use anyhow::{anyhow, Context, Result};
+use base64::Engine;
 use chrono::Duration;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
@@ -107,11 +108,16 @@ enum CaCommands {
 
 #[derive(Subcommand)]
 enum TokenCommands {
-    /// Create a new registration token
+    /// Create a new registration token (outputs a registration bundle)
     Create {
         /// Token expiration time (e.g., "1h", "30m", "1d")
         #[arg(long, default_value = "1h")]
         expires: String,
+
+        /// Coordinator URL to include in registration bundle
+        /// (e.g., https://coordinator.example.com:9443)
+        #[arg(long)]
+        url: String,
     },
 
     /// List pending registration tokens
@@ -513,18 +519,30 @@ async fn handle_token_command(command: TokenCommands, data_dir: &Path) -> Result
     let mut client = ManagementClient::connect(&socket_path).await?;
 
     match command {
-        TokenCommands::Create { expires } => {
+        TokenCommands::Create { expires, url } => {
             let ttl = parse_duration(&expires)?;
             let expires_secs = ttl.num_seconds() as u64;
 
             let resp = client.create_token(expires_secs, "cli").await?;
 
-            println!("Registration token created:");
-            println!("  Token:   {}", resp.token);
-            println!("  Expires: {} (in {})", resp.expires_at, expires);
+            // Build a registration bundle: token + CA cert + coordinator URL
+            let bundle_json = serde_json::json!({
+                "t": resp.token,
+                "ca": resp.ca_cert_pem,
+                "u": url,
+            });
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(bundle_json.to_string().as_bytes());
+            let bundle = format!("kfr1_{encoded}");
+
+            println!("Registration bundle created (expires in {expires}):");
             println!();
-            println!("Copy this token to the agent configuration to register it.");
-            println!("Warning: Token is single-use and expires in {expires}. Generate new tokens as needed.");
+            println!("  {bundle}");
+            println!();
+            println!("Register an agent with:");
+            println!("  kuiper-tart-agent --register '{bundle}' --labels macos,arm64");
+            println!();
+            println!("Warning: Single-use, expires in {expires}. Generate new tokens as needed.");
 
             Ok(())
         }

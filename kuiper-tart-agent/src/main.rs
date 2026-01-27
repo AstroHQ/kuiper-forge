@@ -9,13 +9,9 @@
 //!
 //! # Bootstrap Mode
 //!
-//! First run with registration token:
+//! First run with a registration bundle:
 //! ```
-//! kuiper-tart-agent --coordinator-url https://coordinator:9443 \
-//!            --token reg_xxxxx \
-//!            --ca-cert /path/to/ca.crt \
-//!            --labels macos,arm64 \
-//!            --base-image ghcr.io/cirruslabs/macos-sequoia-base:latest
+//! kuiper-tart-agent --register kfr1_<bundle> --labels macos,arm64
 //! ```
 //!
 //! Subsequent runs (uses saved config):
@@ -33,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kuiper_agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationTlsMode};
+use kuiper_agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationBundle};
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Pong, RunnerEvent,
     RunnerEventType,
@@ -59,19 +55,10 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    // === Bootstrap arguments (for first-time registration) ===
-    /// Coordinator URL (e.g., https://coordinator:9443)
-    /// Required for first-time registration, ignored if config exists
-    #[arg(long, requires = "token")]
-    coordinator_url: Option<String>,
-
-    /// Registration token from coordinator (single-use)
-    #[arg(long, requires = "coordinator_url")]
-    token: Option<String>,
-
-    /// Path to CA certificate from coordinator
-    #[arg(long, requires = "coordinator_url")]
-    ca_cert: Option<PathBuf>,
+    /// Registration bundle from coordinator (contains token + CA cert + URL).
+    /// Generated with: coordinator token create --url https://...
+    #[arg(long)]
+    register: Option<String>,
 
     /// Labels for this agent (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = "self-hosted,macos,arm64")]
@@ -98,27 +85,27 @@ async fn main() -> anyhow::Result<()> {
     init_logging(&data_dir)?;
 
     // Determine if we're in bootstrap mode or normal mode
-    let (config, registration_token, use_provided_ca) = if let Some(coordinator_url) = args.coordinator_url {
-        // Bootstrap mode: create config from CLI arguments
-        // CA cert is optional - if not provided, use TOFU (insecure) mode
-        let ca_cert = args.ca_cert.clone();
+    let (config, registration_token) = if let Some(ref bundle_str) = args.register {
+        // Bootstrap mode: decode bundle containing token + CA cert + coordinator URL
+        let bundle = RegistrationBundle::decode(bundle_str)
+            .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {e}"))?;
 
-        if let Some(ref ca) = ca_cert {
-            if !ca.exists() {
-                anyhow::bail!("CA certificate not found: {}", ca.display());
-            }
-            info!("Bootstrap mode: registering with coordinator (using provided CA)");
-        } else {
-            info!("Bootstrap mode: registering with coordinator (TOFU mode - no CA verification)");
-        }
-
-        info!("  Coordinator: {}", coordinator_url);
+        info!("Registering with coordinator via bundle");
+        info!("  Coordinator: {}", bundle.coordinator_url);
         info!("  Labels: {:?}", args.labels);
         info!("  Base image: {}", args.base_image);
 
+        // Write the CA cert from the bundle to the certs directory
+        let data_dir = Config::default_data_dir();
+        let certs_dir = data_dir.join("certs");
+        std::fs::create_dir_all(&certs_dir)?;
+        let ca_cert_path = certs_dir.join("ca.crt");
+        std::fs::write(&ca_cert_path, &bundle.ca_cert_pem)?;
+        info!("Saved CA certificate from bundle to {}", ca_cert_path.display());
+
         let config = Config::from_bootstrap(
-            coordinator_url,
-            ca_cert.clone(),
+            bundle.coordinator_url,
+            Some(ca_cert_path),
             args.labels,
             args.base_image,
             args.max_vms,
@@ -128,25 +115,22 @@ async fn main() -> anyhow::Result<()> {
         config.save(&config_path)?;
         info!("Saved config to: {}", config_path.display());
 
-        (config, args.token, ca_cert.is_some())
+        (config, Some(bundle.token))
     } else if config_path.exists() {
         // Normal mode: load existing config
         info!("Loading config from: {}", config_path.display());
         let config = Config::load(&config_path)?;
-        let has_ca = config.tls.ca_cert.is_some();
-        (config, None, has_ca)
+        (config, None)
     } else {
         // No config and no bootstrap args
         eprintln!("No configuration found at: {}", config_path.display());
         eprintln!();
-        eprintln!("To register this agent for the first time, run:");
+        eprintln!("To register this agent, use a registration bundle:");
         eprintln!();
-        eprintln!("  kuiper-tart-agent --coordinator-url https://YOUR_COORDINATOR:9443 \\");
-        eprintln!("             --token REG_TOKEN_FROM_COORDINATOR \\");
+        eprintln!("  kuiper-tart-agent --register BUNDLE_FROM_COORDINATOR \\");
         eprintln!("             --labels macos,arm64");
         eprintln!();
-        eprintln!("Optionally provide --ca-cert for stricter TLS verification.");
-        eprintln!("Get the registration token with: coordinator token create --labels macos,arm64");
+        eprintln!("Generate a bundle with: coordinator token create --url https://YOUR_COORDINATOR:9443");
         std::process::exit(1);
     };
 
@@ -164,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize certificate store
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
 
-    // Copy CA cert to certs_dir if provided
+    // Copy CA cert to certs_dir if provided via config file path
     if let Some(ref ca_cert_path) = config.tls.ca_cert {
         let ca_dest = config.tls.certs_dir.join("ca.crt");
         if !ca_dest.exists() && ca_cert_path.exists() {
@@ -174,22 +158,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Determine TLS mode based on whether CA cert was provided
-    let registration_tls_mode = if use_provided_ca {
-        RegistrationTlsMode::ProvidedCa
-    } else {
-        RegistrationTlsMode::Insecure
-    };
-
     // Build agent connector config
     let agent_config = AgentConfig {
         coordinator_url: config.coordinator.url.clone(),
         coordinator_hostname: config.coordinator.hostname.clone(),
-        registration_token, // Use token from CLI args (for bootstrap) or None
+        registration_token,
         agent_type: "tart".to_string(),
         labels: config.agent.labels.clone(),
         max_vms: config.tart.max_concurrent_vms,
-        registration_tls_mode,
     };
 
     // Create agent instance

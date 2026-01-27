@@ -11,7 +11,7 @@ mod error;
 mod ssh;
 mod vm_manager;
 
-use kuiper_agent_lib::{AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector};
+use kuiper_agent_lib::{AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector, RegistrationBundle};
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Ping, Pong,
     RunnerEvent, RunnerEventType, VmInfo,
@@ -40,9 +40,10 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Registration token from coordinator (single-use, for first-time registration)
+    /// Registration bundle from coordinator (contains token + CA cert + URL).
+    /// Generated with: coordinator token create --url https://...
     #[arg(long)]
-    token: Option<String>,
+    register: Option<String>,
 }
 
 #[tokio::main]
@@ -96,19 +97,37 @@ async fn main() -> anyhow::Result<()> {
     // Initialize certificate store
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
 
-    // Copy CA cert to certs_dir if it doesn't exist there
-    let ca_dest = config.tls.certs_dir.join("ca.crt");
-    if !ca_dest.exists() && config.tls.ca_cert.exists() {
+    // Handle registration bundle if provided
+    let registration_token = if let Some(ref bundle_str) = args.register {
+        let bundle = RegistrationBundle::decode(bundle_str)
+            .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {e}"))?;
+
+        info!("Using registration bundle");
+
+        // Write CA cert from bundle to certs directory
         std::fs::create_dir_all(&config.tls.certs_dir)?;
-        std::fs::copy(&config.tls.ca_cert, &ca_dest)?;
-        info!("Copied CA certificate to {:?}", ca_dest);
-    }
+        let ca_dest = config.tls.certs_dir.join("ca.crt");
+        std::fs::write(&ca_dest, &bundle.ca_cert_pem)?;
+        info!("Saved CA certificate from bundle to {:?}", ca_dest);
+
+        Some(bundle.token)
+    } else {
+        // Copy CA cert to certs_dir if it doesn't exist there
+        let ca_dest = config.tls.certs_dir.join("ca.crt");
+        if !ca_dest.exists() && config.tls.ca_cert.exists() {
+            std::fs::create_dir_all(&config.tls.certs_dir)?;
+            std::fs::copy(&config.tls.ca_cert, &ca_dest)?;
+            info!("Copied CA certificate to {:?}", ca_dest);
+        }
+
+        None
+    };
 
     // Clone vm_manager for shutdown cleanup
     let shutdown_vm_manager = vm_manager.clone();
 
     // Create agent runner
-    let agent = ProxmoxAgent::new(config, vm_manager, cert_store, args.token);
+    let agent = ProxmoxAgent::new(config, vm_manager, cert_store, registration_token);
 
     // Run the agent with graceful shutdown handling
     tokio::select! {
@@ -266,7 +285,6 @@ impl ProxmoxAgent {
             agent_type: "proxmox".to_string(),
             labels: self.config.agent.labels.clone(),
             max_vms: self.config.vm.concurrent_vms,
-            registration_tls_mode: Default::default(), // Insecure (TOFU)
         };
 
         // Connect to coordinator using stored cert_store

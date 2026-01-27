@@ -1747,24 +1747,18 @@ dependencies = [
 name = "kuiper-agent-lib"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.0",
  "chrono",
  "dirs",
- "http",
- "hyper-rustls",
- "hyper-util",
  "kuiper-agent-proto",
  "libc",
- "rustls",
  "serde",
  "serde_json",
  "thiserror 1.0.58",
  "tokio",
- "tokio-rustls",
  "tokio-stream",
  "tonic",
- "tower 0.5.3",
  "tracing",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]

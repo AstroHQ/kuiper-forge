@@ -33,6 +33,7 @@ message CreateTokenResponse {
     string token = 1;
     string expires_at = 2;   // RFC3339 timestamp
     string created_at = 3;   // RFC3339 timestamp
+    string ca_cert_pem = 4;  // CA certificate for building registration bundle
 }
 
 message ListTokensRequest {}

@@ -49,6 +49,7 @@ impl ManagementService for ManagementServiceImpl {
             token: token.token,
             expires_at: token.expires_at.to_rfc3339(),
             created_at: token.created_at.to_rfc3339(),
+            ca_cert_pem: self.auth_manager.ca_cert_pem().to_string(),
         }))
     }
 
