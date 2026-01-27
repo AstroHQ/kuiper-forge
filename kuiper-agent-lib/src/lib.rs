@@ -12,6 +12,7 @@ mod certs;
 mod connector;
 mod error;
 pub mod github_runner;
+pub mod shell;
 
 pub use bundle::RegistrationBundle;
 pub use certs::AgentCertStore;

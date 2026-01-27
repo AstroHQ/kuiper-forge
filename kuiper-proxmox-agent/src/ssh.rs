@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 
 // Re-export github_runner module for use in vm_manager
 pub use kuiper_agent_lib::github_runner;
+use kuiper_agent_lib::shell::{escape_posix, escape_powershell};
 
 /// SSH authentication method.
 #[derive(Debug, Clone)]
@@ -402,14 +403,22 @@ impl RunnerConfigBuilder {
 
         if self.is_windows {
             let ps_cmd = format!(
-                "Set-Location '{}'; .\\config.cmd --url '{}' --token '{}' --labels '{}' --name '{}' --ephemeral --unattended",
-                self.runner_dir, url, token, labels_str, name
+                "Set-Location {}; .\\config.cmd --url {} --token {} --labels {} --name {} --ephemeral --unattended",
+                escape_powershell(&self.runner_dir),
+                escape_powershell(url),
+                escape_powershell(token),
+                escape_powershell(&labels_str),
+                escape_powershell(name),
             );
             self.wrap_powershell(&ps_cmd)
         } else {
             format!(
-                r#"cd {} && ./config.sh --url {} --token {} --labels {} --name {} --ephemeral --unattended"#,
-                self.runner_dir, url, token, labels_str, name
+                "cd {} && ./config.sh --url {} --token {} --labels {} --name {} --ephemeral --unattended",
+                escape_posix(&self.runner_dir),
+                escape_posix(url),
+                escape_posix(token),
+                escape_posix(&labels_str),
+                escape_posix(name),
             )
         }
     }
@@ -420,27 +429,27 @@ impl RunnerConfigBuilder {
         if self.is_windows {
             // Run directly - will block until runner completes
             let ps_cmd = format!(
-                "Set-Location '{}'; .\\run.cmd",
-                self.runner_dir
+                "Set-Location {}; .\\run.cmd",
+                escape_powershell(&self.runner_dir),
             );
             self.wrap_powershell(&ps_cmd)
         } else {
-            format!(r#"cd {} && ./run.sh"#, self.runner_dir)
+            format!("cd {} && ./run.sh", escape_posix(&self.runner_dir))
         }
     }
 
     /// Build command to check if runner is installed.
     pub fn check_installed_command(&self) -> String {
         if self.is_windows {
+            let escaped_dir = escape_powershell(&self.runner_dir);
             let ps_cmd = format!(
-                "if (Test-Path '{}\\run.cmd') {{ Write-Output 'installed' }}",
-                self.runner_dir
+                "if (Test-Path (Join-Path {escaped_dir} 'run.cmd')) {{ Write-Output 'installed' }}",
             );
             self.wrap_powershell(&ps_cmd)
         } else {
+            let escaped_dir = escape_posix(&self.runner_dir);
             format!(
-                "test -d {} && test -f {}/run.sh && echo 'installed'",
-                self.runner_dir, self.runner_dir
+                "test -d {escaped_dir} && test -f {escaped_dir}/run.sh && echo 'installed'",
             )
         }
     }
@@ -485,7 +494,39 @@ mod tests {
         assert!(cmd.contains("./config.sh"));
         assert!(cmd.contains("--ephemeral"));
         assert!(cmd.contains("--unattended"));
-        assert!(cmd.contains("self-hosted,linux"));
+        assert!(cmd.contains("'self-hosted,linux'"));
+        // Values should be single-quoted
+        assert!(cmd.contains("'https://github.com/org/repo'"));
+        assert!(cmd.contains("'TOKEN123'"));
+        assert!(cmd.contains("'runner-001'"));
+    }
+
+    #[test]
+    fn test_linux_config_command_escapes_single_quotes() {
+        let builder = RunnerConfigBuilder::linux("~/actions-runner");
+        let cmd = builder.config_command(
+            "https://github.com/org/repo",
+            "TOKEN'injection",
+            &["self-hosted".to_string()],
+            "runner-001",
+        );
+
+        // Single quote in token must be escaped
+        assert!(cmd.contains("'TOKEN'\\''injection'"));
+    }
+
+    #[test]
+    fn test_linux_config_command_escapes_shell_metacharacters() {
+        let builder = RunnerConfigBuilder::linux("~/actions-runner");
+        let cmd = builder.config_command(
+            "https://github.com/org/repo",
+            "TOKEN123",
+            &["self-hosted".to_string(), "$(rm -rf /)".to_string()],
+            "runner-001",
+        );
+
+        // Shell metacharacters in labels must be safely quoted
+        assert!(cmd.contains("'self-hosted,$(rm -rf /)'"));
     }
 
     #[test]
@@ -503,6 +544,20 @@ mod tests {
         assert!(cmd.contains("config.cmd"));
         assert!(cmd.contains("--ephemeral"));
         assert!(cmd.contains("--unattended"));
+    }
+
+    #[test]
+    fn test_windows_config_command_escapes_single_quotes() {
+        let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
+        let cmd = builder.config_command(
+            "https://github.com/org/repo",
+            "TOKEN'injection",
+            &["self-hosted".to_string()],
+            "runner-001",
+        );
+
+        // PowerShell escapes single quotes by doubling them
+        assert!(cmd.contains("'TOKEN''injection'"));
     }
 
     #[test]

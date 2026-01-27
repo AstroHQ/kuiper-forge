@@ -392,6 +392,7 @@ pub async fn ssh_exec_with_logging(
 }
 
 use kuiper_agent_lib::github_runner::{self, Arch, Platform};
+use kuiper_agent_lib::shell::escape_posix;
 
 /// Ensure the GitHub Actions runner is installed on the VM.
 /// Downloads and extracts the runner if not present.
@@ -498,7 +499,11 @@ pub async fn configure_runner(
 
     // Configure the runner
     let config_cmd = format!(
-        "cd ~/actions-runner && ./config.sh --url '{runner_scope_url}' --token '{registration_token}' --name '{runner_name}' --labels '{labels_str}' --ephemeral --unattended"
+        "cd ~/actions-runner && ./config.sh --url {} --token {} --name {} --labels {} --ephemeral --unattended",
+        escape_posix(runner_scope_url),
+        escape_posix(registration_token),
+        escape_posix(runner_name),
+        escape_posix(&labels_str),
     );
 
     match ssh_exec(ip, config, &config_cmd).await {

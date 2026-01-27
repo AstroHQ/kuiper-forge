@@ -3,6 +3,7 @@
 //! This module provides shared functionality for both kuiper-tart-agent and kuiper-proxmox-agent
 //! to fetch the latest runner version and construct platform-specific download URLs.
 
+use crate::shell::{escape_posix, escape_powershell};
 use tracing::{debug, info};
 
 /// Fallback GitHub Actions runner version if API fetch fails.
@@ -154,16 +155,18 @@ pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch
                 .join("\n");
 
             format!(
-                "$RunnerDir = '{}'; $Url = '{}'; {}",
-                runner_dir,
-                url,
+                "$RunnerDir = {}; $Url = {}; {}",
+                escape_powershell(runner_dir),
+                escape_powershell(&url),
                 script_body.replace('\n', "; ").trim()
             )
         }
         Platform::Linux | Platform::MacOS => {
             // Bash: use heredoc to pass script with arguments
             format!(
-                "bash -s -- '{runner_dir}' '{url}' << 'INSTALL_RUNNER_EOF'\n{INSTALL_SCRIPT_UNIX}\nINSTALL_RUNNER_EOF"
+                "bash -s -- {} {} << 'INSTALL_RUNNER_EOF'\n{INSTALL_SCRIPT_UNIX}\nINSTALL_RUNNER_EOF",
+                escape_posix(runner_dir),
+                escape_posix(&url),
             )
         }
     }
