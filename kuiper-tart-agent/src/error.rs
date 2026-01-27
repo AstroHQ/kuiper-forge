@@ -27,7 +27,7 @@ pub enum Error {
 
     /// Tart CLI error.
     #[error("Tart CLI error: {0}")]
-    TartError(String),
+    Tart(String),
 
     /// SSH connection error.
     #[error("SSH error: {0}")]

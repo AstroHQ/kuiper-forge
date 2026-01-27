@@ -106,13 +106,13 @@ struct SshHandler;
 impl Handler for SshHandler {
     type Error = russh::Error;
 
-    fn check_server_key(
+    async fn check_server_key(
         &mut self,
         _server_public_key: &PublicKey,
-    ) -> impl std::future::Future<Output = std::result::Result<bool, Self::Error>> + Send {
+    ) -> std::result::Result<bool, Self::Error> {
         // Accept all host keys for ephemeral VMs
         // In production, you might want to verify against known hosts
-        async { Ok(true) }
+        Ok(true)
     }
 }
 

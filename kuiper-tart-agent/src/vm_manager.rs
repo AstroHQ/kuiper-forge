@@ -424,7 +424,7 @@ impl VmManager {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(Error::TartError(format!("delete failed: {stderr}")))
+            Err(Error::Tart(format!("delete failed: {stderr}")))
         }
     }
 

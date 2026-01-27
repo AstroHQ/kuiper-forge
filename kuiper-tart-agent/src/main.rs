@@ -29,7 +29,7 @@ mod ssh;
 mod vm_manager;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -694,7 +694,7 @@ impl TartAgent {
 }
 
 /// Initialize logging with file output and stdout.
-fn init_logging(data_dir: &PathBuf) -> anyhow::Result<()> {
+fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 

@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Duration;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{debug, info, warn};
@@ -185,7 +185,7 @@ fn init_cli_logging(filter: EnvFilter) {
 }
 
 /// Initialize logging for daemon mode (stdout + rotating file).
-fn init_daemon_logging(data_dir: &PathBuf, filter: EnvFilter) -> Result<()> {
+fn init_daemon_logging(data_dir: &Path, filter: EnvFilter) -> Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("Failed to create log directory: {}", log_dir.display()))?;
@@ -216,7 +216,7 @@ fn init_daemon_logging(data_dir: &PathBuf, filter: EnvFilter) -> Result<()> {
 }
 
 /// Run the coordinator daemon
-async fn serve(config_path: &PathBuf, data_dir: &PathBuf, listen_override: Option<SocketAddr>, dry_run: bool) -> Result<()> {
+async fn serve(config_path: &Path, data_dir: &Path, listen_override: Option<SocketAddr>, dry_run: bool) -> Result<()> {
     ensure_data_dir(data_dir)?;
 
     // Load configuration (with relaxed validation in dry-run mode)
@@ -449,7 +449,7 @@ async fn shutdown_signal() {
 }
 
 /// Ensure data directory exists
-fn ensure_data_dir(data_dir: &PathBuf) -> Result<()> {
+fn ensure_data_dir(data_dir: &Path) -> Result<()> {
     if !data_dir.exists() {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("Failed to create data directory: {}", data_dir.display()))?;
@@ -459,7 +459,7 @@ fn ensure_data_dir(data_dir: &PathBuf) -> Result<()> {
 }
 
 /// Handle CA subcommands
-async fn handle_ca_command(command: CaCommands, data_dir: &PathBuf) -> Result<()> {
+async fn handle_ca_command(command: CaCommands, data_dir: &Path) -> Result<()> {
     ensure_data_dir(data_dir)?;
 
     match command {
@@ -507,7 +507,7 @@ async fn handle_ca_command(command: CaCommands, data_dir: &PathBuf) -> Result<()
 }
 
 /// Handle token subcommands
-async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Result<()> {
+async fn handle_token_command(command: TokenCommands, data_dir: &Path) -> Result<()> {
     let socket_path = management::default_socket_path(data_dir);
 
     let mut client = ManagementClient::connect(&socket_path).await?;
@@ -574,7 +574,7 @@ async fn handle_token_command(command: TokenCommands, data_dir: &PathBuf) -> Res
 }
 
 /// Handle agent subcommands
-async fn handle_agent_command(command: AgentCommands, data_dir: &PathBuf) -> Result<()> {
+async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result<()> {
     let socket_path = management::default_socket_path(data_dir);
 
     let mut client = ManagementClient::connect(&socket_path).await?;

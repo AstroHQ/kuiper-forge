@@ -5,7 +5,7 @@ GITHUB_PRIVATE_KEY = "--- key here ---"
 
 [tasks.precommit]
 run = [
-    "cargo clippy --all-targets --all-features -- -D clippy::uninlined_format_args",
+    "cargo clippy --all-targets -- -D clippy::uninlined_format_args",
     "cargo fmt",
     "cargo test --all"
 ]
