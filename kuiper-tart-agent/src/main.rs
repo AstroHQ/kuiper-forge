@@ -65,7 +65,6 @@ enum Commands {
     /// Register this agent with the coordinator using a registration bundle
     Register {
         /// Registration bundle token from coordinator (kfr1_...)
-        #[arg(long)]
         bundle: String,
     },
 }
@@ -92,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
     if !config_path.exists() {
         eprintln!("Error: Agent not registered\n");
         eprintln!("Run registration first:");
-        eprintln!("  kuiper-tart-agent register --bundle <kfr1_token>\n");
+        eprintln!("  kuiper-tart-agent register <kfr1_token>\n");
         eprintln!("To get a registration bundle, run on the coordinator:");
         eprintln!("  coordinator token create --expires 1h --url https://your-coordinator:9443");
         std::process::exit(1);
@@ -107,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Error: Certificates not found\n");
         eprintln!("The config file exists but certificates are missing.");
         eprintln!("Please re-register:");
-        eprintln!("  kuiper-tart-agent register --bundle <kfr1_token>");
+        eprintln!("  kuiper-tart-agent register <kfr1_token>");
         std::process::exit(1);
     }
 

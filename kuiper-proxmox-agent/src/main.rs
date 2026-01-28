@@ -51,7 +51,6 @@ enum Commands {
     /// Register this agent with the coordinator using a registration bundle
     Register {
         /// Registration bundle token from coordinator (kfr1_...)
-        #[arg(long)]
         bundle: String,
     },
 }
@@ -94,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Error: Certificates not found\n");
         eprintln!("The config file exists but certificates are missing.");
         eprintln!("Please re-register:");
-        eprintln!("  kuiper-proxmox-agent register --bundle <kfr1_token>");
+        eprintln!("  kuiper-proxmox-agent register <kfr1_token>");
         std::process::exit(1);
     }
 
