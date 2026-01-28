@@ -3,7 +3,7 @@
 //! This module provides shared functionality for both kuiper-tart-agent and kuiper-proxmox-agent
 //! to fetch the latest runner version and construct platform-specific download URLs.
 
-use crate::shell::{escape_posix, escape_powershell};
+use crate::shell::{escape_posix, escape_posix_path, escape_powershell};
 use tracing::{debug, info};
 
 /// Fallback GitHub Actions runner version if API fetch fails.
@@ -163,9 +163,10 @@ pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch
         }
         Platform::Linux | Platform::MacOS => {
             // Bash: use heredoc to pass script with arguments
+            // Use escape_posix_path for runner_dir to preserve tilde expansion (~/actions-runner)
             format!(
                 "bash -s -- {} {} << 'INSTALL_RUNNER_EOF'\n{INSTALL_SCRIPT_UNIX}\nINSTALL_RUNNER_EOF",
-                escape_posix(runner_dir),
+                escape_posix_path(runner_dir),
                 escape_posix(&url),
             )
         }
@@ -226,12 +227,20 @@ mod tests {
     fn test_install_command_unix() {
         let cmd = install_command("~/actions-runner", "2.321.0", Platform::Linux, Arch::X64);
         // Should use heredoc with bash -s
-        assert!(cmd.contains("bash -s -- '~/actions-runner'"));
+        // Tilde should be unquoted for shell expansion, path portion quoted
+        assert!(cmd.contains("bash -s -- ~/'actions-runner'"));
         assert!(cmd.contains("actions-runner-linux-x64-2.321.0.tar.gz"));
         assert!(cmd.contains("INSTALL_RUNNER_EOF"));
         // Script should use $1, $2 for arguments
         assert!(cmd.contains("$1"));
         assert!(cmd.contains("$2"));
+    }
+
+    #[test]
+    fn test_install_command_unix_absolute_path() {
+        let cmd = install_command("/opt/actions-runner", "2.321.0", Platform::Linux, Arch::X64);
+        // Absolute paths should be fully quoted
+        assert!(cmd.contains("bash -s -- '/opt/actions-runner'"));
     }
 
     #[test]

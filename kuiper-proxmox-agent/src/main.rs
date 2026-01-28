@@ -104,6 +104,19 @@ async fn main() -> anyhow::Result<()> {
 
         info!("Using registration bundle");
 
+        // Validate that bundle URL matches config URL to ensure the CA cert and token
+        // are actually for the coordinator we're connecting to
+        let bundle_url = bundle.coordinator_url.trim_end_matches('/');
+        let config_url = config.coordinator.url.trim_end_matches('/');
+        if bundle_url != config_url {
+            return Err(anyhow::anyhow!(
+                "Registration bundle URL mismatch: bundle was generated for '{}' but config specifies '{}'. \
+                 The bundle's CA certificate and token are bound to a specific coordinator URL.",
+                bundle.coordinator_url,
+                config.coordinator.url
+            ));
+        }
+
         // Write CA cert from bundle to certs directory
         std::fs::create_dir_all(&config.tls.certs_dir)?;
         let ca_dest = config.tls.certs_dir.join("ca.crt");

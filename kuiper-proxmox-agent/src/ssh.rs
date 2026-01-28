@@ -21,7 +21,9 @@ use tracing::{debug, info, warn};
 
 // Re-export github_runner module for use in vm_manager
 pub use kuiper_agent_lib::github_runner;
-use kuiper_agent_lib::shell::{escape_posix, escape_powershell};
+use kuiper_agent_lib::shell::{
+    encode_powershell_command, escape_posix, escape_posix_path, escape_powershell,
+};
 
 /// SSH authentication method.
 #[derive(Debug, Clone)]
@@ -382,12 +384,17 @@ impl RunnerConfigBuilder {
 
     /// Wrap a PowerShell command appropriately based on the shell type.
     /// If the shell is already PowerShell, returns the command as-is.
-    /// If the shell is cmd.exe, wraps with `powershell -Command "..."`.
+    /// If the shell is cmd.exe, uses `powershell -EncodedCommand <base64>` to avoid
+    /// cmd.exe parsing issues with quotes and special characters.
     fn wrap_powershell(&self, ps_command: &str) -> String {
         if self.shell_is_powershell {
             ps_command.to_string()
         } else {
-            format!(r#"powershell -Command "{ps_command}""#)
+            // Use -EncodedCommand with UTF-16LE Base64 encoding to completely avoid
+            // cmd.exe metacharacter interpretation. This prevents injection attacks
+            // where embedded " characters could break out of quoted strings.
+            let encoded = encode_powershell_command(ps_command);
+            format!("powershell -EncodedCommand {encoded}")
         }
     }
 
@@ -414,7 +421,7 @@ impl RunnerConfigBuilder {
         } else {
             format!(
                 "cd {} && ./config.sh --url {} --token {} --labels {} --name {} --ephemeral --unattended",
-                escape_posix(&self.runner_dir),
+                escape_posix_path(&self.runner_dir),
                 escape_posix(url),
                 escape_posix(token),
                 escape_posix(&labels_str),
@@ -434,7 +441,7 @@ impl RunnerConfigBuilder {
             );
             self.wrap_powershell(&ps_cmd)
         } else {
-            format!("cd {} && ./run.sh", escape_posix(&self.runner_dir))
+            format!("cd {} && ./run.sh", escape_posix_path(&self.runner_dir))
         }
     }
 
@@ -447,7 +454,7 @@ impl RunnerConfigBuilder {
             );
             self.wrap_powershell(&ps_cmd)
         } else {
-            let escaped_dir = escape_posix(&self.runner_dir);
+            let escaped_dir = escape_posix_path(&self.runner_dir);
             format!(
                 "test -d {escaped_dir} && test -f {escaped_dir}/run.sh && echo 'installed'",
             )
@@ -530,8 +537,39 @@ mod tests {
     }
 
     #[test]
+    fn test_linux_tilde_expansion_preserved() {
+        // Tilde should not be quoted so shell can expand it to home directory
+        let builder = RunnerConfigBuilder::linux("~/actions-runner");
+        let cmd = builder.config_command(
+            "https://github.com/org/repo",
+            "TOKEN123",
+            &["self-hosted".to_string()],
+            "runner-001",
+        );
+
+        // Should have ~/... not '~/...' - tilde must be unquoted for expansion
+        assert!(cmd.contains("cd ~/'actions-runner'"));
+        // But NOT fully quoted which would prevent tilde expansion
+        assert!(!cmd.contains("'~/actions-runner'"));
+    }
+
+    #[test]
+    fn test_linux_absolute_path_fully_escaped() {
+        // Absolute paths should be fully escaped (no tilde expansion needed)
+        let builder = RunnerConfigBuilder::linux("/opt/actions-runner");
+        let cmd = builder.config_command(
+            "https://github.com/org/repo",
+            "TOKEN123",
+            &["self-hosted".to_string()],
+            "runner-001",
+        );
+
+        assert!(cmd.contains("cd '/opt/actions-runner'"));
+    }
+
+    #[test]
     fn test_windows_config_command() {
-        // Test with cmd.exe as SSH shell (wraps with powershell -Command)
+        // Test with cmd.exe as SSH shell (wraps with powershell -EncodedCommand)
         let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
         let cmd = builder.config_command(
             "https://github.com/org/repo",
@@ -540,24 +578,31 @@ mod tests {
             "runner-001",
         );
 
-        assert!(cmd.starts_with("powershell -Command"));
-        assert!(cmd.contains("config.cmd"));
-        assert!(cmd.contains("--ephemeral"));
-        assert!(cmd.contains("--unattended"));
+        // Should use -EncodedCommand for safe cmd.exe invocation
+        assert!(cmd.starts_with("powershell -EncodedCommand "));
+        // The encoded command should be valid base64 (alphanumeric + /+=)
+        let encoded = cmd.strip_prefix("powershell -EncodedCommand ").unwrap();
+        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
     }
 
     #[test]
-    fn test_windows_config_command_escapes_single_quotes() {
+    fn test_windows_config_command_escapes_dangerous_chars() {
+        // Test that dangerous characters in inputs don't break cmd.exe parsing
         let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
         let cmd = builder.config_command(
             "https://github.com/org/repo",
-            "TOKEN'injection",
+            r#"TOKEN"&calc&""#, // Would break cmd.exe if not properly encoded
             &["self-hosted".to_string()],
             "runner-001",
         );
 
-        // PowerShell escapes single quotes by doubling them
-        assert!(cmd.contains("'TOKEN''injection'"));
+        // With -EncodedCommand, the entire payload is base64, so no cmd.exe metacharacters
+        assert!(cmd.starts_with("powershell -EncodedCommand "));
+        let encoded = cmd.strip_prefix("powershell -EncodedCommand ").unwrap();
+        // Base64 contains no cmd.exe special chars like &, |, ", etc.
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('"'));
+        assert!(!encoded.contains('|'));
     }
 
     #[test]
@@ -571,12 +616,27 @@ mod tests {
             "runner-001",
         );
 
-        // Should NOT start with "powershell -Command" since shell is already PowerShell
-        assert!(!cmd.starts_with("powershell -Command"));
+        // Should NOT use -EncodedCommand since shell is already PowerShell
+        assert!(!cmd.starts_with("powershell"));
         assert!(cmd.contains("Set-Location"));
         assert!(cmd.contains("config.cmd"));
         assert!(cmd.contains("--ephemeral"));
         assert!(cmd.contains("--unattended"));
+    }
+
+    #[test]
+    fn test_windows_powershell_escapes_single_quotes() {
+        // When shell is already PowerShell, single quotes are escaped by doubling
+        let builder = RunnerConfigBuilder::windows_powershell(r"C:\actions-runner");
+        let cmd = builder.config_command(
+            "https://github.com/org/repo",
+            "TOKEN'injection",
+            &["self-hosted".to_string()],
+            "runner-001",
+        );
+
+        // PowerShell escapes single quotes by doubling them
+        assert!(cmd.contains("'TOKEN''injection'"));
     }
 
 }
