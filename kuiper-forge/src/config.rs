@@ -285,70 +285,60 @@ impl TlsConfig {
 // Database Configuration (compile-time feature selection)
 // =============================================================================
 
-/// SQLite database configuration (used when compiled with `sqlite` feature).
-#[cfg(feature = "sqlite")]
+/// SQLite database configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct DatabaseConfig {
+pub struct SqliteDatabaseConfig {
     /// Path to the SQLite database file.
     /// If not specified, defaults to `coordinator.db` in the data directory.
     #[serde(default)]
     pub path: Option<PathBuf>,
 }
 
-#[cfg(feature = "sqlite")]
-
-/// PostgreSQL database configuration (used when compiled with `postgres` feature).
-#[cfg(feature = "postgres")]
+/// PostgreSQL database configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DatabaseConfig {
-    /// Database host (default: "localhost")
-    #[serde(default = "default_postgres_host")]
+#[serde(default)]
+pub struct PostgresDatabaseConfig {
+    /// Database host
     pub host: String,
 
-    /// Database port (default: 5432)
-    #[serde(default = "default_postgres_port")]
+    /// Database port
     pub port: u16,
 
     /// Database user
-    #[serde(default)]
     pub user: String,
 
     /// Database password
-    #[serde(default)]
     pub password: String,
 
-    /// Database name (default: "kuiper_forge")
-    #[serde(default = "default_postgres_database")]
+    /// Database name
     pub database: String,
 }
 
-#[cfg(feature = "postgres")]
-fn default_postgres_host() -> String {
-    "localhost".to_string()
-}
-
-#[cfg(feature = "postgres")]
-fn default_postgres_port() -> u16 {
-    5432
-}
-
-#[cfg(feature = "postgres")]
-fn default_postgres_database() -> String {
-    "kuiper_forge".to_string()
-}
-
-#[cfg(feature = "postgres")]
-impl Default for DatabaseConfig {
+impl Default for PostgresDatabaseConfig {
     fn default() -> Self {
         Self {
-            host: default_postgres_host(),
-            port: default_postgres_port(),
+            host: "localhost".to_string(),
+            port: 5432,
             user: String::new(),
             password: String::new(),
-            database: default_postgres_database(),
+            database: "kuiper_forge".to_string(),
         }
     }
 }
+
+// Type alias to select the active database configuration based on features
+#[cfg(feature = "sqlite")]
+pub type DatabaseConfig = SqliteDatabaseConfig;
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+pub type DatabaseConfig = PostgresDatabaseConfig;
+
+// Compile-time assertions for database features
+#[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+compile_error!("At least one database feature must be enabled: 'sqlite' or 'postgres'");
+
+#[cfg(all(feature = "sqlite", feature = "postgres"))]
+compile_error!("Cannot enable both 'sqlite' and 'postgres' features simultaneously. Choose one.");
 
 /// Runner configuration for a specific set of labels.
 #[derive(Debug, Clone, Deserialize, Serialize)]
