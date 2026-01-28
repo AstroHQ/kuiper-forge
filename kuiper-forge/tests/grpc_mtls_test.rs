@@ -18,6 +18,15 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 
+// Install default crypto provider for rustls
+fn install_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// Test fixture that sets up certificates and server for testing
 struct TestFixture {
     _temp_dir: TempDir,
@@ -166,6 +175,7 @@ impl Drop for TestFixture {
 /// Test that gRPC connection works over TLS in gRPC-only mode (verifies ALPN h2 negotiation)
 #[tokio::test]
 async fn test_grpc_tls_connection_grpc_only_mode() {
+    install_crypto_provider();
     let fixture = TestFixture::new(false).await;
     let channel = fixture.channel_without_client_cert().await;
 
@@ -200,6 +210,7 @@ async fn test_grpc_tls_connection_grpc_only_mode() {
 /// Test that agent service rejects requests without client certificate in gRPC-only mode
 #[tokio::test]
 async fn test_agent_service_requires_mtls_grpc_only_mode() {
+    install_crypto_provider();
     let fixture = TestFixture::new(false).await;
     let channel = fixture.channel_without_client_cert().await;
 
@@ -248,6 +259,7 @@ async fn test_agent_service_requires_mtls_grpc_only_mode() {
 /// Test gRPC works in webhook mode (verifies ALPN fix for multiplexed server)
 #[tokio::test]
 async fn test_grpc_tls_connection_webhook_mode() {
+    install_crypto_provider();
     let fixture = TestFixture::new(true).await;
     let channel = fixture.channel_without_client_cert().await;
 
@@ -278,6 +290,7 @@ async fn test_grpc_tls_connection_webhook_mode() {
 /// Test that agent service requires mTLS in webhook mode (verifies PeerCertificates injection)
 #[tokio::test]
 async fn test_agent_service_requires_mtls_webhook_mode() {
+    install_crypto_provider();
     let fixture = TestFixture::new(true).await;
     let channel = fixture.channel_without_client_cert().await;
 

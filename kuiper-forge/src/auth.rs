@@ -11,10 +11,10 @@ use crate::sql;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use sqlx::Row;
 use std::fs;
@@ -287,8 +287,7 @@ impl AuthStore {
 
 /// Stored CA data for signing operations
 struct CaData {
-    cert: Certificate,
-    key: KeyPair,
+    issuer: Issuer<'static, KeyPair>,
 }
 
 /// Authentication manager that handles CA operations and token/certificate management
@@ -309,7 +308,7 @@ impl AuthManager {
 
         // Parse the CA key
         let ca_key =
-            KeyPair::from_pem(&ca_key_pem).map_err(|e| anyhow!("Failed to parse CA key: {}", e))?;
+            KeyPair::from_pem(&ca_key_pem).map_err(|e| anyhow!("Failed to parse CA key: {e}"))?;
 
         // Extract subject from the actual CA certificate on disk
         let ca_subject = extract_ca_subject(&ca_cert_pem)?;
@@ -318,15 +317,14 @@ impl AuthManager {
         // Since rcgen doesn't support loading existing certs for signing,
         // we recreate CA params using the ACTUAL subject from the cert on disk
         let ca_params = create_ca_params(&ca_subject.org_name)?;
-        let ca_cert = ca_params
+        let _ca_cert = ca_params
             .self_signed(&ca_key)
-            .map_err(|e| anyhow!("Failed to create CA cert: {}", e))?;
+            .map_err(|e| anyhow!("Failed to create CA cert: {e}"))?;
 
         Ok(Self {
             store,
             ca_data: CaData {
-                cert: ca_cert,
-                key: ca_key,
+                issuer: Issuer::new(ca_params, ca_key),
             },
             ca_cert_pem,
         })
@@ -412,12 +410,12 @@ impl AuthManager {
 
         // Generate key pair for agent
         let agent_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-            .map_err(|e| anyhow!("Failed to generate key pair: {}", e))?;
+            .map_err(|e| anyhow!("Failed to generate key pair: {e}"))?;
 
         // Sign the certificate with our CA
         let agent_cert = params
-            .signed_by(&agent_key, &self.ca_data.cert, &self.ca_data.key)
-            .map_err(|e| anyhow!("Failed to sign certificate: {}", e))?;
+            .signed_by(&agent_key, &self.ca_data.issuer)
+            .map_err(|e| anyhow!("Failed to sign certificate: {e}"))?;
 
         let cert_pem = agent_cert.pem();
         let key_pem = agent_key.serialize_pem();
@@ -510,7 +508,7 @@ pub fn init_ca(ca_cert_path: &Path, ca_key_path: &Path, org_name: &str) -> Resul
 
     // Generate CA key pair
     let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-        .map_err(|e| anyhow!("Failed to generate CA key: {}", e))?;
+        .map_err(|e| anyhow!("Failed to generate CA key: {e}"))?;
 
     // Create CA certificate params
     let params = create_ca_params(org_name)?;
@@ -518,7 +516,7 @@ pub fn init_ca(ca_cert_path: &Path, ca_key_path: &Path, org_name: &str) -> Resul
     // Self-sign the CA certificate
     let ca_cert = params
         .self_signed(&ca_key)
-        .map_err(|e| anyhow!("Failed to create CA certificate: {}", e))?;
+        .map_err(|e| anyhow!("Failed to create CA certificate: {e}"))?;
 
     // Create parent directories
     if let Some(parent) = ca_cert_path.parent() {
@@ -553,20 +551,21 @@ pub fn generate_server_cert(
         .with_context(|| format!("Failed to read CA key: {}", ca_key_path.display()))?;
 
     let ca_key =
-        KeyPair::from_pem(&ca_key_pem).map_err(|e| anyhow!("Failed to parse CA key: {}", e))?;
+        KeyPair::from_pem(&ca_key_pem).map_err(|e| anyhow!("Failed to parse CA key: {e}"))?;
 
     // Extract subject from the actual CA certificate on disk
     let ca_subject = extract_ca_subject(&ca_cert_pem)?;
 
-    // Recreate CA cert for signing using ACTUAL subject from disk
+    // Recreate CA issuer for signing using ACTUAL subject from disk
     let ca_params = create_ca_params(&ca_subject.org_name)?;
     let ca_cert = ca_params
         .self_signed(&ca_key)
-        .map_err(|e| anyhow!("Failed to reconstruct CA cert: {}", e))?;
+        .map_err(|e| anyhow!("Failed to reconstruct CA cert: {e}"))?;
+    let ca_issuer = Issuer::new(ca_params, ca_key);
 
     // Generate server key
     let server_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-        .map_err(|e| anyhow!("Failed to generate server key: {}", e))?;
+        .map_err(|e| anyhow!("Failed to generate server key: {e}"))?;
 
     // Create server certificate params
     let mut params = CertificateParams::default();
@@ -595,8 +594,8 @@ pub fn generate_server_cert(
 
     // Sign with CA
     let server_cert = params
-        .signed_by(&server_key, &ca_cert, &ca_key)
-        .map_err(|e| anyhow!("Failed to sign server certificate: {}", e))?;
+        .signed_by(&server_key, &ca_issuer)
+        .map_err(|e| anyhow!("Failed to sign server certificate: {e}"))?;
 
     // Create parent directories
     if let Some(parent) = server_cert_path.parent() {
@@ -650,7 +649,7 @@ fn write_private_key(path: &Path, content: &str) -> Result<()> {
 
 /// Generate a random alphanumeric string
 fn generate_random_string(len: usize) -> String {
-    rand::thread_rng()
+    rand::rng()
         .sample_iter(&Alphanumeric)
         .take(len)
         .map(char::from)
@@ -683,11 +682,11 @@ fn extract_ca_subject(ca_cert_pem: &str) -> Result<CaSubject> {
 
     // Parse PEM and certificate
     let (_, pem) = parse_x509_pem(ca_cert_pem.as_bytes())
-        .map_err(|e| anyhow!("Failed to parse CA cert PEM: {}", e))?;
+        .map_err(|e| anyhow!("Failed to parse CA cert PEM: {e}"))?;
 
     let cert = pem
         .parse_x509()
-        .map_err(|e| anyhow!("Failed to parse CA certificate: {}", e))?;
+        .map_err(|e| anyhow!("Failed to parse CA certificate: {e}"))?;
 
     // Extract organization name from subject DN
     let subject = cert.subject();

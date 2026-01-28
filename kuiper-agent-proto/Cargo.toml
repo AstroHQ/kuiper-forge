@@ -9,7 +9,7 @@ description = "gRPC protocol definitions for CI runner agents"
 
 [dependencies]
 prost = "0.14"
-tonic = { version = "0.14", features = ["tls-ring"] }
+tonic = { version = "0.14", features = ["tls-aws-lc"] }
 tonic-prost = "0.14"
 
 [build-dependencies]

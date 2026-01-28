@@ -42,8 +42,8 @@ kuiper-agent-proto = { version = "0.1.0", path = "../kuiper-agent-proto" }
 # TLS/Certificates
 rcgen = { workspace = true }
 rustls-pemfile = { workspace = true }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-x509-parser = "0.16"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
+x509-parser = "0.18"
 
 # Time and IDs
 chrono = { workspace = true }
@@ -52,7 +52,7 @@ time = "0.3"
 
 # GitHub API
 reqwest = { workspace = true }
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 base64 = "0.22"
 
 # Utilities
@@ -76,3 +76,4 @@ bytes = "1"
 [dev-dependencies]
 tempfile = "3"
 tokio-stream = { workspace = true }
+rustls = { workspace = true }

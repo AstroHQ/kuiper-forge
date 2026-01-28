@@ -22,28 +22,29 @@ clap = { version = "4.2", features = ["derive", "env"] }
 anyhow = "1.0.71"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0.50"
+thiserror = "2.0"
 tokio = { version = "1.41", features = ["full"] }
 tokio-stream = "0.1.17"
-tonic = { version = "0.14", features = ["tls-ring", "tls-native-roots", "tls-connect-info"] }
+tonic = { version = "0.14", features = ["tls-aws-lc", "tls-native-roots", "tls-connect-info"] }
 prost = "0.14"
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem", "aws_lc_rs"], default-features = false }
 rustls-pemfile = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 url = "2"
-dirs = "5"
+dirs = "6"
 async-trait = "0.1"
-rand = "0.8"
+rand = "0.9"
 hex = "0.4"
 axum = "0.8"
 hmac = "0.12"
 sha2 = "0.10"
 
 # Agent-specific dependencies
-toml = "0.8"
+toml = "0.9"
 base64 = "0.22"
-gethostname = "0.5"
+gethostname = "1.1"
 libc = "0.2"
-russh = "0.56"
+russh = "0.57"
