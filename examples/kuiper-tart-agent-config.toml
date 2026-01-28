@@ -79,3 +79,10 @@ cleanup_interval_mins = 15
 initial_delay_secs = 1
 # Max reconnection delay (seconds)
 max_delay_secs = 60
+
+[host]
+# Check DHCP lease time on startup (for Internet Sharing)
+# Options: "error" (exit if wrong, default), "warn" (log warning), "ignore" (skip check)
+# Short lease times (600s) are required for reliable VM IP acquisition.
+# Fix with: sudo defaults write /Library/Preferences/SystemConfiguration/com.apple.InternetSharing.default.plist bootpd -dict DHCPLeaseTimeSecs -int 600
+dhcp_lease_check = "error"

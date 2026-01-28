@@ -21,6 +21,7 @@
 
 mod config;
 mod error;
+mod host_checks;
 mod ssh;
 mod vm_manager;
 
@@ -133,6 +134,42 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Generate a bundle with: coordinator token create --url https://YOUR_COORDINATOR:9443");
         std::process::exit(1);
     };
+
+    // Run host environment checks
+    match host_checks::check_tart_version() {
+        Ok(version) => info!("Tart CLI version: {}", version),
+        Err(msg) => {
+            error!("{}", msg);
+            std::process::exit(1);
+        }
+    }
+
+    // Check local images exist
+    let mut images_to_check: Vec<&str> = vec![&config.tart.base_image];
+    for mapping in &config.tart.image_mappings {
+        images_to_check.push(&mapping.image);
+    }
+    if let Err(msg) = host_checks::check_local_images(&images_to_check) {
+        error!("{}", msg);
+        std::process::exit(1);
+    }
+
+    match config.host.dhcp_lease_check.as_str() {
+        "ignore" => {}
+        mode => {
+            if let Err(msg) = host_checks::check_dhcp_lease_time() {
+                let fix_cmd = host_checks::dhcp_lease_fix_command();
+                if mode == "error" {
+                    error!("{}", msg);
+                    error!("Fix with: {}", fix_cmd);
+                    std::process::exit(1);
+                } else {
+                    warn!("{}", msg);
+                    warn!("Fix with: {}", fix_cmd);
+                }
+            }
+        }
+    }
 
     info!("kuiper-tart-agent starting");
     info!("Coordinator: {}", config.coordinator.url);

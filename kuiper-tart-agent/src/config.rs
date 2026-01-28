@@ -22,6 +22,9 @@ pub struct Config {
     /// Reconnection settings (optional)
     #[serde(default)]
     pub reconnect: ReconnectConfig,
+    /// Host environment settings (optional)
+    #[serde(default)]
+    pub host: HostConfig,
 }
 
 /// Coordinator connection configuration.
@@ -161,6 +164,27 @@ pub struct ReconnectConfig {
     pub max_delay_secs: u64,
 }
 
+/// Host environment configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HostConfig {
+    /// Check for short DHCP lease time on startup.
+    /// Options: "error" (exit if wrong), "warn" (log warning), "ignore" (skip check)
+    #[serde(default = "default_dhcp_lease_check")]
+    pub dhcp_lease_check: String,
+}
+
+fn default_dhcp_lease_check() -> String {
+    "error".to_string()
+}
+
+impl Default for HostConfig {
+    fn default() -> Self {
+        Self {
+            dhcp_lease_check: default_dhcp_lease_check(),
+        }
+    }
+}
+
 fn default_initial_delay() -> u64 {
     1
 }
@@ -239,6 +263,7 @@ impl Config {
             },
             cleanup: CleanupConfig::default(),
             reconnect: ReconnectConfig::default(),
+            host: HostConfig::default(),
         }
     }
 
