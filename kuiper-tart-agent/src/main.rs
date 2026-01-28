@@ -223,7 +223,7 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
 
     // 1. Parse bundle
     let bundle = RegistrationBundle::decode(bundle_token)
-        .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {e}"))?;
 
     println!("Coordinator: {}", bundle.coordinator_url);
 
@@ -258,7 +258,7 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
     let _client = connector
         .connect()
         .await
-        .map_err(|e| anyhow::anyhow!("Registration failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Registration failed: {e}"))?;
 
     let agent_id = cert_store
         .get_agent_id()

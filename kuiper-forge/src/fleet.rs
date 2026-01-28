@@ -401,7 +401,7 @@ impl FleetManager {
             .agent_registry
             .find_available_agent(labels)
             .await
-            .ok_or_else(|| anyhow::anyhow!("No available agent for labels {:?}", labels))?;
+            .ok_or_else(|| anyhow::anyhow!("No available agent for labels {labels:?}"))?;
 
         info!(
             "Found available agent {} for job {} with labels {:?}",
@@ -410,10 +410,7 @@ impl FleetManager {
 
         // Reserve a slot on the agent
         if !self.agent_registry.reserve_slot(&agent_id).await {
-            anyhow::bail!(
-                "Failed to reserve slot on agent {} (might be at capacity)",
-                agent_id
-            );
+            anyhow::bail!("Failed to reserve slot on agent {agent_id} (might be at capacity)");
         }
 
         // Get registration token from provider (GitHub API or mock)

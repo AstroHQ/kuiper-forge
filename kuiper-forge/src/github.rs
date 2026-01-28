@@ -261,7 +261,7 @@ impl GitHubClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("GitHub API error ({}): {}", status, body));
+            return Err(anyhow!("GitHub API error ({status}): {body}"));
         }
 
         let installations: Vec<Installation> = response
@@ -303,9 +303,8 @@ impl GitHubClient {
         let cache = self.installation_ids.read().await;
         cache.get(&account_lower).copied().ok_or_else(|| {
             anyhow!(
-                "GitHub App is not installed on account '{}'. \
-                 Please install the app at https://github.com/apps/YOUR-APP-NAME",
-                account
+                "GitHub App is not installed on account '{account}'. \
+                 Please install the app at https://github.com/apps/YOUR-APP-NAME"
             )
         })
     }
@@ -348,7 +347,7 @@ impl GitHubClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("GitHub API error ({}): {}", status, body));
+            return Err(anyhow!("GitHub API error ({status}): {body}"));
         }
 
         let token_response: InstallationTokenResponse = response
@@ -400,9 +399,7 @@ impl GitHubClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "GitHub API error getting registration token ({}): {}",
-                status,
-                body
+                "GitHub API error getting registration token ({status}): {body}"
             ));
         }
 
@@ -436,9 +433,7 @@ impl GitHubClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "GitHub API error listing runners ({}): {}",
-                status,
-                body
+                "GitHub API error listing runners ({status}): {body}"
             ));
         }
 
@@ -477,9 +472,7 @@ impl GitHubClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "GitHub API error deleting runner ({}): {}",
-                status,
-                body
+                "GitHub API error deleting runner ({status}): {body}"
             ));
         }
 

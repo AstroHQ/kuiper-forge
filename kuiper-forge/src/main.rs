@@ -749,10 +749,7 @@ fn parse_duration(s: &str) -> Result<Duration> {
         "m" => Ok(Duration::minutes(num)),
         "h" => Ok(Duration::hours(num)),
         "d" => Ok(Duration::days(num)),
-        _ => Err(anyhow!(
-            "Unknown duration unit: {}. Use s, m, h, or d",
-            unit
-        )),
+        _ => Err(anyhow!("Unknown duration unit: {unit}. Use s, m, h, or d")),
     }
 }
 

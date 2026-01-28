@@ -225,7 +225,7 @@ impl ManagementClient {
                 created_by: created_by.to_string(),
             })
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("gRPC error: {e}"))?;
 
         Ok(resp.into_inner())
     }
@@ -236,7 +236,7 @@ impl ManagementClient {
             .client
             .list_tokens(ListTokensRequest {})
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("gRPC error: {e}"))?;
 
         Ok(resp.into_inner())
     }
@@ -249,7 +249,7 @@ impl ManagementClient {
                 token: token.to_string(),
             })
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("gRPC error: {e}"))?;
 
         Ok(resp.into_inner())
     }
@@ -260,7 +260,7 @@ impl ManagementClient {
             .client
             .list_agents(ListAgentsRequest {})
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("gRPC error: {e}"))?;
 
         Ok(resp.into_inner())
     }
@@ -273,7 +273,7 @@ impl ManagementClient {
                 agent_id: agent_id.to_string(),
             })
             .await
-            .map_err(|e| anyhow::anyhow!("gRPC error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("gRPC error: {e}"))?;
 
         Ok(resp.into_inner())
     }

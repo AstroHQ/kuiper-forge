@@ -36,7 +36,7 @@ impl std::str::FromStr for AgentType {
         match s.to_lowercase().as_str() {
             "tart" => Ok(AgentType::Tart),
             "proxmox" => Ok(AgentType::Proxmox),
-            _ => Err(anyhow!("Unknown agent type: {}", s)),
+            _ => Err(anyhow!("Unknown agent type: {s}")),
         }
     }
 }
@@ -316,7 +316,7 @@ impl AgentRegistry {
         let agent = self
             .get(agent_id)
             .await
-            .ok_or_else(|| anyhow!("Agent not found: {}", agent_id))?;
+            .ok_or_else(|| anyhow!("Agent not found: {agent_id}"))?;
 
         // Register pending command
         let rx = {
