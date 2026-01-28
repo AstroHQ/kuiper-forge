@@ -90,35 +90,33 @@ fn default_runner_version() -> String {
 }
 
 /// SSH authentication configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct SshAuthConfig {
     /// SSH username (default: "admin")
-    #[serde(default = "default_ssh_username")]
     pub username: String,
     /// Authentication method: "password", "key", or "default" (try default keys)
-    #[serde(default = "default_ssh_auth_method")]
     pub auth_method: String,
     /// Password for password authentication
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Path to private key for key-based authentication
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key: Option<PathBuf>,
     /// SSH connection timeout in seconds
-    #[serde(default = "default_ssh_timeout")]
     pub timeout_secs: u64,
 }
 
-fn default_ssh_username() -> String {
-    "admin".to_string()
-}
-
-fn default_ssh_auth_method() -> String {
-    "default".to_string()
-}
-
-fn default_ssh_timeout() -> u64 {
-    30
+impl Default for SshAuthConfig {
+    fn default() -> Self {
+        Self {
+            username: "admin".to_string(),
+            auth_method: "default".to_string(),
+            password: None,
+            private_key: None,
+            timeout_secs: 30,
+        }
+    }
 }
 
 fn default_max_concurrent_vms() -> u32 {

@@ -284,7 +284,16 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
             shared_cache_dir: None,
             ssh: config::SshAuthConfig::default(),
             runner_version: "latest".to_string(),
-            image_mappings: vec![],
+            image_mappings: vec![
+                config::ImageMapping {
+                    labels: vec!["macOS".to_string(), "sonoma".to_string()],
+                    image: "ghcr.io/cirruslabs/macos-sonoma-base:latest".to_string(),
+                },
+                config::ImageMapping {
+                    labels: vec!["macOS".to_string(), "ventura".to_string()],
+                    image: "ghcr.io/cirruslabs/macos-ventura-base:latest".to_string(),
+                },
+            ],
         },
         cleanup: config::CleanupConfig::default(),
         reconnect: config::ReconnectConfig::default(),
