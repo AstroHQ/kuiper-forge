@@ -30,18 +30,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::Parser;
 use kuiper_agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationBundle};
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Pong, RunnerEvent,
     RunnerEventType,
 };
-use clap::Parser;
 use tokio::signal;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use config::Config;
 use error::{Error, Result};
@@ -91,6 +91,15 @@ async fn main() -> anyhow::Result<()> {
         let bundle = RegistrationBundle::decode(bundle_str)
             .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {e}"))?;
 
+        // If config already exists, validate that bundle URL matches existing config
+        if config_path.exists() {
+            let existing_config = Config::load(&config_path)?;
+            bundle
+                .validate_url(&existing_config.coordinator.url)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            info!("Bundle URL validated against existing config");
+        }
+
         info!("Registering with coordinator via bundle");
         info!("  Coordinator: {}", bundle.coordinator_url);
         info!("  Labels: {:?}", args.labels);
@@ -102,7 +111,10 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&certs_dir)?;
         let ca_cert_path = certs_dir.join("ca.crt");
         std::fs::write(&ca_cert_path, &bundle.ca_cert_pem)?;
-        info!("Saved CA certificate from bundle to {}", ca_cert_path.display());
+        info!(
+            "Saved CA certificate from bundle to {}",
+            ca_cert_path.display()
+        );
 
         let config = Config::from_bootstrap(
             bundle.coordinator_url,
@@ -131,7 +143,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("  kuiper-tart-agent --register BUNDLE_FROM_COORDINATOR \\");
         eprintln!("             --labels macos,arm64");
         eprintln!();
-        eprintln!("Generate a bundle with: coordinator token create --url https://YOUR_COORDINATOR:9443");
+        eprintln!(
+            "Generate a bundle with: coordinator token create --url https://YOUR_COORDINATOR:9443"
+        );
         std::process::exit(1);
     };
 
@@ -360,9 +374,7 @@ impl TartAgent {
         .map_err(|_| Error::ChannelSend)?;
 
         // Start the bidirectional stream (server will read our initial status)
-        let response = client
-            .agent_stream(ReceiverStream::new(rx))
-            .await?;
+        let response = client.agent_stream(ReceiverStream::new(rx)).await?;
 
         let mut inbound = response.into_inner();
 
@@ -487,10 +499,8 @@ impl TartAgent {
     /// mapping where ALL mapping labels are present in the job labels (case-insensitive).
     /// Falls back to `base_image` if no mapping matches.
     fn select_image(&self, job_labels: &[String]) -> String {
-        let job_labels_lower: HashSet<String> = job_labels
-            .iter()
-            .map(|l| l.to_lowercase())
-            .collect();
+        let job_labels_lower: HashSet<String> =
+            job_labels.iter().map(|l| l.to_lowercase()).collect();
 
         for mapping in &self.config.tart.image_mappings {
             let all_match = mapping
@@ -577,7 +587,12 @@ impl TartAgent {
             // 3. Configure GitHub runner
             info!("[{}] Step 3/5: Configuring GitHub runner...", vm_name);
             self.vm_manager
-                .configure_runner(&vm_id, &cmd.registration_token, &cmd.labels, &cmd.runner_scope_url)
+                .configure_runner(
+                    &vm_id,
+                    &cmd.registration_token,
+                    &cmd.labels,
+                    &cmd.runner_scope_url,
+                )
                 .await
                 .map_err(|e| {
                     error!(
@@ -602,10 +617,13 @@ impl TartAgent {
                 "[{}] Step 4/5: Runner configured, waiting for job completion...",
                 vm_name
             );
-            self.vm_manager.wait_for_runner_exit(&vm_id).await.map_err(|e| {
-                error!("[{}] Runner execution failed: {}", vm_name, e);
-                e
-            })?;
+            self.vm_manager
+                .wait_for_runner_exit(&vm_id)
+                .await
+                .map_err(|e| {
+                    error!("[{}] Runner execution failed: {}", vm_name, e);
+                    e
+                })?;
 
             // 5. Cleanup
             info!("[{}] Step 5/5: Cleaning up VM...", vm_name);
@@ -688,9 +706,7 @@ impl TartAgent {
 
     /// Build current agent status.
     async fn build_status(&self) -> AgentStatus {
-        let hostname = gethostname::gethostname()
-            .to_string_lossy()
-            .to_string();
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
         AgentStatus {
             active_vms: self.vm_manager.active_count().await as u32,
@@ -734,7 +750,12 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(false)) // stdout
-        .with(fmt::layer().with_target(true).with_ansi(false).with_writer(non_blocking)) // file
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        ) // file
         .init();
 
     info!("Logging to: {}", log_dir.display());

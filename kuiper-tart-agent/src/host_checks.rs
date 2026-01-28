@@ -100,7 +100,7 @@ pub fn check_local_images(images: &[&str]) -> Result<(), String> {
 
 #[derive(serde::Deserialize)]
 struct TartImage {
-    #[serde(rename = "Name")]
+    #[serde(rename = "Name", alias = "name")]
     name: String,
 }
 

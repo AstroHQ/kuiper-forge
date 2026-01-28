@@ -7,7 +7,7 @@
 //! {"t":"reg_xxx...","ca":"-----BEGIN CERTIFICATE-----\n...","u":"https://coordinator:9443"}
 //! ```
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 /// Prefix for kuiper-forge registration bundles (version 1).
@@ -66,6 +66,50 @@ impl RegistrationBundle {
 
         Ok(bundle)
     }
+
+    /// Validate that the bundle's coordinator URL matches the expected coordinator URL.
+    ///
+    /// This ensures the CA certificate and token in the bundle are actually for the
+    /// coordinator we're connecting to, preventing misconfiguration.
+    ///
+    /// URLs are normalized before comparison (lowercase, default ports removed, trailing slashes removed).
+    pub fn validate_url(&self, expected_url: &str) -> Result<(), BundleError> {
+        let bundle_normalized = normalize_url(&self.coordinator_url);
+        let expected_normalized = normalize_url(expected_url);
+
+        if bundle_normalized != expected_normalized {
+            return Err(BundleError::UrlMismatch {
+                bundle_url: self.coordinator_url.clone(),
+                expected_url: expected_url.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Normalize a URL for comparison purposes.
+///
+/// Normalization includes:
+/// - Converting to lowercase
+/// - Removing default ports (443 for https, 80 for http)
+/// - Removing trailing slashes
+fn normalize_url(url_str: &str) -> String {
+    let Ok(mut url) = url::Url::parse(url_str) else {
+        // If parsing fails, fall back to simple normalization
+        return url_str.trim_end_matches('/').to_lowercase();
+    };
+
+    // Remove default ports (443 for https, 80 for http)
+    if let Some(port) = url.port() {
+        let is_default = matches!((url.scheme(), port), ("https", 443) | ("http", 80));
+        if is_default {
+            let _ = url.set_port(None);
+        }
+    }
+
+    // Host is already lowercase from url crate, just format without trailing slash
+    url.as_str().trim_end_matches('/').to_string()
 }
 
 /// Errors that can occur when encoding/decoding registration bundles.
@@ -81,6 +125,14 @@ pub enum BundleError {
     Deserialize(serde_json::Error),
     #[error("missing required field: {0}")]
     MissingField(&'static str),
+    #[error(
+        "Registration bundle URL mismatch: bundle was generated for '{bundle_url}' but config specifies '{expected_url}'. \
+         The bundle's CA certificate and token are bound to a specific coordinator URL."
+    )]
+    UrlMismatch {
+        bundle_url: String,
+        expected_url: String,
+    },
 }
 
 #[cfg(test)]
@@ -91,7 +143,8 @@ mod tests {
     fn test_roundtrip() {
         let bundle = RegistrationBundle {
             token: "reg_abcdef1234567890abcdef1234567890".to_string(),
-            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBxDCCAWq...\n-----END CERTIFICATE-----\n".to_string(),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBxDCCAWq...\n-----END CERTIFICATE-----\n"
+                .to_string(),
             coordinator_url: "https://coordinator.example.com:9443".to_string(),
         };
 

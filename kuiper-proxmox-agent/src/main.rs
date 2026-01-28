@@ -11,14 +11,16 @@ mod error;
 mod ssh;
 mod vm_manager;
 
-use kuiper_agent_lib::{AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector, RegistrationBundle};
+use clap::Parser;
+use config::Config;
+use error::{Error, Result};
+use kuiper_agent_lib::{
+    AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector, RegistrationBundle,
+};
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Ping, Pong,
     RunnerEvent, RunnerEventType, VmInfo,
 };
-use clap::Parser;
-use config::Config;
-use error::{Error, Result};
 use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use vm_manager::VmManager;
 
 /// Proxmox Agent for CI Runner Coordination
@@ -106,16 +108,9 @@ async fn main() -> anyhow::Result<()> {
 
         // Validate that bundle URL matches config URL to ensure the CA cert and token
         // are actually for the coordinator we're connecting to
-        let bundle_url = bundle.coordinator_url.trim_end_matches('/');
-        let config_url = config.coordinator.url.trim_end_matches('/');
-        if bundle_url != config_url {
-            return Err(anyhow::anyhow!(
-                "Registration bundle URL mismatch: bundle was generated for '{}' but config specifies '{}'. \
-                 The bundle's CA certificate and token are bound to a specific coordinator URL.",
-                bundle.coordinator_url,
-                config.coordinator.url
-            ));
-        }
+        bundle
+            .validate_url(&config.coordinator.url)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Write CA cert from bundle to certs directory
         std::fs::create_dir_all(&config.tls.certs_dir)?;
@@ -194,7 +189,9 @@ fn create_proxmox_client(config: &Config) -> Result<ProxmoxVEAPI> {
     let auth = ProxmoxAuth::api_token(&config.proxmox.token_id, &config.proxmox.token_secret);
 
     // The username is derived from token_id (format: user@realm!tokenname)
-    let username = config.proxmox.token_id
+    let username = config
+        .proxmox
+        .token_id
         .split('!')
         .next()
         .unwrap_or(&config.proxmox.token_id);
@@ -205,7 +202,8 @@ fn create_proxmox_client(config: &Config) -> Result<ProxmoxVEAPI> {
         &config.proxmox.api_url,
         &config.proxmox.node,
         config.proxmox.accept_invalid_certs,
-    ).map_err(|e| Error::Vm(format!("Failed to create Proxmox client: {e}")))
+    )
+    .map_err(|e| Error::Vm(format!("Failed to create Proxmox client: {e}")))
 }
 
 /// The main Proxmox agent.
@@ -370,7 +368,8 @@ impl ProxmoxAgent {
         while let Some(msg) = inbound.message().await.transpose() {
             match msg {
                 Ok(coordinator_msg) => {
-                    self.handle_coordinator_message(coordinator_msg, &tx).await?;
+                    self.handle_coordinator_message(coordinator_msg, &tx)
+                        .await?;
                 }
                 Err(e) => {
                     error!("Stream error: {}", e);
@@ -443,10 +442,8 @@ impl ProxmoxAgent {
     /// mapping where ALL mapping labels are present in the job labels (case-insensitive).
     /// Falls back to the default `template_vmid` if no mapping matches.
     fn select_template(&self, job_labels: &[String]) -> u32 {
-        let job_labels_lower: HashSet<String> = job_labels
-            .iter()
-            .map(|l| l.to_lowercase())
-            .collect();
+        let job_labels_lower: HashSet<String> =
+            job_labels.iter().map(|l| l.to_lowercase()).collect();
 
         for mapping in &self.config.vm.template_mappings {
             let all_match = mapping
@@ -580,9 +577,7 @@ impl ProxmoxAgent {
         let vms = self.vm_manager.list_vms().await;
         let active_count = vms.len() as u32;
         let available = self.config.vm.concurrent_vms.saturating_sub(active_count);
-        let hostname = gethostname::gethostname()
-            .to_string_lossy()
-            .to_string();
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
         AgentStatus {
             active_vms: active_count,
@@ -634,9 +629,15 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(false)) // stdout
-        .with(fmt::layer().with_target(true).with_ansi(false).with_writer(non_blocking)) // file
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        ) // file
         .init();
 
     info!("Logging to: {}", log_dir.display());
     Ok(())
 }
+

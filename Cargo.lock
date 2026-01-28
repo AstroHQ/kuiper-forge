@@ -1759,6 +1759,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1838,6 +1839,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
