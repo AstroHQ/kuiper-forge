@@ -52,7 +52,7 @@ time = "0.3"
 
 # GitHub API
 reqwest = { workspace = true }
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 base64 = "0.22"
 
 # Utilities
