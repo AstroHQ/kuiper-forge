@@ -22,10 +22,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 // Re-export the pool and row types for the selected backend
 #[cfg(feature = "sqlite")]
-pub use sqlx::{sqlite::SqliteRow as DbRow, SqlitePool as DbPool};
+pub use sqlx::{SqlitePool as DbPool, sqlite::SqliteRow as DbRow};
 
 #[cfg(feature = "postgres")]
-pub use sqlx::{postgres::PgRow as DbRow, PgPool as DbPool};
+pub use sqlx::{PgPool as DbPool, postgres::PgRow as DbRow};
 
 /// Shared database for the coordinator.
 ///

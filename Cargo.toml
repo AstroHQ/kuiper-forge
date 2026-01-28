@@ -40,3 +40,10 @@ hex = "0.4"
 axum = "0.8"
 hmac = "0.12"
 sha2 = "0.10"
+
+# Agent-specific dependencies
+toml = "0.8"
+base64 = "0.22"
+gethostname = "0.5"
+libc = "0.2"
+russh = "0.56"

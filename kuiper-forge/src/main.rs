@@ -3,7 +3,7 @@
 //! The coordinator daemon manages ephemeral GitHub Actions runners
 //! across multiple VM providers (Tart for macOS, Proxmox for Windows/Linux).
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use chrono::Duration;
 use clap::{Parser, Subcommand};
@@ -13,10 +13,10 @@ use std::sync::Arc;
 use tokio::signal;
 use tracing::{debug, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use kuiper_forge::agent_registry::AgentRegistry;
-use kuiper_forge::auth::{export_ca_cert, generate_server_cert, init_ca, AuthManager, AuthStore};
+use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
 use kuiper_forge::config::{self, Config, ProvisioningMode};
 use kuiper_forge::db::Database;
 use kuiper_forge::fleet;
@@ -24,7 +24,7 @@ use kuiper_forge::github;
 use kuiper_forge::management::{self, ManagementClient};
 use kuiper_forge::pending_jobs;
 use kuiper_forge::runner_state;
-use kuiper_forge::server::{run_server, ServerConfig};
+use kuiper_forge::server::{ServerConfig, run_server};
 
 /// CI Runner Coordinator - Manages ephemeral GitHub Actions runners
 #[derive(Parser)]
@@ -155,7 +155,11 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Serve { listen, dry_run, no_log_file } => {
+        Commands::Serve {
+            listen,
+            dry_run,
+            no_log_file,
+        } => {
             if no_log_file {
                 init_cli_logging(filter);
             } else {
@@ -214,7 +218,12 @@ fn init_daemon_logging(data_dir: &Path, filter: EnvFilter) -> Result<()> {
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(false)) // stdout
-        .with(fmt::layer().with_target(true).with_ansi(false).with_writer(non_blocking)) // file
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        ) // file
         .init();
 
     info!("Logging to: {}", log_dir.display());
@@ -222,7 +231,12 @@ fn init_daemon_logging(data_dir: &Path, filter: EnvFilter) -> Result<()> {
 }
 
 /// Run the coordinator daemon
-async fn serve(config_path: &Path, data_dir: &Path, listen_override: Option<SocketAddr>, dry_run: bool) -> Result<()> {
+async fn serve(
+    config_path: &Path,
+    data_dir: &Path,
+    listen_override: Option<SocketAddr>,
+    dry_run: bool,
+) -> Result<()> {
     ensure_data_dir(data_dir)?;
 
     // Load configuration (with relaxed validation in dry-run mode)
@@ -233,10 +247,13 @@ async fn serve(config_path: &Path, data_dir: &Path, listen_override: Option<Sock
     };
 
     // Determine listen address
-    let listen_addr: SocketAddr = listen_override
-        .unwrap_or_else(|| {
-            config.grpc.listen_addr.parse().expect("Invalid listen address in config")
-        });
+    let listen_addr: SocketAddr = listen_override.unwrap_or_else(|| {
+        config
+            .grpc
+            .listen_addr
+            .parse()
+            .expect("Invalid listen address in config")
+    });
 
     // Initialize database (shared across components)
     let db = Arc::new(Database::new(&config.database, data_dir).await?);
@@ -286,10 +303,7 @@ async fn serve(config_path: &Path, data_dir: &Path, listen_override: Option<Sock
         (Some(fm), Some(notifier), wh_notifier)
     } else {
         let private_key = config.github.private_key_content()?;
-        let github_client = github::GitHubClient::from_key(
-            config.github.app_id,
-            private_key,
-        )?;
+        let github_client = github::GitHubClient::from_key(config.github.app_id, private_key)?;
 
         // Validate GitHub API access before starting
         // This catches configuration issues early rather than failing later
@@ -311,15 +325,24 @@ async fn serve(config_path: &Path, data_dir: &Path, listen_override: Option<Sock
 
     info!("CI Runner Coordinator starting...");
     if dry_run {
-        info!("MODE: dry-run (fleet manager uses mock tokens, VMs will be created but runner config will fail)");
+        info!(
+            "MODE: dry-run (fleet manager uses mock tokens, VMs will be created but runner config will fail)"
+        );
     }
     info!("Listening on: {}", listen_addr);
     info!("Managing {} runner configurations", config.runners.len());
 
     // Build webhook config if in webhook mode
-    let webhook_config = match (&config.provisioning.mode, &config.provisioning.webhook, webhook_notifier) {
+    let webhook_config = match (
+        &config.provisioning.mode,
+        &config.provisioning.webhook,
+        webhook_notifier,
+    ) {
         (ProvisioningMode::Webhook, Some(wh_config), Some(wh_notifier)) => {
-            info!("Webhook mode enabled - webhook endpoint at {}", wh_config.path);
+            info!(
+                "Webhook mode enabled - webhook endpoint at {}",
+                wh_config.path
+            );
             Some((wh_config.clone(), wh_notifier))
         }
         _ => None,
@@ -421,7 +444,10 @@ async fn serve(config_path: &Path, data_dir: &Path, listen_override: Option<Sock
         if let Err(e) = std::fs::remove_file(&mgmt_socket_path_cleanup) {
             warn!("Failed to remove management socket: {}", e);
         } else {
-            debug!("Removed management socket: {}", mgmt_socket_path_cleanup.display());
+            debug!(
+                "Removed management socket: {}",
+                mgmt_socket_path_cleanup.display()
+            );
         }
     }
 
@@ -555,8 +581,10 @@ async fn handle_token_command(command: TokenCommands, data_dir: &Path) -> Result
                 return Ok(());
             }
 
-            println!("{:<25} {:<20} {:<20} {:<10}",
-                "TOKEN", "CREATED", "EXPIRES", "CREATED BY");
+            println!(
+                "{:<25} {:<20} {:<20} {:<10}",
+                "TOKEN", "CREATED", "EXPIRES", "CREATED BY"
+            );
             println!("{}", "-".repeat(80));
 
             for token in resp.tokens {
@@ -572,8 +600,10 @@ async fn handle_token_command(command: TokenCommands, data_dir: &Path) -> Result
                 let expires = chrono::DateTime::parse_from_rfc3339(&token.expires_at)
                     .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or(token.expires_at.clone());
-                println!("{:<25} {:<20} {:<20} {:<10}",
-                    token_short, created, expires, token.created_by);
+                println!(
+                    "{:<25} {:<20} {:<20} {:<10}",
+                    token_short, created, expires, token.created_by
+                );
             }
 
             Ok(())
@@ -606,8 +636,10 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
                 return Ok(());
             }
 
-            println!("{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
-                "AGENT ID", "TYPE", "HOSTNAME", "MAX_VMS", "CREATED", "EXPIRES", "STATUS");
+            println!(
+                "{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
+                "AGENT ID", "TYPE", "HOSTNAME", "MAX_VMS", "CREATED", "EXPIRES", "STATUS"
+            );
             println!("{}", "-".repeat(105));
 
             for agent in &resp.agents {
@@ -644,8 +676,16 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
                 let expires = chrono::DateTime::parse_from_rfc3339(&agent.expires_at)
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or(agent.expires_at.clone());
-                println!("{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
-                    id_short, agent.agent_type, hostname_short, agent.max_vms, created, expires, status);
+                println!(
+                    "{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
+                    id_short,
+                    agent.agent_type,
+                    hostname_short,
+                    agent.max_vms,
+                    created,
+                    expires,
+                    status
+                );
             }
 
             // Show labels in a second pass for readability
@@ -666,7 +706,9 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
         AgentCommands::Revoke { agent_id } => {
             let resp = client.revoke_agent(&agent_id).await?;
             if resp.revoked {
-                println!("Agent certificate revoked. Agent will be disconnected and must re-register.");
+                println!(
+                    "Agent certificate revoked. Agent will be disconnected and must re-register."
+                );
             } else {
                 println!("Agent not found.");
             }
@@ -707,7 +749,10 @@ fn parse_duration(s: &str) -> Result<Duration> {
         "m" => Ok(Duration::minutes(num)),
         "h" => Ok(Duration::hours(num)),
         "d" => Ok(Duration::days(num)),
-        _ => Err(anyhow!("Unknown duration unit: {}. Use s, m, h, or d", unit)),
+        _ => Err(anyhow!(
+            "Unknown duration unit: {}. Use s, m, h, or d",
+            unit
+        )),
     }
 }
 

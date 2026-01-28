@@ -206,11 +206,19 @@ impl Config {
     /// Load configuration from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::Config(format!("Failed to read config file {}: {}", path.display(), e))
+            Error::Config(format!(
+                "Failed to read config file {}: {}",
+                path.display(),
+                e
+            ))
         })?;
 
         let mut config: Config = toml::from_str(&content).map_err(|e| {
-            Error::Config(format!("Failed to parse config file {}: {}", path.display(), e))
+            Error::Config(format!(
+                "Failed to parse config file {}: {}",
+                path.display(),
+                e
+            ))
         })?;
 
         // Expand ~ in paths
@@ -223,66 +231,43 @@ impl Config {
             config.tart.ssh.private_key = Some(expand_tilde(key_path));
         }
 
-        Ok(config)
-    }
+        // Validate required fields
+        let mut errors = Vec::new();
 
-    /// Create a config from bootstrap arguments.
-    pub fn from_bootstrap(
-        coordinator_url: String,
-        ca_cert: Option<PathBuf>,
-        labels: Vec<String>,
-        base_image: String,
-        max_vms: Option<u32>,
-    ) -> Self {
-        // Extract hostname from URL for TLS verification
-        let hostname = url::Url::parse(&coordinator_url)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from))
-            .unwrap_or_else(|| "localhost".to_string());
-
-        let data_dir = Self::default_data_dir();
-        let certs_dir = data_dir.join("certs");
-
-        Config {
-            coordinator: CoordinatorConfig {
-                url: coordinator_url,
-                hostname,
-            },
-            tls: TlsConfig {
-                ca_cert,
-                certs_dir,
-            },
-            agent: AgentConfig { labels },
-            tart: TartConfig {
-                base_image,
-                max_concurrent_vms: max_vms.unwrap_or(2),
-                shared_cache_dir: None,
-                ssh: SshAuthConfig::default(),
-                runner_version: default_runner_version(),
-                image_mappings: Vec::new(),
-            },
-            cleanup: CleanupConfig::default(),
-            reconnect: ReconnectConfig::default(),
-            host: HostConfig::default(),
+        if config.agent.labels.is_empty() {
+            errors
+                .push("agent.labels: Labels to identify this agent (e.g., [\"macos\", \"arm64\"])");
         }
+
+        if config.tart.base_image.is_empty() {
+            errors.push("tart.base_image: Tart image to use for VMs (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
+        }
+
+        if !errors.is_empty() {
+            let error_msg = format!(
+                "Configuration incomplete\n\nPlease edit {} and set:\n  - {}\n\nThen start the agent:\n  kuiper-tart-agent",
+                path.display(),
+                errors.join("\n  - ")
+            );
+            return Err(Error::Config(error_msg));
+        }
+
+        Ok(config)
     }
 
     /// Save configuration to a TOML file.
     pub fn save(&self, path: &Path) -> Result<()> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Error::Config(format!("Failed to create config directory: {e}"))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Config(format!("Failed to create config directory: {e}")))?;
         }
 
-        let content = toml::to_string_pretty(self).map_err(|e| {
-            Error::Config(format!("Failed to serialize config: {e}"))
-        })?;
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| Error::Config(format!("Failed to serialize config: {e}")))?;
 
-        std::fs::write(path, content).map_err(|e| {
-            Error::Config(format!("Failed to write config file: {e}"))
-        })?;
+        std::fs::write(path, content)
+            .map_err(|e| Error::Config(format!("Failed to write config file: {e}")))?;
 
         Ok(())
     }
@@ -313,9 +298,10 @@ impl Config {
 fn expand_tilde(path: &Path) -> PathBuf {
     if let Some(path_str) = path.to_str()
         && path_str.starts_with("~/")
-            && let Some(home) = dirs::home_dir() {
-                return home.join(&path_str[2..]);
-            }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(&path_str[2..]);
+    }
     path.to_path_buf()
 }
 
@@ -349,7 +335,10 @@ base_image = "macos-runner"
 "#;
 
         let config: Config = toml::from_str(toml).expect("Failed to parse config");
-        assert_eq!(config.coordinator.url, "https://coordinator.example.com:9443");
+        assert_eq!(
+            config.coordinator.url,
+            "https://coordinator.example.com:9443"
+        );
         assert_eq!(config.tart.max_concurrent_vms, 2);
         assert_eq!(config.cleanup.max_vm_age_hours, 2);
     }

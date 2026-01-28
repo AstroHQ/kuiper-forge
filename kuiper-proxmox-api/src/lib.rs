@@ -274,9 +274,10 @@ impl ProxmoxVEAPI {
         let status = resp.status();
         if status.is_success() {
             let resp: NextIdResponse = resp.json().await?;
-            let vmid: u32 = resp.data.parse().map_err(|_| {
-                Error::TaskFailed(format!("Invalid VMID response: {}", resp.data))
-            })?;
+            let vmid: u32 = resp
+                .data
+                .parse()
+                .map_err(|_| Error::TaskFailed(format!("Invalid VMID response: {}", resp.data)))?;
             Ok(vmid)
         } else {
             error!("Failed to get next VMID: {status}");
@@ -310,7 +311,11 @@ impl ProxmoxVEAPI {
             name: name.to_string(),
             full: if linked { Some(0) } else { Some(1) },
             // storage parameter is not allowed for linked clones
-            storage: if linked { None } else { storage.map(|s| s.to_string()) },
+            storage: if linked {
+                None
+            } else {
+                storage.map(|s| s.to_string())
+            },
             target: Some(self.node().to_string()),
         };
 
@@ -423,7 +428,11 @@ impl ProxmoxVEAPI {
 
     /// Get network interfaces from QEMU guest agent.
     pub async fn get_network_interfaces(&self, vmid: u32) -> Result<Vec<NetworkInterface>> {
-        let path = format!("nodes/{}/qemu/{}/agent/network-get-interfaces", self.node(), vmid);
+        let path = format!(
+            "nodes/{}/qemu/{}/agent/network-get-interfaces",
+            self.node(),
+            vmid
+        );
         let url = self.base_url.join(&path).unwrap();
 
         let resp = self.request(Method::GET, url).send().await?;
@@ -445,7 +454,11 @@ impl ProxmoxVEAPI {
         // UPID format: UPID:node:pid:pstart:starttime:type:id:user@realm:
         // Extract node from UPID
         let parts: Vec<&str> = upid.split(':').collect();
-        let node = if parts.len() > 1 { parts[1] } else { self.node() };
+        let node = if parts.len() > 1 {
+            parts[1]
+        } else {
+            self.node()
+        };
 
         let path = format!("nodes/{}/tasks/{}/status", node, urlencoding::encode(upid));
         let url = self.base_url.join(&path).unwrap();
@@ -465,7 +478,8 @@ impl ProxmoxVEAPI {
     ///
     /// Polls the task status until it completes or times out.
     pub async fn wait_for_task(&self, upid: &str) -> Result<()> {
-        self.wait_for_task_with_timeout(upid, Duration::from_secs(300)).await
+        self.wait_for_task_with_timeout(upid, Duration::from_secs(300))
+            .await
     }
 
     /// Wait for a Proxmox task to complete with a custom timeout.

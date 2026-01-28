@@ -38,8 +38,8 @@
 
 use anyhow::{Context, Result};
 use figment::{
-    providers::{Env, Format, Toml},
     Figment,
+    providers::{Env, Format, Toml},
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -222,10 +222,7 @@ impl GitHubConfig {
             Ok(key.replace("\\n", "\n"))
         } else if let Some(ref path) = self.private_key_path {
             std::fs::read_to_string(path).with_context(|| {
-                format!(
-                    "Failed to read GitHub App private key: {}",
-                    path.display()
-                )
+                format!("Failed to read GitHub App private key: {}", path.display())
             })
         } else {
             Err(anyhow::anyhow!(
@@ -290,8 +287,7 @@ impl TlsConfig {
 
 /// SQLite database configuration (used when compiled with `sqlite` feature).
 #[cfg(feature = "sqlite")]
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct DatabaseConfig {
     /// Path to the SQLite database file.
     /// If not specified, defaults to `coordinator.db` in the data directory.
@@ -407,9 +403,7 @@ impl RunnerScope {
                 format!("/orgs/{name}/actions/runners/registration-token")
             }
             RunnerScope::Repository { owner, repo } => {
-                format!(
-                    "/repos/{owner}/{repo}/actions/runners/registration-token"
-                )
+                format!("/repos/{owner}/{repo}/actions/runners/registration-token")
             }
         }
     }
@@ -463,9 +457,12 @@ impl Config {
         // Add environment variables (always, to allow overrides)
         figment = figment.merge(Env::prefixed("KUIPER_").split("__"));
 
-        let config: Config = figment
-            .extract()
-            .with_context(|| format!("Failed to load config from {} and environment", path.display()))?;
+        let config: Config = figment.extract().with_context(|| {
+            format!(
+                "Failed to load config from {} and environment",
+                path.display()
+            )
+        })?;
 
         Ok(config)
     }
@@ -509,19 +506,25 @@ impl Config {
             runners: vec![
                 RunnerConfig {
                     labels: vec!["self-hosted".into(), "macOS".into(), "ARM64".into()],
-                    runner_scope: RunnerScope::Organization { name: "test-org".into() },
+                    runner_scope: RunnerScope::Organization {
+                        name: "test-org".into(),
+                    },
                     count: 1,
                     runner_group: None,
                 },
                 RunnerConfig {
                     labels: vec!["self-hosted".into(), "Linux".into(), "X64".into()],
-                    runner_scope: RunnerScope::Organization { name: "test-org".into() },
+                    runner_scope: RunnerScope::Organization {
+                        name: "test-org".into(),
+                    },
                     count: 1,
                     runner_group: None,
                 },
                 RunnerConfig {
                     labels: vec!["self-hosted".into(), "Windows".into(), "X64".into()],
-                    runner_scope: RunnerScope::Organization { name: "test-org".into() },
+                    runner_scope: RunnerScope::Organization {
+                        name: "test-org".into(),
+                    },
                     count: 1,
                     runner_group: None,
                 },
@@ -816,7 +819,10 @@ name = "my-org"
         assert_eq!(webhook.path, "/github/webhook");
         assert_eq!(webhook.secret, "test-secret");
         assert_eq!(webhook.label_mappings.len(), 1);
-        assert_eq!(webhook.label_mappings[0].labels, vec!["self-hosted", "macOS"]);
+        assert_eq!(
+            webhook.label_mappings[0].labels,
+            vec!["self-hosted", "macOS"]
+        );
     }
 
     #[test]

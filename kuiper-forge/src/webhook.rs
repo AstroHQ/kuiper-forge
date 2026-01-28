@@ -227,17 +227,19 @@ async fn handle_webhook(
             );
 
             // Match labels to find runner scope
-            let mapping =
-                match match_labels(&event.workflow_job.labels, &state.config.label_mappings) {
-                    Some(m) => m,
-                    None => {
-                        info!(
+            let mapping = match match_labels(
+                &event.workflow_job.labels,
+                &state.config.label_mappings,
+            ) {
+                Some(m) => m,
+                None => {
+                    info!(
                         "No label mapping matches job {} labels {:?} - ignoring (probably a GitHub-hosted runner job)",
                         event.workflow_job.id, event.workflow_job.labels
                     );
-                        return StatusCode::OK;
-                    }
-                };
+                    return StatusCode::OK;
+                }
+            };
 
             // Use configured runner_scope, or default to the organization from the webhook
             let runner_scope = mapping.runner_scope.clone().unwrap_or_else(|| {

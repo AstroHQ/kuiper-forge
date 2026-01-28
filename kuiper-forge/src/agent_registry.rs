@@ -5,12 +5,12 @@
 
 // Allow dead code for fields/methods that may be useful for future features
 
+use anyhow::{Result, anyhow};
 use kuiper_agent_proto::{AgentMessage, CoordinatorMessage};
-use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 /// Type of agent (Tart for macOS, Proxmox for Windows/Linux)
@@ -109,7 +109,8 @@ impl ConnectedAgent {
     /// Get available capacity (number of VMs that can still be created)
     /// Takes into account both active VMs and reserved slots
     pub fn available_capacity(&self) -> usize {
-        self.max_vms.saturating_sub(self.active_vms + self.reserved_slots)
+        self.max_vms
+            .saturating_sub(self.active_vms + self.reserved_slots)
     }
 
     /// Reserve a slot for an upcoming VM creation
@@ -131,12 +132,17 @@ impl ConnectedAgent {
     /// Check if this agent matches all required labels (case-insensitive)
     pub fn matches_labels(&self, required_labels: &[String]) -> bool {
         required_labels.iter().all(|required| {
-            self.labels.iter().any(|label| label.eq_ignore_ascii_case(required))
+            self.labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(required))
         })
     }
 
     /// Register a pending command and return the response channel
-    pub async fn register_pending_command(&self, command_id: &str) -> oneshot::Receiver<AgentMessage> {
+    pub async fn register_pending_command(
+        &self,
+        command_id: &str,
+    ) -> oneshot::Receiver<AgentMessage> {
         let (tx, rx) = oneshot::channel();
         let mut pending = self.pending_commands.write().await;
         pending.insert(command_id.to_string(), tx);
@@ -146,11 +152,10 @@ impl ConnectedAgent {
     /// Complete a pending command with a response
     pub async fn complete_command(&self, command_id: &str, response: AgentMessage) -> bool {
         let mut pending = self.pending_commands.write().await;
-        match pending.remove(command_id) { Some(tx) => {
-            tx.send(response).is_ok()
-        } _ => {
-            false
-        }}
+        match pending.remove(command_id) {
+            Some(tx) => tx.send(response).is_ok(),
+            _ => false,
+        }
     }
 
     /// Update the last seen timestamp
@@ -278,9 +283,10 @@ impl AgentRegistry {
                 // We need to check labels without await here
                 // So we'll use try_read for a quick check
                 if let Ok(agent) = agent.try_read()
-                    && agent.matches_labels(labels) {
-                        return Some(id.clone());
-                    }
+                    && agent.matches_labels(labels)
+                {
+                    return Some(id.clone());
+                }
                 None
             })
             .collect()
@@ -383,20 +389,21 @@ impl AgentRegistry {
     /// Reserve a slot on an agent for an upcoming VM creation
     /// Returns true if reservation succeeded
     pub async fn reserve_slot(&self, agent_id: &str) -> bool {
-        match self.get(agent_id).await { Some(agent) => {
-            let mut agent = agent.write().await;
-            let reserved = agent.reserve_slot();
-            if reserved {
-                debug!(
-                    agent_id = %agent_id,
-                    reserved_slots = agent.reserved_slots,
-                    "Slot reserved"
-                );
+        match self.get(agent_id).await {
+            Some(agent) => {
+                let mut agent = agent.write().await;
+                let reserved = agent.reserve_slot();
+                if reserved {
+                    debug!(
+                        agent_id = %agent_id,
+                        reserved_slots = agent.reserved_slots,
+                        "Slot reserved"
+                    );
+                }
+                reserved
             }
-            reserved
-        } _ => {
-            false
-        }}
+            _ => false,
+        }
     }
 
     /// Release a reserved slot on an agent
@@ -522,9 +529,7 @@ mod tests {
         assert_eq!(registry.count().await, 1);
 
         // Find by labels
-        let found = registry
-            .find_available_agent(&["macos".to_string()])
-            .await;
+        let found = registry.find_available_agent(&["macos".to_string()]).await;
         assert_eq!(found, Some("agent_1".to_string()));
 
         // Not found with wrong labels
@@ -555,22 +560,14 @@ mod tests {
             .await;
 
         // Initially has capacity of 2
-        assert_eq!(
-            registry.available_capacity(&["macos".to_string()]).await,
-            2
-        );
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 2);
 
         // Update to have 2 active VMs (no capacity)
         registry.update_status("agent_1", 2).await;
-        assert_eq!(
-            registry.available_capacity(&["macos".to_string()]).await,
-            0
-        );
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
         // Should not find available agent now
-        let found = registry
-            .find_available_agent(&["macos".to_string()])
-            .await;
+        let found = registry.find_available_agent(&["macos".to_string()]).await;
         assert!(found.is_none());
     }
 }

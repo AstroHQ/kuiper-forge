@@ -49,10 +49,7 @@ impl RunnerStateStore {
     pub async fn load_and_log(&self) {
         match self.get_all_runners().await {
             Ok(runners) if !runners.is_empty() => {
-                info!(
-                    "Loaded {} active runner(s) from database",
-                    runners.len()
-                );
+                info!("Loaded {} active runner(s) from database", runners.len());
                 for (name, info) in &runners {
                     debug!(
                         "  {} on agent {} (created {})",
@@ -101,7 +98,10 @@ impl RunnerStateStore {
 
         match result {
             Ok(_) => {
-                debug!("Added runner {} to database (job_id={:?})", runner_name, job_id);
+                debug!(
+                    "Added runner {} to database (job_id={:?})",
+                    runner_name, job_id
+                );
             }
             Err(e) => {
                 error!("Failed to add runner {} to database: {}", runner_name, e);
@@ -124,7 +124,10 @@ impl RunnerStateStore {
                 // Runner wasn't in the database - that's fine
             }
             Err(e) => {
-                error!("Failed to remove runner {} from database: {}", runner_name, e);
+                error!(
+                    "Failed to remove runner {} from database: {}",
+                    runner_name, e
+                );
             }
         }
     }
@@ -200,7 +203,11 @@ impl RunnerStateStore {
     /// Returns the names of runners that were removed (VM no longer exists).
     /// This is called when we receive a status update from an agent - if a
     /// persisted runner's VM is no longer in the VM list, the runner has completed.
-    pub async fn reconcile_agent_vms(&self, agent_id: &str, vm_names: &[String]) -> Vec<(String, RunnerInfo)> {
+    pub async fn reconcile_agent_vms(
+        &self,
+        agent_id: &str,
+        vm_names: &[String],
+    ) -> Vec<(String, RunnerInfo)> {
         let runners_for_agent = self.get_runners_for_agent(agent_id).await;
         let mut removed = Vec::new();
 
@@ -235,7 +242,10 @@ impl RunnerStateStore {
         let runner_scope: RunnerScope = match serde_json::from_str(&scope_json) {
             Ok(s) => s,
             Err(e) => {
-                warn!("Failed to deserialize runner scope for {}: {}", runner_name, e);
+                warn!(
+                    "Failed to deserialize runner scope for {}: {}",
+                    runner_name, e
+                );
                 return None;
             }
         };

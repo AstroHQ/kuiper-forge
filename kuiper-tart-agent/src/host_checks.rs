@@ -23,7 +23,9 @@ pub fn check_tart_version() -> Result<String, String> {
     let output = Command::new("tart")
         .arg("--version")
         .output()
-        .map_err(|e| format!("Tart CLI not found: {e}. Install from https://github.com/cirruslabs/tart"))?;
+        .map_err(|e| {
+            format!("Tart CLI not found: {e}. Install from https://github.com/cirruslabs/tart")
+        })?;
 
     if !output.status.success() {
         return Err("Tart CLI failed to report version".to_string());
@@ -48,9 +50,7 @@ pub fn check_tart_version() -> Result<String, String> {
         Some(v) => Err(format!(
             "Tart version {version_str} not supported (found major version {v}, require {REQUIRED_TART_MAJOR}.x)"
         )),
-        None => Err(format!(
-            "Could not parse Tart version from: {version}"
-        )),
+        None => Err(format!("Could not parse Tart version from: {version}")),
     }
 }
 
@@ -135,8 +135,7 @@ pub fn check_dhcp_lease_time() -> Result<(), String> {
     if !output.status.success() {
         // The plist or key doesn't exist
         return Err(format!(
-            "DHCP lease time not configured. Internet Sharing bootpd settings not found at {}",
-            PLIST_PATH
+            "DHCP lease time not configured. Internet Sharing bootpd settings not found at {PLIST_PATH}"
         ));
     }
 
@@ -152,14 +151,12 @@ pub fn check_dhcp_lease_time() -> Result<(), String> {
             Ok(())
         } else {
             Err(format!(
-                "DHCP lease time is {}s, should be <= {}s for reliable VM IP acquisition",
-                lease_time, EXPECTED_LEASE_SECS
+                "DHCP lease time is {lease_time}s, should be <= {EXPECTED_LEASE_SECS}s for reliable VM IP acquisition"
             ))
         }
     } else {
         Err(format!(
-            "DHCPLeaseTimeSecs not set in Internet Sharing configuration (expected <= {}s)",
-            EXPECTED_LEASE_SECS
+            "DHCPLeaseTimeSecs not set in Internet Sharing configuration (expected <= {EXPECTED_LEASE_SECS}s)"
         ))
     }
 }
@@ -185,8 +182,7 @@ fn parse_dhcp_lease_time(output: &str) -> Option<u32> {
 /// Get the command to fix DHCP lease time.
 pub fn dhcp_lease_fix_command() -> String {
     format!(
-        "sudo defaults write {} bootpd -dict DHCPLeaseTimeSecs -int {}",
-        PLIST_PATH, EXPECTED_LEASE_SECS
+        "sudo defaults write {PLIST_PATH} bootpd -dict DHCPLeaseTimeSecs -int {EXPECTED_LEASE_SECS}"
     )
 }
 

@@ -29,7 +29,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
-use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
+use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::service::Routes;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
@@ -140,35 +140,34 @@ impl AgentServiceImpl {
         use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 
         // Try to get peer cert DER bytes from either tonic's TlsConnectInfo or our custom PeerCertificates
-        let cert_der: Vec<u8> = if let Some(tls_info) =
-            request.extensions().get::<TlsConnectInfo<TcpConnectInfo>>()
-        {
-            // Standard tonic TLS path (gRPC-only mode)
-            let certs = tls_info.peer_certs().ok_or_else(|| {
-                Status::unauthenticated(
-                    "No client certificate presented - mTLS required for agent service",
-                )
-            })?;
-            certs
-                .first()
-                .ok_or_else(|| Status::unauthenticated("Empty client certificate chain"))?
-                .to_vec()
-        } else if let Some(peer_certs) = request.extensions().get::<PeerCertificates>() {
-            // Custom TLS path (webhook mode with manual TLS handling)
-            peer_certs
-                .0
-                .first()
-                .ok_or_else(|| {
+        let cert_der: Vec<u8> =
+            if let Some(tls_info) = request.extensions().get::<TlsConnectInfo<TcpConnectInfo>>() {
+                // Standard tonic TLS path (gRPC-only mode)
+                let certs = tls_info.peer_certs().ok_or_else(|| {
                     Status::unauthenticated(
                         "No client certificate presented - mTLS required for agent service",
                     )
-                })?
-                .clone()
-        } else {
-            return Err(Status::unauthenticated(
-                "No TLS connection info - TLS required",
-            ));
-        };
+                })?;
+                certs
+                    .first()
+                    .ok_or_else(|| Status::unauthenticated("Empty client certificate chain"))?
+                    .to_vec()
+            } else if let Some(peer_certs) = request.extensions().get::<PeerCertificates>() {
+                // Custom TLS path (webhook mode with manual TLS handling)
+                peer_certs
+                    .0
+                    .first()
+                    .ok_or_else(|| {
+                        Status::unauthenticated(
+                            "No client certificate presented - mTLS required for agent service",
+                        )
+                    })?
+                    .clone()
+            } else {
+                return Err(Status::unauthenticated(
+                    "No TLS connection info - TLS required",
+                ));
+            };
 
         // Parse the certificate to extract CN
         let (_, cert) = x509_parser::parse_x509_certificate(&cert_der)
@@ -188,8 +187,7 @@ impl AgentServiceImpl {
 
 #[tonic::async_trait]
 impl AgentService for AgentServiceImpl {
-    type AgentStreamStream =
-        Pin<Box<dyn Stream<Item = Result<CoordinatorMessage, Status>> + Send>>;
+    type AgentStreamStream = Pin<Box<dyn Stream<Item = Result<CoordinatorMessage, Status>> + Send>>;
 
     async fn agent_stream(
         &self,
@@ -226,9 +224,10 @@ impl AgentService for AgentServiceImpl {
                     "tart" => AgentType::Tart,
                     "proxmox" => AgentType::Proxmox,
                     _ => {
-                        return Err(Status::invalid_argument(
-                            format!("Unknown agent type: {}", status.agent_type),
-                        ));
+                        return Err(Status::invalid_argument(format!(
+                            "Unknown agent type: {}",
+                            status.agent_type
+                        )));
                     }
                 };
 
@@ -289,7 +288,9 @@ impl AgentService for AgentServiceImpl {
                     vm_count = vm_names.len(),
                     "Agent connected with existing VMs, triggering recovery check"
                 );
-                notifier.notify_with_recovery(agent_id.clone(), vm_names).await;
+                notifier
+                    .notify_with_recovery(agent_id.clone(), vm_names)
+                    .await;
             }
         }
 
@@ -386,7 +387,9 @@ async fn handle_agent_message(
                 vm_count = status.vms.len(),
                 "Agent status update"
             );
-            registry.update_status(agent_id, status.active_vms as usize).await;
+            registry
+                .update_status(agent_id, status.active_vms as usize)
+                .await;
 
             // Reconcile persisted runner state against the agent's current VM list
             // This allows the recovery watcher to detect when VMs have completed
@@ -644,15 +647,11 @@ pub async fn run_server(
                             Ok(resp) => {
                                 let (parts, body) = resp.into_parts();
                                 let body: UnsyncBody = body
-                                    .map_err(|e| {
-                                        std::io::Error::other(e.to_string())
-                                    })
+                                    .map_err(|e| std::io::Error::other(e.to_string()))
                                     .boxed_unsync();
                                 Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::other(
-                                e.to_string(),
-                            )),
+                            Err(e) => Err(std::io::Error::other(e.to_string())),
                         }
                     } else {
                         // Route to HTTP (webhook) using axum
@@ -664,9 +663,7 @@ pub async fn run_server(
                             Ok(resp) => {
                                 let (parts, body) = resp.into_parts();
                                 let body: UnsyncBody = body
-                                    .map_err(|e| {
-                                        std::io::Error::other(e.to_string())
-                                    })
+                                    .map_err(|e| std::io::Error::other(e.to_string()))
                                     .boxed_unsync();
                                 Ok(hyper::Response::from_parts(parts, body))
                             }
@@ -715,7 +712,8 @@ async fn run_grpc_only_server(
 
     // Create services
     let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
-    let agent_service = AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
+    let agent_service =
+        AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
 
     info!(
         addr = %config.listen_addr,

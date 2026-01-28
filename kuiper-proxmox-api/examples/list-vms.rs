@@ -1,6 +1,6 @@
 use anyhow::Result;
 use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {

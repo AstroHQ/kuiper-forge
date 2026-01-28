@@ -5,10 +5,10 @@
 //! - Installation access token retrieval (with auto-discovery)
 //! - Runner registration token generation
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,10 +43,7 @@ pub struct MockTokenProvider;
 #[async_trait]
 impl RunnerTokenProvider for MockTokenProvider {
     async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
-        let fake_token = format!(
-            "dry-run-token-{}",
-            &uuid::Uuid::new_v4().to_string()[..8]
-        );
+        let fake_token = format!("dry-run-token-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         info!(
             "DRY-RUN: Generated fake registration token for {:?}: {}",
             scope, fake_token
@@ -198,13 +195,13 @@ impl GitHubClient {
 
         // Test JWT generation (validates private key)
         let _jwt = self.generate_jwt().context(
-            "Failed to generate JWT. Check that the private key is valid and matches the App ID."
+            "Failed to generate JWT. Check that the private key is valid and matches the App ID.",
         )?;
         debug!("JWT generation successful");
 
         // Discover installations (validates API access and app configuration)
         self.discover_installations().await.context(
-            "Failed to access GitHub API. Check your network connection and App credentials."
+            "Failed to access GitHub API. Check your network connection and App credentials.",
         )?;
 
         // Get the discovered accounts
@@ -327,17 +324,16 @@ impl GitHubClient {
         {
             let cached = self.cached_tokens.read().await;
             if let Some(token) = cached.get(&installation_id)
-                && token.is_valid() {
-                    return Ok(token.token.clone());
-                }
+                && token.is_valid()
+            {
+                return Ok(token.token.clone());
+            }
         }
 
         // Need to get a new token
         let jwt = self.generate_jwt()?;
 
-        let url = format!(
-            "{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens"
-        );
+        let url = format!("{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens");
 
         let response = self
             .http_client
@@ -439,7 +435,11 @@ impl GitHubClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("GitHub API error listing runners ({}): {}", status, body));
+            return Err(anyhow!(
+                "GitHub API error listing runners ({}): {}",
+                status,
+                body
+            ));
         }
 
         let runners_response: RunnersListResponse = response
@@ -476,7 +476,11 @@ impl GitHubClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("GitHub API error deleting runner ({}): {}", status, body));
+            return Err(anyhow!(
+                "GitHub API error deleting runner ({}): {}",
+                status,
+                body
+            ));
         }
 
         Ok(())
@@ -493,9 +497,15 @@ impl GitHubClient {
 
         match runner {
             Some(r) => {
-                debug!("Found runner '{}' with ID {}, deleting...", runner_name, r.id);
+                debug!(
+                    "Found runner '{}' with ID {}, deleting...",
+                    runner_name, r.id
+                );
                 self.delete_runner(scope, r.id).await?;
-                info!("Successfully removed runner '{}' (ID {})", runner_name, r.id);
+                info!(
+                    "Successfully removed runner '{}' (ID {})",
+                    runner_name, r.id
+                );
                 Ok(())
             }
             None => {

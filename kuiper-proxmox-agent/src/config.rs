@@ -195,9 +195,8 @@ impl Config {
             ))
         })?;
 
-        let mut config: Config = toml::from_str(&content).map_err(|e| {
-            ConfigError::ParseError(format!("Failed to parse config: {e}"))
-        })?;
+        let mut config: Config = toml::from_str(&content)
+            .map_err(|e| ConfigError::ParseError(format!("Failed to parse config: {e}")))?;
 
         // Expand ~ in paths
         config.tls.ca_cert = expand_tilde(&config.tls.ca_cert);
@@ -254,8 +253,117 @@ impl Config {
             .join("kuiper-proxmox-agent")
     }
 
+    /// Get the default configuration file path.
+    pub fn default_config_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("kuiper-proxmox-agent")
+            .join("config.toml")
+    }
+
+    /// Generate a template configuration for initial registration.
+    pub fn generate_template(
+        coordinator_url: String,
+        coordinator_hostname: String,
+        certs_dir: PathBuf,
+    ) -> Self {
+        Self {
+            coordinator: CoordinatorConfig {
+                url: coordinator_url,
+                hostname: coordinator_hostname,
+            },
+            tls: TlsConfig {
+                ca_cert: certs_dir.join("ca.crt"),
+                certs_dir,
+            },
+            agent: AgentConfig { labels: vec![] },
+            proxmox: ProxmoxConfig {
+                api_url: String::new(), // User must set
+                node: "pve".to_string(),
+                token_id: String::new(),     // User must set
+                token_secret: String::new(), // User must set
+                accept_invalid_certs: false,
+            },
+            vm: VmConfig {
+                template_vmid: 9000,
+                storage: "local-lvm".to_string(),
+                linked_clone: true,
+                concurrent_vms: 5,
+                ip_timeout_secs: default_ip_timeout(),
+                clone_timeout_secs: default_clone_timeout(),
+                template_mappings: vec![],
+                runner_version: default_runner_version(),
+            },
+            ssh: SshConfig {
+                private_key_path: None, // User must set
+                password: None,
+                username: "ci".to_string(),
+                port: default_ssh_port(),
+                timeout_secs: default_ssh_timeout(),
+                retries: default_ssh_retries(),
+            },
+            cleanup: CleanupConfig::default(),
+        }
+    }
+
+    /// Save configuration to a TOML file.
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
+        // Create parent directory if needed
+        if let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ConfigError::IoError(format!("Failed to create config directory: {e}"))
+            })?;
+        }
+
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::ParseError(format!("Failed to serialize config: {e}")))?;
+
+        std::fs::write(path.as_ref(), content).map_err(|e| {
+            ConfigError::IoError(format!(
+                "Failed to write config file {:?}: {e}",
+                path.as_ref()
+            ))
+        })?;
+
+        Ok(())
+    }
+
     /// Validate the configuration.
     fn validate(&self) -> Result<(), ConfigError> {
+        let mut errors = Vec::new();
+
+        // Check required fields
+        if self.agent.labels.is_empty() {
+            errors.push(
+                "agent.labels: Labels to identify this agent (e.g., [\"proxmox\", \"x86_64\"])",
+            );
+        }
+
+        if self.proxmox.api_url.is_empty() {
+            errors
+                .push("proxmox.api_url: Proxmox API URL (e.g., \"https://pve.example.com:8006\")");
+        }
+
+        if self.proxmox.token_id.is_empty() {
+            errors.push("proxmox.token_id: API token ID (e.g., \"ci-runner@pve!runner\")");
+        }
+
+        if self.proxmox.token_secret.is_empty() {
+            errors.push("proxmox.token_secret: API token secret");
+        }
+
+        // Check SSH authentication
+        if self.ssh.private_key_path.is_none() && self.ssh.password.is_none() {
+            errors.push("ssh.private_key_path or ssh.password: SSH authentication method required");
+        }
+
+        if !errors.is_empty() {
+            return Err(ConfigError::ValidationError(format!(
+                "Configuration incomplete\n\nPlease edit the config file and set:\n  - {}\n\nThen start the agent:\n  kuiper-proxmox-agent",
+                errors.join("\n  - ")
+            )));
+        }
+
         // Validate coordinator URL
         if !self.coordinator.url.starts_with("https://") {
             return Err(ConfigError::ValidationError(
@@ -274,13 +382,6 @@ impl Config {
         if self.vm.concurrent_vms == 0 {
             return Err(ConfigError::ValidationError(
                 "concurrent_vms must be at least 1".to_string(),
-            ));
-        }
-
-        // Validate SSH authentication - at least one method must be provided
-        if self.ssh.private_key_path.is_none() && self.ssh.password.is_none() {
-            return Err(ConfigError::ValidationError(
-                "SSH config must have either private_key_path or password (or both)".to_string(),
             ));
         }
 
@@ -308,9 +409,10 @@ pub enum ConfigError {
 fn expand_tilde(path: &Path) -> PathBuf {
     if let Some(path_str) = path.to_str()
         && path_str.starts_with("~/")
-            && let Some(home) = dirs::home_dir() {
-                return home.join(&path_str[2..]);
-            }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(&path_str[2..]);
+    }
     path.to_path_buf()
 }
 
@@ -501,9 +603,10 @@ username = "vagrant"
         let config: Config = toml::from_str(toml).expect("Failed to parse config");
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("private_key_path or password"));
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("ssh.private_key_path or ssh.password"),
+            "Expected error message about SSH auth, got: {error_msg}"
+        );
     }
 }

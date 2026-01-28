@@ -7,10 +7,10 @@
 
 use crate::config::SshConfig;
 use crate::error::{Error, Result};
-use async_trait::async_trait;
-use russh::client::{self, Config, Handle, Handler};
 use russh::ChannelMsg;
-use russh_keys::PrivateKey;
+use russh::client::{self, Config, Handle, Handler};
+use russh::keys::PrivateKey;
+use russh::keys::key::PrivateKeyWithHashAlg;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -73,18 +73,16 @@ impl SshClient {
 
     /// Load a private key from a file.
     async fn load_private_key(path: &Path) -> Result<PrivateKey> {
-        let key_bytes = tokio::fs::read(path).await.map_err(|e| {
-            Error::ssh(format!("Failed to read private key {path:?}: {e}"))
-        })?;
+        let key_bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| Error::ssh(format!("Failed to read private key {path:?}: {e}")))?;
 
-        let key_str = String::from_utf8(key_bytes).map_err(|e| {
-            Error::ssh(format!("Invalid UTF-8 in key file: {e}"))
-        })?;
+        let key_str = String::from_utf8(key_bytes)
+            .map_err(|e| Error::ssh(format!("Invalid UTF-8 in key file: {e}")))?;
 
         // Try to decode the key (supports both encrypted and unencrypted keys)
-        russh_keys::PrivateKey::from_openssh(&key_str).map_err(|e| {
-            Error::ssh(format!("Failed to decode private key: {e}"))
-        })
+        PrivateKey::from_openssh(&key_str)
+            .map_err(|e| Error::ssh(format!("Failed to decode private key: {e}")))
     }
 
     /// Connect to a VM via SSH with retries.
@@ -97,7 +95,10 @@ impl SshClient {
         let mut last_error = None;
 
         for attempt in 1..=self.config.retries {
-            debug!("SSH connection attempt {}/{} to {}", attempt, self.config.retries, addr);
+            debug!(
+                "SSH connection attempt {}/{} to {}",
+                attempt, self.config.retries, addr
+            );
 
             match self.try_connect(&addr, connect_timeout).await {
                 Ok(session) => {
@@ -105,10 +106,7 @@ impl SshClient {
                     return Ok(session);
                 }
                 Err(e) => {
-                    warn!(
-                        "SSH connection attempt {} failed: {}",
-                        attempt, e
-                    );
+                    warn!("SSH connection attempt {} failed: {}", attempt, e);
                     last_error = Some(e);
 
                     if attempt < self.config.retries {
@@ -124,7 +122,11 @@ impl SshClient {
     }
 
     /// Attempt a single SSH connection.
-    async fn try_connect(&self, addr: &SocketAddr, connect_timeout: Duration) -> Result<SshSession> {
+    async fn try_connect(
+        &self,
+        addr: &SocketAddr,
+        connect_timeout: Duration,
+    ) -> Result<SshSession> {
         // Configure SSH client
         let ssh_config = Arc::new(Config::default());
         let handler = ClientHandler;
@@ -145,9 +147,7 @@ impl SshClient {
         .map_err(|e| Error::ssh(format!("SSH handshake failed: {e}")))?;
 
         // Authenticate based on configured method
-        let authenticated = self
-            .authenticate(&mut handle, connect_timeout)
-            .await?;
+        let authenticated = self.authenticate(&mut handle, connect_timeout).await?;
 
         if !authenticated {
             return Err(Error::ssh("SSH authentication failed: not authenticated"));
@@ -174,7 +174,10 @@ impl SshClient {
                 self.authenticate_password(handle, password, connect_timeout)
                     .await
             }
-            SshAuth::Both { private_key, password } => {
+            SshAuth::Both {
+                private_key,
+                password,
+            } => {
                 // Try public key first, fall back to password
                 match self
                     .authenticate_publickey(handle, private_key.clone(), connect_timeout)
@@ -198,13 +201,16 @@ impl SshClient {
         private_key: Arc<PrivateKey>,
         connect_timeout: Duration,
     ) -> Result<bool> {
-        timeout(
+        let key_with_hash = PrivateKeyWithHashAlg::new(private_key, None);
+        let result = timeout(
             connect_timeout,
-            handle.authenticate_publickey(&self.config.username, private_key),
+            handle.authenticate_publickey(&self.config.username, key_with_hash),
         )
         .await
         .map_err(|_| Error::timeout("SSH public key authentication timed out"))?
-        .map_err(|e| Error::ssh(format!("SSH public key authentication error: {e}")))
+        .map_err(|e| Error::ssh(format!("SSH public key authentication error: {e}")))?;
+
+        Ok(result.success())
     }
 
     /// Authenticate with password.
@@ -214,13 +220,15 @@ impl SshClient {
         password: &str,
         connect_timeout: Duration,
     ) -> Result<bool> {
-        timeout(
+        let result = timeout(
             connect_timeout,
             handle.authenticate_password(&self.config.username, password),
         )
         .await
         .map_err(|_| Error::timeout("SSH password authentication timed out"))?
-        .map_err(|e| Error::ssh(format!("SSH password authentication error: {e}")))
+        .map_err(|e| Error::ssh(format!("SSH password authentication error: {e}")))?;
+
+        Ok(result.success())
     }
 
     /// Wait for SSH to become available on a VM.
@@ -262,13 +270,16 @@ impl SshSession {
     pub async fn execute(&mut self, command: &str) -> Result<CommandOutput> {
         debug!("Executing SSH command: {}", command);
 
-        let mut channel = self.handle.channel_open_session().await.map_err(|e| {
-            Error::ssh(format!("Failed to open SSH channel: {e}"))
-        })?;
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| Error::ssh(format!("Failed to open SSH channel: {e}")))?;
 
-        channel.exec(true, command).await.map_err(|e| {
-            Error::ssh(format!("Failed to execute command: {e}"))
-        })?;
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|e| Error::ssh(format!("Failed to execute command: {e}")))?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -313,9 +324,10 @@ impl SshSession {
 
     /// Close the SSH session.
     pub async fn close(self) -> Result<()> {
-        self.handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.map_err(|e| {
-            Error::ssh(format!("Failed to close SSH session: {e}"))
-        })?;
+        self.handle
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await
+            .map_err(|e| Error::ssh(format!("Failed to close SSH session: {e}")))?;
         Ok(())
     }
 }
@@ -328,17 +340,15 @@ pub struct CommandOutput {
     pub exit_code: u32,
 }
 
-
 /// SSH client handler for connection events.
 struct ClientHandler;
 
-#[async_trait]
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::PublicKey,
+        _server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
         // Accept all server keys for now
         // In production, you might want to implement known_hosts checking
@@ -399,13 +409,7 @@ impl RunnerConfigBuilder {
     }
 
     /// Build the runner configuration command.
-    pub fn config_command(
-        &self,
-        url: &str,
-        token: &str,
-        labels: &[String],
-        name: &str,
-    ) -> String {
+    pub fn config_command(&self, url: &str, token: &str, labels: &[String], name: &str) -> String {
         let labels_str = labels.join(",");
 
         if self.is_windows {
@@ -455,9 +459,7 @@ impl RunnerConfigBuilder {
             self.wrap_powershell(&ps_cmd)
         } else {
             let escaped_dir = escape_posix_path(&self.runner_dir);
-            format!(
-                "test -d {escaped_dir} && test -f {escaped_dir}/run.sh && echo 'installed'",
-            )
+            format!("test -d {escaped_dir} && test -f {escaped_dir}/run.sh && echo 'installed'",)
         }
     }
 
@@ -582,7 +584,11 @@ mod tests {
         assert!(cmd.starts_with("powershell -EncodedCommand "));
         // The encoded command should be valid base64 (alphanumeric + /+=)
         let encoded = cmd.strip_prefix("powershell -EncodedCommand ").unwrap();
-        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     #[test]
@@ -638,5 +644,4 @@ mod tests {
         // PowerShell escapes single quotes by doubling them
         assert!(cmd.contains("'TOKEN''injection'"));
     }
-
 }

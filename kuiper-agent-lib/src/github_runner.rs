@@ -94,11 +94,12 @@ pub async fn fetch_latest_version() -> Option<String> {
         if let Some(v_idx) = after_tag
             .find(':')
             .and_then(|colon| after_tag[colon..].find("\"v").map(|v| colon + v + 2))
-            && let Some(end) = after_tag[v_idx..].find('"') {
-                let version = &after_tag[v_idx..v_idx + end];
-                info!("Latest GitHub Actions runner version: v{}", version);
-                return Some(version.to_string());
-            }
+            && let Some(end) = after_tag[v_idx..].find('"')
+        {
+            let version = &after_tag[v_idx..v_idx + end];
+            info!("Latest GitHub Actions runner version: v{}", version);
+            return Some(version.to_string());
+        }
     }
 
     debug!("Could not parse runner version from GitHub API response");
@@ -245,7 +246,12 @@ mod tests {
 
     #[test]
     fn test_install_command_windows() {
-        let cmd = install_command(r"C:\actions-runner", "2.321.0", Platform::Windows, Arch::X64);
+        let cmd = install_command(
+            r"C:\actions-runner",
+            "2.321.0",
+            Platform::Windows,
+            Arch::X64,
+        );
         // Should set variables and include script body
         assert!(cmd.contains(r"$RunnerDir = 'C:\actions-runner'"));
         assert!(cmd.contains("actions-runner-win-x64-2.321.0.zip"));

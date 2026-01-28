@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -65,7 +65,9 @@ impl FleetNotifier {
     /// Called when an agent connects with VMs that may match persisted runners.
     /// The fleet manager will spawn watchers for matching runners.
     pub async fn notify_with_recovery(&self, agent_id: String, vm_names: Vec<String>) {
-        let _ = self.recovery_tx.try_send(AgentRecoveryInfo { agent_id, vm_names });
+        let _ = self
+            .recovery_tx
+            .try_send(AgentRecoveryInfo { agent_id, vm_names });
         // Also trigger a reconcile
         let _ = self.notify_tx.try_send(());
     }
@@ -182,7 +184,9 @@ impl FleetManager {
                 info!("Runners will be created on-demand via GitHub webhook events");
                 if self.config.provisioning.webhook.is_none() {
                     warn!("Webhook mode enabled but no webhook configuration found!");
-                    warn!("Add [provisioning.webhook] section to your config to receive webhook events");
+                    warn!(
+                        "Add [provisioning.webhook] section to your config to receive webhook events"
+                    );
                 }
                 self.run_webhook_loop().await;
             }
@@ -413,7 +417,11 @@ impl FleetManager {
         }
 
         // Get registration token from provider (GitHub API or mock)
-        let token = match self.token_provider.get_registration_token(runner_scope).await {
+        let token = match self
+            .token_provider
+            .get_registration_token(runner_scope)
+            .await
+        {
             Ok(t) => t,
             Err(e) => {
                 // Release the reserved slot since we won't use it
@@ -501,7 +509,10 @@ impl FleetManager {
                         // Legacy agents may respond with a full lifecycle result
                         agent_registry.release_slot(&agent_id_clone).await;
                         if result.success {
-                            info!("Runner {} completed successfully (webhook)", runner_name_clone);
+                            info!(
+                                "Runner {} completed successfully (webhook)",
+                                runner_name_clone
+                            );
                         } else {
                             warn!("Runner {} failed: {}", runner_name_clone, result.error);
                         }
@@ -559,12 +570,16 @@ impl FleetManager {
     /// For each VM that matches a persisted runner, spawn a watcher task to
     /// monitor the runner's completion.
     async fn handle_agent_recovery(&self, recovery_info: AgentRecoveryInfo) {
-        let persisted_runners = self.runner_state.get_runners_for_agent(&recovery_info.agent_id).await;
+        let persisted_runners = self
+            .runner_state
+            .get_runners_for_agent(&recovery_info.agent_id)
+            .await;
 
         if persisted_runners.is_empty() {
             info!(
                 "Agent '{}' has {} VMs but no persisted runners to recover",
-                recovery_info.agent_id, recovery_info.vm_names.len()
+                recovery_info.agent_id,
+                recovery_info.vm_names.len()
             );
             return;
         }
@@ -740,7 +755,10 @@ impl FleetManager {
 
     /// Find the runner config index that matches a runner scope.
     fn find_config_for_runner(&self, runner_scope: &crate::config::RunnerScope) -> Option<usize> {
-        self.config.runners.iter().position(|rc| rc.runner_scope == *runner_scope)
+        self.config
+            .runners
+            .iter()
+            .position(|rc| rc.runner_scope == *runner_scope)
     }
 
     /// Spawn a watcher task for a recovered runner.
@@ -895,7 +913,10 @@ impl FleetManager {
         let all_agents = self.agent_registry.list_all().await;
         info!(
             "Pool {:?}: need {} runners, found {} agents, total capacity={}",
-            runner_config.labels, needed, all_agents.len(), capacity
+            runner_config.labels,
+            needed,
+            all_agents.len(),
+            capacity
         );
         for agent in &all_agents {
             info!(
@@ -904,9 +925,10 @@ impl FleetManager {
                 agent.labels,
                 agent.active_vms,
                 agent.max_vms,
-                runner_config.labels.iter().all(|l|
-                    agent.labels.iter().any(|al| al.eq_ignore_ascii_case(l))
-                )
+                runner_config
+                    .labels
+                    .iter()
+                    .all(|l| agent.labels.iter().any(|al| al.eq_ignore_ascii_case(l)))
             );
         }
 
@@ -930,7 +952,9 @@ impl FleetManager {
         for i in 0..to_create {
             info!(
                 "Pool {:?}: creating runner {}/{}",
-                runner_config.labels, i + 1, to_create
+                runner_config.labels,
+                i + 1,
+                to_create
             );
 
             // Find an available agent with matching labels
@@ -946,7 +970,9 @@ impl FleetManager {
                 None => {
                     warn!(
                         "No available agent for labels {:?} on iteration {}/{}",
-                        runner_config.labels, i + 1, to_create
+                        runner_config.labels,
+                        i + 1,
+                        to_create
                     );
                     break;
                 }
@@ -1050,7 +1076,8 @@ impl FleetManager {
                                 );
                                 {
                                     let mut pool = pool.write().await;
-                                    if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
+                                    if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy)
+                                    {
                                         *p = p.saturating_sub(1);
                                     }
                                 }
@@ -1079,10 +1106,7 @@ impl FleetManager {
                             if result.success {
                                 info!("Runner {} completed successfully", runner_name_clone);
                             } else {
-                                warn!(
-                                    "Runner {} failed: {}",
-                                    runner_name_clone, result.error
-                                );
+                                warn!("Runner {} failed: {}", runner_name_clone, result.error);
                             }
                             if let Err(e) = token_provider
                                 .remove_runner(&runner_scope, &runner_name_clone)

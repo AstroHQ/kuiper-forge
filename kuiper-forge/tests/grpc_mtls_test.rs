@@ -30,7 +30,7 @@ struct TestFixture {
 impl TestFixture {
     /// Create test CA, server cert, and client cert
     async fn new(webhook_mode: bool) -> Self {
-        use kuiper_forge::auth::{generate_server_cert, init_ca, AuthManager, AuthStore};
+        use kuiper_forge::auth::{AuthManager, AuthStore, generate_server_cert, init_ca};
         use kuiper_forge::config::{DatabaseConfig, TlsConfig, WebhookConfig};
         use kuiper_forge::db::Database;
 
@@ -59,9 +59,8 @@ impl TestFixture {
         let db_config = DatabaseConfig::default();
         let db = Arc::new(Database::new(&db_config, temp_dir.path()).await.unwrap());
         let auth_store = Arc::new(AuthStore::new(db.pool().clone()));
-        let auth_manager = Arc::new(
-            AuthManager::new(auth_store.clone(), &ca_cert_path, &ca_key_path).unwrap(),
-        );
+        let auth_manager =
+            Arc::new(AuthManager::new(auth_store.clone(), &ca_cert_path, &ca_key_path).unwrap());
 
         // Create agent registry
         let agent_registry = Arc::new(kuiper_forge::agent_registry::AgentRegistry::new());

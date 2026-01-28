@@ -68,7 +68,10 @@ impl From<&VmState> for VmInfo {
             vm_id: state.vm_id.clone(),
             name: state.name.clone(),
             state: state.state.as_str().to_string(),
-            ip_address: state.ip_address.map(|ip| ip.to_string()).unwrap_or_default(),
+            ip_address: state
+                .ip_address
+                .map(|ip| ip.to_string())
+                .unwrap_or_default(),
         }
     }
 }
@@ -191,7 +194,10 @@ impl VmManager {
     pub async fn wait_for_ready(&self, vm_id: &str, timeout: Duration) -> Result<Ipv4Addr> {
         let deadline = Instant::now() + timeout;
 
-        info!("Waiting for VM {} to be ready (timeout: {:?})", vm_id, timeout);
+        info!(
+            "Waiting for VM {} to be ready (timeout: {:?})",
+            vm_id, timeout
+        );
 
         // Poll for IP address
         while Instant::now() < deadline {
@@ -277,7 +283,11 @@ impl VmManager {
         // Start the runner and wait for it to complete, streaming output to log file
         ssh::start_runner_and_wait(ip, &self.ssh_config, &log_file).await?;
 
-        info!("Runner completed on VM {} (log: {})", vm_id, log_file.display());
+        info!(
+            "Runner completed on VM {} (log: {})",
+            vm_id,
+            log_file.display()
+        );
         Ok(())
     }
 
@@ -397,10 +407,7 @@ impl VmManager {
 
     /// Stop a VM.
     async fn tart_stop(&self, name: &str) -> Result<()> {
-        let output = Command::new("tart")
-            .args(["stop", name])
-            .output()
-            .await?;
+        let output = Command::new("tart").args(["stop", name]).output().await?;
 
         // Ignore failure - VM might already be stopped
         if !output.status.success() {
@@ -415,10 +422,7 @@ impl VmManager {
 
     /// Delete a VM.
     async fn tart_delete(&self, name: &str) -> Result<()> {
-        let output = Command::new("tart")
-            .args(["delete", name])
-            .output()
-            .await?;
+        let output = Command::new("tart").args(["delete", name]).output().await?;
 
         if output.status.success() {
             Ok(())
@@ -430,10 +434,7 @@ impl VmManager {
 
     /// Get the IP address of a VM.
     async fn tart_ip(&self, name: &str) -> Result<Option<Ipv4Addr>> {
-        let output = Command::new("tart")
-            .args(["ip", name])
-            .output()
-            .await?;
+        let output = Command::new("tart").args(["ip", name]).output().await?;
 
         if output.status.success() {
             let ip_str = String::from_utf8_lossy(&output.stdout);

@@ -42,23 +42,41 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Registration bundle from coordinator (contains token + CA cert + URL).
-    /// Generated with: coordinator token create --url https://...
-    #[arg(long)]
-    register: Option<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Register this agent with the coordinator using a registration bundle
+    Register {
+        /// Registration bundle token from coordinator (kfr1_...)
+        #[arg(long)]
+        bundle: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let data_dir = Config::default_data_dir();
 
     // Initialize logging with file output
-    let data_dir = Config::default_data_dir();
     init_logging(&data_dir)?;
+
+    // Handle subcommands
+    if let Some(command) = args.command {
+        match command {
+            Commands::Register { bundle } => {
+                let config_path = args.config.unwrap_or_else(Config::default_config_path);
+                return cmd_register(&bundle, &config_path).await;
+            }
+        }
+    }
 
     info!("Starting kuiper-proxmox-agent");
 
-    // Load configuration
+    // Normal agent mode - load existing config
     let config = match &args.config {
         Some(path) => Config::load(path)?,
         None => Config::load_default()?,
@@ -69,6 +87,16 @@ async fn main() -> anyhow::Result<()> {
     debug!("Proxmox node: {}", config.proxmox.node);
     debug!("Template VMID: {}", config.vm.template_vmid);
     debug!("Max concurrent VMs: {}", config.vm.concurrent_vms);
+
+    // Verify certificates exist
+    let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
+    if !cert_store.has_certificates() {
+        eprintln!("Error: Certificates not found\n");
+        eprintln!("The config file exists but certificates are missing.");
+        eprintln!("Please re-register:");
+        eprintln!("  kuiper-proxmox-agent register --bundle <kfr1_token>");
+        std::process::exit(1);
+    }
 
     // Create Proxmox API client
     let proxmox = create_proxmox_client(&config)?;
@@ -96,46 +124,11 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Initialize certificate store
-    let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
-
-    // Handle registration bundle if provided
-    let registration_token = if let Some(ref bundle_str) = args.register {
-        let bundle = RegistrationBundle::decode(bundle_str)
-            .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {e}"))?;
-
-        info!("Using registration bundle");
-
-        // Validate that bundle URL matches config URL to ensure the CA cert and token
-        // are actually for the coordinator we're connecting to
-        bundle
-            .validate_url(&config.coordinator.url)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        // Write CA cert from bundle to certs directory
-        std::fs::create_dir_all(&config.tls.certs_dir)?;
-        let ca_dest = config.tls.certs_dir.join("ca.crt");
-        std::fs::write(&ca_dest, &bundle.ca_cert_pem)?;
-        info!("Saved CA certificate from bundle to {:?}", ca_dest);
-
-        Some(bundle.token)
-    } else {
-        // Copy CA cert to certs_dir if it doesn't exist there
-        let ca_dest = config.tls.certs_dir.join("ca.crt");
-        if !ca_dest.exists() && config.tls.ca_cert.exists() {
-            std::fs::create_dir_all(&config.tls.certs_dir)?;
-            std::fs::copy(&config.tls.ca_cert, &ca_dest)?;
-            info!("Copied CA certificate to {:?}", ca_dest);
-        }
-
-        None
-    };
-
     // Clone vm_manager for shutdown cleanup
     let shutdown_vm_manager = vm_manager.clone();
 
     // Create agent runner
-    let agent = ProxmoxAgent::new(config, vm_manager, cert_store, registration_token);
+    let agent = ProxmoxAgent::new(config, vm_manager, cert_store);
 
     // Run the agent with graceful shutdown handling
     tokio::select! {
@@ -149,6 +142,79 @@ async fn main() -> anyhow::Result<()> {
             info!("Graceful shutdown complete");
         }
     }
+
+    Ok(())
+}
+
+/// Handle the register subcommand to set up agent registration with the coordinator.
+async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<()> {
+    println!("Registering agent with coordinator...\n");
+
+    // 1. Parse bundle
+    let bundle = RegistrationBundle::decode(bundle_token)
+        .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {}", e))?;
+
+    println!("Coordinator: {}", bundle.coordinator_url);
+
+    // 2. Create cert store and save CA
+    let data_dir = Config::default_data_dir();
+    let certs_dir = data_dir.join("certs");
+    std::fs::create_dir_all(&certs_dir)?;
+
+    let cert_store = AgentCertStore::new(certs_dir.clone());
+    cert_store.save_ca(&bundle.ca_cert_pem)?;
+    println!("✓ Saved CA certificate");
+
+    // 3. Extract hostname from URL for TLS verification
+    let hostname = url::Url::parse(&bundle.coordinator_url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_else(|| "localhost".to_string());
+
+    // 4. Build agent config for registration
+    let agent_config = kuiper_agent_lib::AgentConfig {
+        coordinator_url: bundle.coordinator_url.clone(),
+        coordinator_hostname: hostname.clone(),
+        registration_token: Some(bundle.token),
+        agent_type: "proxmox".to_string(),
+        labels: vec![], // Empty for registration - user will set in config
+        max_vms: 5,     // Default - user will set in config
+    };
+
+    // 5. Connect and register
+    println!("Connecting to coordinator...");
+    let mut connector = kuiper_agent_lib::AgentConnector::new(agent_config, cert_store.clone());
+    let _client = connector
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("Registration failed: {}", e))?;
+
+    let agent_id = cert_store
+        .get_agent_id()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get agent ID after registration"))?;
+
+    println!("✓ Registration successful");
+    println!("✓ Agent ID: {agent_id}");
+
+    // 6. Generate initial config with placeholders
+    // Note: User must edit this config to add Proxmox API credentials and VM settings
+    let config = Config::generate_template(bundle.coordinator_url, hostname, certs_dir);
+
+    config.save(config_path)?;
+    println!("✓ Configuration saved\n");
+
+    // 7. Print next steps
+    println!("Next steps:");
+    println!("  1. Edit {} and configure:", config_path.display());
+    println!("     • agent.labels (e.g., [\"proxmox\", \"x86_64\"])");
+    println!("     • proxmox.* settings (API URL, credentials, node)");
+    println!("     • vm.* settings (template ID, resources)");
+    println!("     • ssh.* settings (user, private key path)");
+    println!("  2. Ensure VM template exists in Proxmox");
+    println!("  3. Start agent: kuiper-proxmox-agent\n");
+
+    println!("Certificate location: {}", cert_store.base_dir().display());
+    println!("Config location:      {}", config_path.display());
 
     Ok(())
 }
@@ -211,8 +277,6 @@ struct ProxmoxAgent {
     config: Config,
     vm_manager: Arc<VmManager>,
     cert_store: AgentCertStore,
-    /// Registration token from CLI (for first-time registration)
-    registration_token: Option<String>,
 }
 
 async fn send_command_ack(
@@ -253,17 +317,11 @@ async fn send_runner_event(
 
 impl ProxmoxAgent {
     /// Create a new Proxmox agent.
-    fn new(
-        config: Config,
-        vm_manager: Arc<VmManager>,
-        cert_store: AgentCertStore,
-        registration_token: Option<String>,
-    ) -> Arc<Self> {
+    fn new(config: Config, vm_manager: Arc<VmManager>, cert_store: AgentCertStore) -> Arc<Self> {
         Arc::new(Self {
             config,
             vm_manager,
             cert_store,
-            registration_token,
         })
     }
 
@@ -292,7 +350,7 @@ impl ProxmoxAgent {
         let agent_config = LibAgentConfig {
             coordinator_url: self.config.coordinator.url.clone(),
             coordinator_hostname: self.config.coordinator.hostname.clone(),
-            registration_token: self.registration_token.clone(),
+            registration_token: None, // Already registered, using stored certificates
             agent_type: "proxmox".to_string(),
             labels: self.config.agent.labels.clone(),
             max_vms: self.config.vm.concurrent_vms,
@@ -640,4 +698,3 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
     info!("Logging to: {}", log_dir.display());
     Ok(())
 }
-

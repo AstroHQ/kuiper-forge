@@ -38,12 +38,10 @@ pub const DELETE_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = ?"
 pub const DELETE_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = $1";
 
 #[cfg(feature = "sqlite")]
-pub const CONSUME_TOKEN: &str =
-    "DELETE FROM registration_tokens WHERE token = ? RETURNING token, expires_at, created_by, created_at";
+pub const CONSUME_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = ? RETURNING token, expires_at, created_by, created_at";
 
 #[cfg(feature = "postgres")]
-pub const CONSUME_TOKEN: &str =
-    "DELETE FROM registration_tokens WHERE token = $1 RETURNING token, expires_at, created_by, created_at";
+pub const CONSUME_TOKEN: &str = "DELETE FROM registration_tokens WHERE token = $1 RETURNING token, expires_at, created_by, created_at";
 
 #[cfg(feature = "sqlite")]
 pub const DELETE_EXPIRED_TOKENS: &str = "DELETE FROM registration_tokens WHERE expires_at < ?";
@@ -124,31 +122,25 @@ pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = 
 pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNER: &str =
-    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = ?";
+pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNER: &str =
-    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = $1";
+pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNERS_BY_AGENT: &str =
-    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = ?";
+pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNERS_BY_AGENT: &str =
-    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = $1";
+pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = $1";
 
 pub const SELECT_ALL_RUNNERS: &str =
     "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNER_BY_JOB_ID: &str =
-    "SELECT 1 FROM active_runners WHERE job_id = ?";
+pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNER_BY_JOB_ID: &str =
-    "SELECT 1 FROM active_runners WHERE job_id = $1";
+pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = $1";
 
 // Bulk delete for agent disconnect cleanup (not yet used, but available)
 #[allow(dead_code)]
@@ -182,12 +174,9 @@ pub const DELETE_PENDING_JOB: &str = "DELETE FROM pending_webhook_jobs WHERE job
 pub const DELETE_PENDING_JOB: &str = "DELETE FROM pending_webhook_jobs WHERE job_id = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_PENDING_JOB: &str =
-    "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs WHERE job_id = ?";
+pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs WHERE job_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_PENDING_JOB: &str =
-    "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs WHERE job_id = $1";
+pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs WHERE job_id = $1";
 
-pub const SELECT_ALL_PENDING_JOBS: &str =
-    "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs ORDER BY created_at ASC";
+pub const SELECT_ALL_PENDING_JOBS: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs ORDER BY created_at ASC";

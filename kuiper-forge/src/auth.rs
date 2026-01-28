@@ -8,10 +8,10 @@
 
 use crate::db::DbPool;
 use crate::sql;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
-use rand::distributions::Alphanumeric;
 use rand::Rng;
+use rand::distributions::Alphanumeric;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
@@ -308,8 +308,8 @@ impl AuthManager {
             .with_context(|| format!("Failed to read CA key: {}", ca_key_path.display()))?;
 
         // Parse the CA key
-        let ca_key = KeyPair::from_pem(&ca_key_pem)
-            .map_err(|e| anyhow!("Failed to parse CA key: {}", e))?;
+        let ca_key =
+            KeyPair::from_pem(&ca_key_pem).map_err(|e| anyhow!("Failed to parse CA key: {}", e))?;
 
         // Extract subject from the actual CA certificate on disk
         let ca_subject = extract_ca_subject(&ca_cert_pem)?;
@@ -552,8 +552,8 @@ pub fn generate_server_cert(
     let ca_key_pem = fs::read_to_string(ca_key_path)
         .with_context(|| format!("Failed to read CA key: {}", ca_key_path.display()))?;
 
-    let ca_key = KeyPair::from_pem(&ca_key_pem)
-        .map_err(|e| anyhow!("Failed to parse CA key: {}", e))?;
+    let ca_key =
+        KeyPair::from_pem(&ca_key_pem).map_err(|e| anyhow!("Failed to parse CA key: {}", e))?;
 
     // Extract subject from the actual CA certificate on disk
     let ca_subject = extract_ca_subject(&ca_cert_pem)?;
@@ -661,7 +661,13 @@ fn generate_random_string(len: usize) -> String {
 fn sanitize_hostname(hostname: &str) -> String {
     hostname
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .to_lowercase()
 }
@@ -679,7 +685,8 @@ fn extract_ca_subject(ca_cert_pem: &str) -> Result<CaSubject> {
     let (_, pem) = parse_x509_pem(ca_cert_pem.as_bytes())
         .map_err(|e| anyhow!("Failed to parse CA cert PEM: {}", e))?;
 
-    let cert = pem.parse_x509()
+    let cert = pem
+        .parse_x509()
         .map_err(|e| anyhow!("Failed to parse CA certificate: {}", e))?;
 
     // Extract organization name from subject DN

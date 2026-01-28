@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Local;
+use russh::ChannelMsg;
 use russh::client::{self, Config, Handle, Handler};
+use russh::keys::PrivateKey;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::ssh_key::PublicKey;
-use russh::keys::PrivateKey;
-use russh::ChannelMsg;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -21,8 +21,7 @@ use tracing::{debug, error, info};
 use crate::error::{Error, Result};
 
 /// SSH authentication method.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub enum SshAuth {
     /// Password-based authentication
     Password(String),
@@ -32,7 +31,6 @@ pub enum SshAuth {
     #[default]
     None,
 }
-
 
 /// SSH configuration for connecting to VMs.
 #[derive(Debug, Clone)]
@@ -141,8 +139,8 @@ pub async fn wait_for_ssh(ip: Ipv4Addr, timeout: Duration) -> Result<()> {
 
 /// Load a private key from a file.
 fn load_key(path: &PathBuf) -> Result<PrivateKey> {
-    let key_data =
-        std::fs::read_to_string(path).map_err(|e| Error::Ssh(format!("Failed to read key: {e}")))?;
+    let key_data = std::fs::read_to_string(path)
+        .map_err(|e| Error::Ssh(format!("Failed to read key: {e}")))?;
     PrivateKey::from_openssh(&key_data).map_err(|e| Error::Ssh(format!("Failed to parse key: {e}")))
 }
 
@@ -153,9 +151,11 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
     let addr = format!("{ip}:22");
     debug!("Connecting to SSH at {}", addr);
 
-    let timeout_result =
-        tokio::time::timeout(config.timeout, client::connect(Arc::new(ssh_config), &addr, SshHandler))
-            .await;
+    let timeout_result = tokio::time::timeout(
+        config.timeout,
+        client::connect(Arc::new(ssh_config), &addr, SshHandler),
+    )
+    .await;
 
     let mut session = match timeout_result {
         Ok(Ok(s)) => s,
@@ -254,7 +254,9 @@ pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result
                     stderr.extend_from_slice(&data);
                 }
             }
-            Some(ChannelMsg::ExitStatus { exit_status: status }) => {
+            Some(ChannelMsg::ExitStatus {
+                exit_status: status,
+            }) => {
                 exit_status = Some(status);
             }
             Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
@@ -338,10 +340,7 @@ pub async fn ssh_exec_with_logging(
             Some(ChannelMsg::ExtendedData { data, ext }) => {
                 if ext == 1 {
                     // stderr - prefix with [stderr] in log
-                    let prefixed: Vec<u8> = data
-                        .iter()
-                        .copied()
-                        .collect();
+                    let prefixed: Vec<u8> = data.iter().copied().collect();
                     log_file
                         .write_all(&prefixed)
                         .await
@@ -354,7 +353,9 @@ pub async fn ssh_exec_with_logging(
                     }
                 }
             }
-            Some(ChannelMsg::ExitStatus { exit_status: status }) => {
+            Some(ChannelMsg::ExitStatus {
+                exit_status: status,
+            }) => {
                 exit_status = Some(status);
             }
             Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
@@ -403,7 +404,8 @@ pub async fn ensure_runner_installed(
     runner_version: &str,
 ) -> Result<()> {
     // Check if runner is already installed
-    let check_cmd = "test -d ~/actions-runner && test -f ~/actions-runner/run.sh && echo 'installed'";
+    let check_cmd =
+        "test -d ~/actions-runner && test -f ~/actions-runner/run.sh && echo 'installed'";
     match ssh_exec(ip, config, check_cmd).await {
         Ok(output) if output.trim() == "installed" => {
             debug!("GitHub Actions runner already installed on {}", ip);
@@ -448,7 +450,8 @@ pub async fn ensure_runner_installed(
     );
 
     // Generate install script from template
-    let install_cmd = github_runner::install_command("~/actions-runner", &version, Platform::MacOS, arch);
+    let install_cmd =
+        github_runner::install_command("~/actions-runner", &version, Platform::MacOS, arch);
 
     match ssh_exec(ip, config, &install_cmd).await {
         Ok(output) => {
@@ -532,8 +535,16 @@ pub async fn configure_runner(
 /// Returns Ok if the runner exited normally (exit code 0), Err otherwise.
 ///
 /// All runner output (stdout/stderr) is captured to the specified log file.
-pub async fn start_runner_and_wait(ip: Ipv4Addr, config: &SshConfig, log_path: &Path) -> Result<()> {
-    info!("Starting runner on {} (logging to {})", ip, log_path.display());
+pub async fn start_runner_and_wait(
+    ip: Ipv4Addr,
+    config: &SshConfig,
+    log_path: &Path,
+) -> Result<()> {
+    info!(
+        "Starting runner on {} (logging to {})",
+        ip,
+        log_path.display()
+    );
 
     // Run the runner - for ephemeral runners, this blocks until the job completes
     let run_cmd = "cd ~/actions-runner && ./run.sh";

@@ -29,8 +29,7 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
 async-trait = { workspace = true }
-toml = "0.8"
-russh = "0.48"
-russh-keys = "0.48"
-gethostname = "0.5"
-url = "2"
+toml = { workspace = true }
+gethostname = { workspace = true }
+url = { workspace = true }
+russh = { workspace = true }

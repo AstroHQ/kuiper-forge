@@ -77,11 +77,7 @@ pub struct VmManager {
 
 impl VmManager {
     /// Create a new VM manager.
-    pub fn new(
-        proxmox: Arc<ProxmoxVEAPI>,
-        vm_config: VmConfig,
-        ssh_config: SshConfig,
-    ) -> Self {
+    pub fn new(proxmox: Arc<ProxmoxVEAPI>, vm_config: VmConfig, ssh_config: SshConfig) -> Self {
         Self {
             proxmox,
             vm_config,
@@ -121,7 +117,10 @@ impl VmManager {
 
         // Get next available VM ID
         let vmid = self.proxmox.get_next_vmid().await?;
-        info!("Creating VM {} with ID {} from template {}", name, vmid, template_vmid);
+        info!(
+            "Creating VM {} with ID {} from template {}",
+            name, vmid, template_vmid
+        );
 
         // Track the VM
         let instance = VmInstance {
@@ -140,28 +139,35 @@ impl VmManager {
             Some(self.vm_config.storage.as_str())
         };
 
-        let task = self.proxmox.clone_vm(
-            template_vmid,
-            vmid,
-            name,
-            self.vm_config.linked_clone,
-            storage,
-        ).await.inspect_err(|_e| {
-            // Remove from tracking on failure
-            let vms = self.active_vms.clone();
-            tokio::spawn(async move {
-                vms.write().await.remove(&vmid);
-            });
-        })?;
+        let task = self
+            .proxmox
+            .clone_vm(
+                template_vmid,
+                vmid,
+                name,
+                self.vm_config.linked_clone,
+                storage,
+            )
+            .await
+            .inspect_err(|_e| {
+                // Remove from tracking on failure
+                let vms = self.active_vms.clone();
+                tokio::spawn(async move {
+                    vms.write().await.remove(&vmid);
+                });
+            })?;
 
         // Wait for clone to complete
         let clone_timeout = Duration::from_secs(self.vm_config.clone_timeout_secs);
-        self.proxmox.wait_for_task_with_timeout(&task, clone_timeout).await.inspect_err(|_e| {
-            let vms = self.active_vms.clone();
-            tokio::spawn(async move {
-                vms.write().await.remove(&vmid);
-            });
-        })?;
+        self.proxmox
+            .wait_for_task_with_timeout(&task, clone_timeout)
+            .await
+            .inspect_err(|_e| {
+                let vms = self.active_vms.clone();
+                tokio::spawn(async move {
+                    vms.write().await.remove(&vmid);
+                });
+            })?;
 
         info!("VM {} cloned successfully", vmid);
         Ok(VmInstance {
@@ -189,7 +195,10 @@ impl VmManager {
 
         // Wait for IP address
         let ip_timeout = Duration::from_secs(self.vm_config.ip_timeout_secs);
-        info!("Waiting for VM {} to get IP address (timeout: {:?})", vmid, ip_timeout);
+        info!(
+            "Waiting for VM {} to get IP address (timeout: {:?})",
+            vmid, ip_timeout
+        );
         let ip = self.proxmox.poll_for_ip(vmid, ip_timeout).await?;
 
         // Update tracking
@@ -241,7 +250,11 @@ impl VmManager {
             vmid,
             if is_windows { "Windows" } else { "Linux" },
             if is_windows {
-                if shell_is_powershell { "PowerShell" } else { "cmd.exe" }
+                if shell_is_powershell {
+                    "PowerShell"
+                } else {
+                    "cmd.exe"
+                }
             } else {
                 "bash/sh"
             }
@@ -269,7 +282,9 @@ impl VmManager {
         let check_output = session.execute(&check_cmd).await?;
         if check_output.stdout.trim() != "installed" {
             // Determine version to install
-            let version = if self.vm_config.runner_version.is_empty() || self.vm_config.runner_version == "latest" {
+            let version = if self.vm_config.runner_version.is_empty()
+                || self.vm_config.runner_version == "latest"
+            {
                 match crate::ssh::github_runner::fetch_latest_version().await {
                     Some(v) => v,
                     None => {
@@ -293,33 +308,43 @@ impl VmManager {
                     .unwrap_or(crate::ssh::github_runner::Arch::X64)
             };
 
-            info!("GitHub Actions runner not installed on VM {}, installing v{} ({})...", vmid, version, arch.as_str());
+            info!(
+                "GitHub Actions runner not installed on VM {}, installing v{} ({})...",
+                vmid,
+                version,
+                arch.as_str()
+            );
             let install_cmd = builder.install_command(&version, arch);
             let install_output = session.execute(&install_cmd).await?;
             if install_output.exit_code != 0 {
-                error!("Runner installation failed: stdout={}, stderr={}", install_output.stdout, install_output.stderr);
+                error!(
+                    "Runner installation failed: stdout={}, stderr={}",
+                    install_output.stdout, install_output.stderr
+                );
                 return Err(Error::runner(format!(
                     "Failed to install runner: {}",
                     install_output.stderr
                 )));
             }
-            info!("Runner installed successfully: {}", install_output.stdout.trim());
+            info!(
+                "Runner installed successfully: {}",
+                install_output.stdout.trim()
+            );
         } else {
             debug!("GitHub Actions runner already installed on VM {}", vmid);
         }
 
         // Configure runner
-        let config_cmd = builder.config_command(
-            runner_scope_url,
-            registration_token,
-            labels,
-            runner_name,
-        );
+        let config_cmd =
+            builder.config_command(runner_scope_url, registration_token, labels, runner_name);
 
         info!("Running configuration command on VM {}", vmid);
         let output = session.execute(&config_cmd).await?;
         if output.exit_code != 0 {
-            error!("Runner configuration failed (exit {}): stdout={}, stderr={}", output.exit_code, output.stdout, output.stderr);
+            error!(
+                "Runner configuration failed (exit {}): stdout={}, stderr={}",
+                output.exit_code, output.stdout, output.stderr
+            );
             return Err(Error::runner(format!(
                 "Configuration failed with exit code {}:\nstdout: {}\nstderr: {}",
                 output.exit_code, output.stdout, output.stderr
@@ -336,11 +361,17 @@ impl VmManager {
 
         // Run the runner directly and wait for it to complete
         // This is simpler and more reliable than backgrounding + polling for ephemeral runners
-        info!("Running ephemeral runner on VM {} (will block until job completes)", vmid);
+        info!(
+            "Running ephemeral runner on VM {} (will block until job completes)",
+            vmid
+        );
         let run_cmd = builder.run_command_direct();
         let output = session.execute(&run_cmd).await?;
 
-        info!("Runner completed on VM {} with exit code {}", vmid, output.exit_code);
+        info!(
+            "Runner completed on VM {} with exit code {}",
+            vmid, output.exit_code
+        );
         if !output.stdout.is_empty() {
             debug!("Runner stdout: {}", output.stdout);
         }
@@ -372,7 +403,10 @@ impl VmManager {
         match self.proxmox.stop_vm(vmid).await {
             Ok(task) => {
                 // Wait for stop with short timeout
-                let _ = self.proxmox.wait_for_task_with_timeout(&task, Duration::from_secs(30)).await;
+                let _ = self
+                    .proxmox
+                    .wait_for_task_with_timeout(&task, Duration::from_secs(30))
+                    .await;
             }
             Err(e) => {
                 debug!("Stop VM {} failed (may already be stopped): {}", vmid, e);
@@ -402,9 +436,9 @@ impl VmManager {
 
     /// Force destroy a VM by ID string.
     pub async fn force_destroy(&self, vm_id: &str) -> Result<()> {
-        let vmid: u32 = vm_id.parse().map_err(|_| {
-            Error::vm(format!("Invalid VM ID: {vm_id}"))
-        })?;
+        let vmid: u32 = vm_id
+            .parse()
+            .map_err(|_| Error::vm(format!("Invalid VM ID: {vm_id}")))?;
 
         self.destroy_vm(vmid).await
     }
@@ -429,9 +463,7 @@ impl VmManager {
 
     /// Destroy all active VMs (used during shutdown).
     pub async fn destroy_all_vms(&self) {
-        let vmids: Vec<u32> = {
-            self.active_vms.read().await.keys().copied().collect()
-        };
+        let vmids: Vec<u32> = { self.active_vms.read().await.keys().copied().collect() };
 
         if vmids.is_empty() {
             info!("No active VMs to clean up");
@@ -472,7 +504,9 @@ impl VmManager {
         }
 
         // Try PowerShell-specific detection (for Windows with cmd.exe shell)
-        let output = session.execute("powershell -Command \"Write-Output $env:OS\"").await?;
+        let output = session
+            .execute("powershell -Command \"Write-Output $env:OS\"")
+            .await?;
         if output.stdout.contains("Windows") {
             info!("Detected Windows OS via PowerShell probe (cmd.exe shell)");
             return Ok((true, false));
@@ -521,13 +555,9 @@ impl VmManager {
         let vmid = vm.vmid;
 
         // Ensure cleanup on failure
-        let result = self.run_lifecycle_inner(
-            vmid,
-            vm_name,
-            registration_token,
-            labels,
-            runner_scope_url,
-        ).await;
+        let result = self
+            .run_lifecycle_inner(vmid, vm_name, registration_token, labels, runner_scope_url)
+            .await;
 
         // Always cleanup on completion or failure
         if let Err(ref e) = result {
@@ -556,14 +586,16 @@ impl VmManager {
         self.wait_for_ssh(&ip).await?;
 
         // 4. Configure and run the runner (blocks until job completes for ephemeral runners)
-        let _os_info = self.configure_runner(
-            vmid,
-            &ip,
-            registration_token,
-            labels,
-            runner_scope_url,
-            vm_name,
-        ).await?;
+        let _os_info = self
+            .configure_runner(
+                vmid,
+                &ip,
+                registration_token,
+                labels,
+                runner_scope_url,
+                vm_name,
+            )
+            .await?;
 
         // Runner has completed - VM will be cleaned up by caller
         Ok((vmid, ip))

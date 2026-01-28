@@ -1,7 +1,5 @@
 use crate::{AgentCertStore, Error, Result};
-use kuiper_agent_proto::{
-    AgentServiceClient, RegisterRequest, RegistrationServiceClient,
-};
+use kuiper_agent_proto::{AgentServiceClient, RegisterRequest, RegistrationServiceClient};
 use tonic::transport::{Channel, ClientTlsConfig};
 use tracing::{debug, info, warn};
 
@@ -52,7 +50,10 @@ impl AgentConnector {
                 }
                 Err(e) if e.is_auth_error() => {
                     // Certificate revoked or expired, need to re-register
-                    warn!("Certificate rejected: {}, clearing and re-registering...", e);
+                    warn!(
+                        "Certificate rejected: {}, clearing and re-registering...",
+                        e
+                    );
                     self.cert_store.clear()?;
                 }
                 Err(e) => return Err(e),
@@ -60,17 +61,13 @@ impl AgentConnector {
         }
 
         // No valid certificate, need registration token
-        let reg_token = self
-            .config
-            .registration_token
-            .clone()
-            .ok_or_else(|| {
-                Error::NoCredentials(
-                    "No stored certificate and no registration token provided. \
+        let reg_token = self.config.registration_token.clone().ok_or_else(|| {
+            Error::NoCredentials(
+                "No stored certificate and no registration token provided. \
                      Run: coordinator token create --url https://..."
-                        .to_string(),
-                )
-            })?;
+                    .to_string(),
+            )
+        })?;
 
         self.register_and_connect(&reg_token).await
     }
@@ -79,10 +76,7 @@ impl AgentConnector {
     ///
     /// Uses the CA certificate from the cert store (provided via the registration bundle)
     /// to verify the coordinator's TLS certificate during registration.
-    async fn register_and_connect(
-        &mut self,
-        token: &str,
-    ) -> Result<AgentServiceClient<Channel>> {
+    async fn register_and_connect(&mut self, token: &str) -> Result<AgentServiceClient<Channel>> {
         info!("Registering with coordinator using token...");
 
         let ca_cert = self.cert_store.load_ca()?;
@@ -136,10 +130,7 @@ impl AgentConnector {
         )?;
 
         info!("Successfully registered as {}", response.agent_id);
-        info!(
-            "Certificates saved to {:?}",
-            self.cert_store.base_dir()
-        );
+        info!("Certificates saved to {:?}", self.cert_store.base_dir());
         info!("Certificate expires: {}", response.expires_at);
 
         // Explicitly drop the registration client/channel before creating mTLS connection.

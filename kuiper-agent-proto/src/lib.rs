@@ -31,6 +31,6 @@ pub use management::management_service_client::ManagementServiceClient;
 pub use management::management_service_server::{ManagementService, ManagementServiceServer};
 pub use management::{
     AgentInfo, CreateTokenRequest, CreateTokenResponse, DeleteTokenRequest, DeleteTokenResponse,
-    ListAgentsRequest, ListAgentsResponse, ListTokensRequest, ListTokensResponse, RevokeAgentRequest,
-    RevokeAgentResponse, TokenInfo,
+    ListAgentsRequest, ListAgentsResponse, ListTokensRequest, ListTokensResponse,
+    RevokeAgentRequest, RevokeAgentResponse, TokenInfo,
 };

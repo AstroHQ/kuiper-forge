@@ -56,98 +56,60 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Registration bundle from coordinator (contains token + CA cert + URL).
-    /// Generated with: coordinator token create --url https://...
-    #[arg(long)]
-    register: Option<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-    /// Labels for this agent (comma-separated)
-    #[arg(long, value_delimiter = ',', default_value = "self-hosted,macos,arm64")]
-    labels: Vec<String>,
-
-    /// Base VM image for runners
-    #[arg(long, default_value = "ghcr.io/cirruslabs/macos-sequoia-base:latest")]
-    base_image: String,
-
-    /// Maximum concurrent VMs (default: 2, Apple limit)
-    #[arg(long)]
-    max_vms: Option<u32>,
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Register this agent with the coordinator using a registration bundle
+    Register {
+        /// Registration bundle token from coordinator (kfr1_...)
+        #[arg(long)]
+        bundle: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config_path = args.config.clone().unwrap_or_else(Config::default_path);
-
-    // Determine data directory for logging
     let data_dir = Config::default_data_dir();
 
     // Initialize logging with file output
     init_logging(&data_dir)?;
 
-    // Determine if we're in bootstrap mode or normal mode
-    let (config, registration_token) = if let Some(ref bundle_str) = args.register {
-        // Bootstrap mode: decode bundle containing token + CA cert + coordinator URL
-        let bundle = RegistrationBundle::decode(bundle_str)
-            .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {e}"))?;
-
-        // If config already exists, validate that bundle URL matches existing config
-        if config_path.exists() {
-            let existing_config = Config::load(&config_path)?;
-            bundle
-                .validate_url(&existing_config.coordinator.url)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            info!("Bundle URL validated against existing config");
+    // Handle subcommands
+    if let Some(command) = args.command {
+        match command {
+            Commands::Register { bundle } => {
+                return cmd_register(&bundle, &config_path).await;
+            }
         }
+    }
 
-        info!("Registering with coordinator via bundle");
-        info!("  Coordinator: {}", bundle.coordinator_url);
-        info!("  Labels: {:?}", args.labels);
-        info!("  Base image: {}", args.base_image);
-
-        // Write the CA cert from the bundle to the certs directory
-        let data_dir = Config::default_data_dir();
-        let certs_dir = data_dir.join("certs");
-        std::fs::create_dir_all(&certs_dir)?;
-        let ca_cert_path = certs_dir.join("ca.crt");
-        std::fs::write(&ca_cert_path, &bundle.ca_cert_pem)?;
-        info!(
-            "Saved CA certificate from bundle to {}",
-            ca_cert_path.display()
-        );
-
-        let config = Config::from_bootstrap(
-            bundle.coordinator_url,
-            Some(ca_cert_path),
-            args.labels,
-            args.base_image,
-            args.max_vms,
-        );
-
-        // Save config for future runs
-        config.save(&config_path)?;
-        info!("Saved config to: {}", config_path.display());
-
-        (config, Some(bundle.token))
-    } else if config_path.exists() {
-        // Normal mode: load existing config
-        info!("Loading config from: {}", config_path.display());
-        let config = Config::load(&config_path)?;
-        (config, None)
-    } else {
-        // No config and no bootstrap args
-        eprintln!("No configuration found at: {}", config_path.display());
-        eprintln!();
-        eprintln!("To register this agent, use a registration bundle:");
-        eprintln!();
-        eprintln!("  kuiper-tart-agent --register BUNDLE_FROM_COORDINATOR \\");
-        eprintln!("             --labels macos,arm64");
-        eprintln!();
-        eprintln!(
-            "Generate a bundle with: coordinator token create --url https://YOUR_COORDINATOR:9443"
-        );
+    // Normal agent mode - load existing config
+    if !config_path.exists() {
+        eprintln!("Error: Agent not registered\n");
+        eprintln!("Run registration first:");
+        eprintln!("  kuiper-tart-agent register --bundle <kfr1_token>\n");
+        eprintln!("To get a registration bundle, run on the coordinator:");
+        eprintln!("  coordinator token create --expires 1h --url https://your-coordinator:9443");
         std::process::exit(1);
-    };
+    }
+
+    info!("Loading config from: {}", config_path.display());
+    let config = Config::load(&config_path)?;
+
+    // Verify certificates exist
+    let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
+    if !cert_store.has_certificates() {
+        eprintln!("Error: Certificates not found\n");
+        eprintln!("The config file exists but certificates are missing.");
+        eprintln!("Please re-register:");
+        eprintln!("  kuiper-tart-agent register --bundle <kfr1_token>");
+        std::process::exit(1);
+    }
 
     // Run host environment checks
     match host_checks::check_tart_version() {
@@ -213,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
     let agent_config = AgentConfig {
         coordinator_url: config.coordinator.url.clone(),
         coordinator_hostname: config.coordinator.hostname.clone(),
-        registration_token,
+        registration_token: None, // Already registered, using stored certificates
         agent_type: "tart".to_string(),
         labels: config.agent.labels.clone(),
         max_vms: config.tart.max_concurrent_vms,
@@ -252,6 +214,98 @@ async fn main() -> anyhow::Result<()> {
             info!("Graceful shutdown complete");
         }
     }
+
+    Ok(())
+}
+
+/// Handle the register subcommand to set up agent registration with the coordinator.
+async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<()> {
+    println!("Registering agent with coordinator...\n");
+
+    // 1. Parse bundle
+    let bundle = RegistrationBundle::decode(bundle_token)
+        .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {}", e))?;
+
+    println!("Coordinator: {}", bundle.coordinator_url);
+
+    // 2. Create cert store and save CA
+    let data_dir = Config::default_data_dir();
+    let certs_dir = data_dir.join("certs");
+    std::fs::create_dir_all(&certs_dir)?;
+
+    let cert_store = AgentCertStore::new(certs_dir.clone());
+    cert_store.save_ca(&bundle.ca_cert_pem)?;
+    println!("✓ Saved CA certificate");
+
+    // 3. Extract hostname from URL for TLS verification
+    let hostname = url::Url::parse(&bundle.coordinator_url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_else(|| "localhost".to_string());
+
+    // 4. Build agent config for registration
+    let agent_config = kuiper_agent_lib::AgentConfig {
+        coordinator_url: bundle.coordinator_url.clone(),
+        coordinator_hostname: hostname.clone(),
+        registration_token: Some(bundle.token),
+        agent_type: "tart".to_string(),
+        labels: vec![], // Empty for registration - user will set in config
+        max_vms: 2,     // Default - user will set in config
+    };
+
+    // 5. Connect and register
+    println!("Connecting to coordinator...");
+    let mut connector = kuiper_agent_lib::AgentConnector::new(agent_config, cert_store.clone());
+    let _client = connector
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("Registration failed: {}", e))?;
+
+    let agent_id = cert_store
+        .get_agent_id()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get agent ID after registration"))?;
+
+    println!("✓ Registration successful");
+    println!("✓ Agent ID: {agent_id}");
+
+    // 6. Generate initial config with placeholders
+    let config = Config {
+        coordinator: config::CoordinatorConfig {
+            url: bundle.coordinator_url,
+            hostname,
+        },
+        tls: config::TlsConfig {
+            ca_cert: Some(certs_dir.join("ca.crt")),
+            certs_dir,
+        },
+        agent: config::AgentConfig { labels: vec![] },
+        tart: config::TartConfig {
+            base_image: String::new(), // User must set
+            max_concurrent_vms: 2,
+            shared_cache_dir: None,
+            ssh: config::SshAuthConfig::default(),
+            runner_version: "latest".to_string(),
+            image_mappings: vec![],
+        },
+        cleanup: config::CleanupConfig::default(),
+        reconnect: config::ReconnectConfig::default(),
+        host: config::HostConfig::default(),
+    };
+
+    config.save(config_path)?;
+    println!("✓ Configuration saved\n");
+
+    // 7. Print next steps
+    println!("Next steps:");
+    println!("  1. Edit {} and configure:", config_path.display());
+    println!("     • agent.labels (e.g., [\"macos\", \"arm64\", \"sequoia\"])");
+    println!("     • tart.base_image (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
+    println!("     • tart.max_concurrent_vms (default: 2)");
+    println!("  2. Ensure base image is pulled: tart pull <image>");
+    println!("  3. Start agent: kuiper-tart-agent\n");
+
+    println!("Certificate location: {}", cert_store.base_dir().display());
+    println!("Config location:      {}", config_path.display());
 
     Ok(())
 }

@@ -111,7 +111,10 @@ impl PendingJobStore {
                 true
             }
             Err(e) => {
-                error!("Failed to add pending job {} to database: {}", request.job_id, e);
+                error!(
+                    "Failed to add pending job {} to database: {}",
+                    request.job_id, e
+                );
                 false
             }
         }
@@ -132,7 +135,10 @@ impl PendingJobStore {
                 // Job wasn't in the database - that's fine (might have been processed)
             }
             Err(e) => {
-                error!("Failed to remove pending job {} from database: {}", job_id, e);
+                error!(
+                    "Failed to remove pending job {} from database: {}",
+                    job_id, e
+                );
             }
         }
     }
@@ -201,7 +207,10 @@ impl PendingJobStore {
         let agent_labels: Vec<String> = match serde_json::from_str(&agent_labels_json) {
             Ok(l) => l,
             Err(e) => {
-                warn!("Failed to deserialize agent_labels for job {}: {}", job_id, e);
+                warn!(
+                    "Failed to deserialize agent_labels for job {}: {}",
+                    job_id, e
+                );
                 return None;
             }
         };
@@ -209,7 +218,10 @@ impl PendingJobStore {
         let runner_scope: RunnerScope = match serde_json::from_str(&scope_json) {
             Ok(s) => s,
             Err(e) => {
-                warn!("Failed to deserialize runner_scope for job {}: {}", job_id, e);
+                warn!(
+                    "Failed to deserialize runner_scope for job {}: {}",
+                    job_id, e
+                );
                 return None;
             }
         };

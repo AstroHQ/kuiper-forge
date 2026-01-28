@@ -18,9 +18,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 /// // Can be used as: powershell -EncodedCommand <encoded>
 /// ```
 pub fn encode_powershell_command(cmd: &str) -> String {
-    let utf16_bytes: Vec<u8> = cmd.encode_utf16()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
+    let utf16_bytes: Vec<u8> = cmd.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
     BASE64.encode(&utf16_bytes)
 }
 
@@ -214,7 +212,11 @@ mod tests {
         let cmd = r#"Set-Location 'C:\test"&calc&"'; .\run.cmd"#;
         let encoded = encode_powershell_command(cmd);
         // Base64 only contains [A-Za-z0-9+/=], no cmd.exe metacharacters
-        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     #[test]
@@ -253,7 +255,10 @@ mod tests {
     #[test]
     fn posix_path_tilde_user_with_path() {
         // ~username/path should preserve ~username and escape the path
-        assert_eq!(escape_posix_path("~user/actions-runner"), "~user/'actions-runner'");
+        assert_eq!(
+            escape_posix_path("~user/actions-runner"),
+            "~user/'actions-runner'"
+        );
         assert_eq!(escape_posix_path("~admin/my runner"), "~admin/'my runner'");
     }
 
@@ -261,7 +266,10 @@ mod tests {
     fn posix_path_absolute() {
         // Absolute paths should be fully escaped
         assert_eq!(escape_posix_path("/opt/runner"), "'/opt/runner'");
-        assert_eq!(escape_posix_path("/home/user/runner"), "'/home/user/runner'");
+        assert_eq!(
+            escape_posix_path("/home/user/runner"),
+            "'/home/user/runner'"
+        );
     }
 
     #[test]
@@ -283,7 +291,10 @@ mod tests {
     #[test]
     fn posix_path_with_single_quote() {
         // Single quotes in path should be escaped
-        assert_eq!(escape_posix_path("~/it's a runner"), "~/'it'\\''s a runner'");
+        assert_eq!(
+            escape_posix_path("~/it's a runner"),
+            "~/'it'\\''s a runner'"
+        );
     }
 
     #[test]
