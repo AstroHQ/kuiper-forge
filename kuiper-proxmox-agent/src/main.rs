@@ -87,8 +87,17 @@ async fn main() -> anyhow::Result<()> {
     debug!("Template VMID: {}", config.vm.template_vmid);
     debug!("Max concurrent VMs: {}", config.vm.concurrent_vms);
 
-    // Verify certificates exist
+    // Seed server trust from config if provided
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
+    if let Some(ref ca_cert_path) = config.tls.ca_cert {
+        let ca_dest = config.tls.certs_dir.join("ca.crt");
+        if !ca_dest.exists() && ca_cert_path.exists() {
+            std::fs::create_dir_all(&config.tls.certs_dir)?;
+            std::fs::copy(ca_cert_path, &ca_dest)?;
+            info!("Copied server CA certificate to {}", ca_dest.display());
+        }
+    }
+    // Verify certificates exist
     if !cert_store.has_certificates() {
         eprintln!("Error: Certificates not found\n");
         eprintln!("The config file exists but certificates are missing.");
@@ -155,14 +164,20 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
 
     println!("Coordinator: {}", bundle.coordinator_url);
 
-    // 2. Create cert store and save CA
+    // 2. Create cert store and save server trust
     let data_dir = Config::default_data_dir();
     let certs_dir = data_dir.join("certs");
     std::fs::create_dir_all(&certs_dir)?;
 
     let cert_store = AgentCertStore::new(certs_dir.clone());
-    cert_store.save_ca(&bundle.ca_cert_pem)?;
-    println!("✓ Saved CA certificate");
+    if let Some(ca_pem) = bundle.server_ca_pem.as_deref() {
+        cert_store.save_ca(ca_pem)?;
+        println!("✓ Saved server CA certificate");
+    }
+    cert_store.save_server_trust_mode(match bundle.server_trust_mode {
+        kuiper_agent_lib::bundle::ServerTrustMode::Ca => "ca",
+        kuiper_agent_lib::bundle::ServerTrustMode::Chain => "chain",
+    })?;
 
     // 3. Extract hostname from URL for TLS verification
     let hostname = url::Url::parse(&bundle.coordinator_url)

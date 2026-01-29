@@ -25,7 +25,7 @@ hostname = "localhost"
 # TLS/Certificate Configuration
 # =============================================================================
 [tls]
-# Path to CA certificate from coordinator
+# Path to server CA certificate from coordinator (optional - use native roots if omitted)
 # Supports ~ expansion for home directory
 ca_cert = "~/.config/kuiper-proxmox-agent/certs/ca.crt"
 

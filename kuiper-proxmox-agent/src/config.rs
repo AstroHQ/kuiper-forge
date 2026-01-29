@@ -32,8 +32,9 @@ pub struct CoordinatorConfig {
 /// TLS certificate configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {
-    /// Path to CA certificate from coordinator
-    pub ca_cert: PathBuf,
+    /// Path to server CA certificate from coordinator (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<PathBuf>,
     /// Directory for client certificates (auto-populated after registration)
     pub certs_dir: PathBuf,
 }
@@ -199,7 +200,7 @@ impl Config {
             .map_err(|e| ConfigError::ParseError(format!("Failed to parse config: {e}")))?;
 
         // Expand ~ in paths
-        config.tls.ca_cert = expand_tilde(&config.tls.ca_cert);
+        config.tls.ca_cert = config.tls.ca_cert.map(|p| expand_tilde(&p));
         config.tls.certs_dir = expand_tilde(&config.tls.certs_dir);
         config.ssh.private_key_path = config.ssh.private_key_path.map(|p| expand_tilde(&p));
 
@@ -273,7 +274,7 @@ impl Config {
                 hostname: coordinator_hostname,
             },
             tls: TlsConfig {
-                ca_cert: certs_dir.join("ca.crt"),
+                ca_cert: Some(certs_dir.join("ca.crt")),
                 certs_dir,
             },
             agent: AgentConfig { labels: vec![] },

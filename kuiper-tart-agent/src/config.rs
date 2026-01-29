@@ -39,7 +39,7 @@ pub struct CoordinatorConfig {
 /// TLS/Certificate configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {
-    /// Path to CA certificate file (optional - not needed with TOFU mode)
+    /// Path to server CA certificate file (optional - not needed with native roots)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_cert: Option<PathBuf>,
     /// Directory for client certificates

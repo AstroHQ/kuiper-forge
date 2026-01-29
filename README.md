@@ -41,18 +41,18 @@ kuiper-forge serve --config config.toml
 ### 2. Register an agent
 
 ```bash
-# Generate a registration token from the coordinator
-kuiper-forge token generate
+# Generate a registration bundle from the coordinator (includes server trust)
+kuiper-forge token create --url https://coordinator:9443
 
 # On a macOS host with Tart installed:
+kuiper-tart-agent register kfr1_BUNDLE_TOKEN
 kuiper-tart-agent \
-  --coordinator-url https://coordinator:9443 \
-  --token REG_TOKEN \
   --labels macos,arm64 \
   --base-image ghcr.io/cirruslabs/macos-sequoia-base:latest
 
 # On a Proxmox host:
-kuiper-proxmox-agent --config agent-config.toml --token REG_TOKEN
+kuiper-proxmox-agent register kfr1_BUNDLE_TOKEN
+kuiper-proxmox-agent --config agent-config.toml
 ```
 
 ### 3. Use in workflows

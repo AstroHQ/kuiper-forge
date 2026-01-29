@@ -1,13 +1,13 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tonic::transport::{Certificate, Identity};
+use tonic::transport::Identity;
 use tracing::debug;
 
 /// Manages certificate storage for an agent.
 ///
 /// Certificates are stored in the configured directory:
-/// - `ca.crt` - Coordinator CA certificate (for verifying server)
+/// - `ca.crt` - Coordinator server CA (optional, for TLS chain validation)
 /// - `client.crt` - Agent's client certificate (for mTLS)
 /// - `client.key` - Agent's private key (mode 0600)
 /// - `metadata.json` - Registration metadata
@@ -52,13 +52,35 @@ impl AgentCertStore {
         self.base_dir.join("ca.crt")
     }
 
+    fn server_trust_mode_path(&self) -> PathBuf {
+        self.base_dir.join("server_trust.mode")
+    }
+
     fn metadata_path(&self) -> PathBuf {
         self.base_dir.join("metadata.json")
     }
 
     /// Check if we have valid stored certificates.
     pub fn has_certificates(&self) -> bool {
-        self.cert_path().exists() && self.key_path().exists() && self.ca_path().exists()
+        if !self.cert_path().exists() || !self.key_path().exists() {
+            return false;
+        }
+
+        match self.load_server_trust_mode() {
+            Ok(Some(mode)) => {
+                if mode == "ca" {
+                    self.ca_path().exists()
+                } else {
+                    true
+                }
+            }
+            _ => self.ca_path().exists(),
+        }
+    }
+
+    /// Check if client certificate and key exist (regardless of server trust).
+    pub fn has_client_identity(&self) -> bool {
+        self.cert_path().exists() && self.key_path().exists()
     }
 
     /// Load certificate and key for mTLS connection.
@@ -68,10 +90,24 @@ impl AgentCertStore {
         Ok(Identity::from_pem(cert, key))
     }
 
-    /// Load CA certificate for server verification.
-    pub fn load_ca(&self) -> Result<Certificate> {
+    /// Load certificate and key PEM for mTLS connection.
+    pub fn load_identity_pem(&self) -> Result<(String, String)> {
+        let cert = std::fs::read_to_string(self.cert_path())?;
+        let key = std::fs::read_to_string(self.key_path())?;
+        Ok((cert, key))
+    }
+
+    /// Load server CA certificate PEM for TLS chain validation.
+    pub fn load_server_ca_pem(&self) -> Result<Option<String>> {
+        if !self.ca_path().exists() {
+            return Ok(None);
+        }
         let ca = std::fs::read_to_string(self.ca_path())?;
-        Ok(Certificate::from_pem(ca))
+        let trimmed = ca.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(trimmed.to_string()))
     }
 
     /// Save certificates received during registration.
@@ -142,7 +178,7 @@ impl AgentCertStore {
         Ok(())
     }
 
-    /// Save CA certificate (provided during initial setup).
+    /// Save server CA certificate (provided during initial setup).
     pub fn save_ca(&self, ca_pem: &str) -> Result<()> {
         std::fs::create_dir_all(&self.base_dir)?;
         std::fs::write(self.ca_path(), ca_pem)?;
@@ -150,10 +186,34 @@ impl AgentCertStore {
         Ok(())
     }
 
+    /// Save server trust mode ("ca" or "chain").
+    pub fn save_server_trust_mode(&self, mode: &str) -> Result<()> {
+        std::fs::create_dir_all(&self.base_dir)?;
+        std::fs::write(self.server_trust_mode_path(), mode.trim())?;
+        debug!(
+            "Wrote server trust mode to {:?}",
+            self.server_trust_mode_path()
+        );
+        Ok(())
+    }
+
+    /// Load server trust mode ("ca" or "chain").
+    pub fn load_server_trust_mode(&self) -> Result<Option<String>> {
+        if !self.server_trust_mode_path().exists() {
+            return Ok(None);
+        }
+        let mode = std::fs::read_to_string(self.server_trust_mode_path())?;
+        let trimmed = mode.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(trimmed.to_string()))
+    }
+
     /// Clear stored certificates (on revocation or re-registration).
     pub fn clear(&self) -> Result<()> {
         if self.base_dir.exists() {
-            // Only remove certificate files, keep CA
+            // Only remove client certificate files, keep server trust
             let _ = std::fs::remove_file(self.cert_path());
             let _ = std::fs::remove_file(self.key_path());
             let _ = std::fs::remove_file(self.metadata_path());

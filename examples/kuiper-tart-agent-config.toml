@@ -28,8 +28,7 @@ hostname = "localhost"
 # TLS/Certificate Configuration
 # =============================================================================
 [tls]
-# Path to CA certificate from coordinator (optional - supports TOFU mode)
-# When not provided, the agent uses Trust-On-First-Use (TOFU) for the CA cert
+# Path to server CA certificate from coordinator (optional - use native roots if omitted)
 # Supports ~ expansion for home directory
 ca_cert = "~/.config/kuiper-tart-agent/certs/ca.crt"
 

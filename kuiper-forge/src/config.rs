@@ -271,6 +271,18 @@ pub struct TlsConfig {
 
     /// Path to the server private key
     pub server_key: PathBuf,
+
+    /// Optional CA certificate for verifying the coordinator server cert (agents)
+    #[serde(default)]
+    pub server_ca_cert: Option<PathBuf>,
+
+    /// If true, agents should use native OS roots for server TLS validation
+    #[serde(default)]
+    pub server_use_native_roots: bool,
+
+    /// Server trust mode for agent connections ("ca" or "chain")
+    #[serde(default = "default_server_trust_mode")]
+    pub server_trust_mode: ServerTrustMode,
 }
 
 impl TlsConfig {
@@ -282,8 +294,25 @@ impl TlsConfig {
             ca_key: dir.join("ca.key"),
             server_cert: dir.join("server.crt"),
             server_key: dir.join("server.key"),
+            server_ca_cert: None,
+            server_use_native_roots: false,
+            server_trust_mode: ServerTrustMode::Ca,
         }
     }
+}
+
+/// Server trust mode for agent TLS verification.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerTrustMode {
+    /// Validate TLS chain + hostname using the configured CA bundle.
+    Ca,
+    /// Validate normal TLS chain + hostname only (no pin).
+    Chain,
+}
+
+fn default_server_trust_mode() -> ServerTrustMode {
+    ServerTrustMode::Ca
 }
 
 // =============================================================================
@@ -528,6 +557,17 @@ ca_cert = "{data_dir_str}/ca.crt"
 ca_key = "{data_dir_str}/ca.key"
 server_cert = "{data_dir_str}/server.crt"
 server_key = "{data_dir_str}/server.key"
+# Optional: CA bundle for agents to validate the coordinator server cert.
+# If omitted, agents default to ca_cert unless server_use_native_roots = true.
+# server_ca_cert = "{data_dir_str}/ca.crt"
+
+# Use OS native roots for coordinator server cert validation (e.g., Let's Encrypt)
+# server_use_native_roots = true
+
+# Server trust mode for agents:
+# - "ca": validate chain + hostname using the configured CA bundle (default)
+# - "chain": validate chain + hostname only (public roots)
+# server_trust_mode = "ca"
 
 # =============================================================================
 # Runner Scope

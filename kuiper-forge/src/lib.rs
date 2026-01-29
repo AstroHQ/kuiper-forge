@@ -20,5 +20,6 @@ pub mod management;
 pub mod pending_jobs;
 pub mod runner_state;
 pub mod server;
+pub mod tls;
 mod sql;
 pub mod webhook;

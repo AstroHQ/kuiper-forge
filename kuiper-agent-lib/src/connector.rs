@@ -1,6 +1,6 @@
 use crate::{AgentCertStore, Error, Result};
 use kuiper_agent_proto::{AgentServiceClient, RegisterRequest, RegistrationServiceClient};
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{debug, info, warn};
 
 /// Configuration for connecting to the coordinator.
@@ -74,21 +74,12 @@ impl AgentConnector {
 
     /// Register with coordinator using registration token.
     ///
-    /// Uses the CA certificate from the cert store (provided via the registration bundle)
+    /// Uses the server trust from the cert store (provided via the registration bundle)
     /// to verify the coordinator's TLS certificate during registration.
     async fn register_and_connect(&mut self, token: &str) -> Result<AgentServiceClient<Channel>> {
         info!("Registering with coordinator using token...");
 
-        let ca_cert = self.cert_store.load_ca()?;
-        debug!("Using CA certificate for registration TLS");
-        let tls = ClientTlsConfig::new()
-            .ca_certificate(ca_cert)
-            .domain_name(&self.config.coordinator_hostname);
-        let channel = Channel::from_shared(self.config.coordinator_url.clone())
-            .map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?
-            .tls_config(tls)?
-            .connect()
-            .await?;
+        let channel = self.connect_channel(None).await?;
 
         let mut reg_client = RegistrationServiceClient::new(channel);
 
@@ -112,15 +103,19 @@ impl AgentConnector {
             .map_err(|e| Error::RegistrationFailed(e.to_string()))?
             .into_inner();
 
-        // Save the CA certificate received from coordinator
-        // This will be used for all future mTLS connections
-        if !response.ca_cert_pem.is_empty() {
-            self.cert_store.save_ca(&response.ca_cert_pem)?;
-            info!("Saved CA certificate from coordinator");
+        // Update server trust from coordinator (if provided)
+        let trust_mode = if !response.server_trust_mode.is_empty() {
+            response.server_trust_mode.as_str()
         } else {
-            warn!("Coordinator did not provide CA certificate in registration response");
+            "ca"
+        };
+        self.cert_store.save_server_trust_mode(trust_mode)?;
+        if !response.server_ca_pem.is_empty() {
+            self.cert_store.save_ca(&response.server_ca_pem)?;
+            info!("Saved server CA certificate from coordinator");
+        } else {
+            debug!("Coordinator did not provide server CA certificate in registration response");
         }
-
         // Save the issued client certificate
         self.cert_store.save_with_expiry(
             &response.client_cert_pem,
@@ -147,19 +142,8 @@ impl AgentConnector {
 
     /// Connect using stored mTLS certificate.
     async fn connect_with_mtls(&self) -> Result<AgentServiceClient<Channel>> {
-        let identity = self.cert_store.load_identity()?;
-        let ca_cert = self.cert_store.load_ca()?;
-
-        let tls = ClientTlsConfig::new()
-            .ca_certificate(ca_cert)
-            .identity(identity) // Client certificate for mTLS
-            .domain_name(&self.config.coordinator_hostname);
-
-        let channel = Channel::from_shared(self.config.coordinator_url.clone())
-            .map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?
-            .tls_config(tls)?
-            .connect()
-            .await?;
+        let identity = self.cert_store.load_identity_pem()?;
+        let channel = self.connect_channel(Some(identity)).await?;
 
         Ok(AgentServiceClient::new(channel))
     }
@@ -168,6 +152,67 @@ impl AgentConnector {
     pub fn agent_id(&self) -> Option<String> {
         self.cert_store.get_agent_id()
     }
+
+    async fn connect_channel(&self, identity_pem: Option<(String, String)>) -> Result<Channel> {
+        let trust_mode = self
+            .cert_store
+            .load_server_trust_mode()?
+            .unwrap_or_else(|| "ca".to_string());
+        let server_ca_pem = self.cert_store.load_server_ca_pem()?;
+
+        let tls = build_tls_config(
+            &trust_mode,
+            server_ca_pem,
+            identity_pem,
+            &self.config.coordinator_hostname,
+        )?;
+
+        let channel = Channel::from_shared(self.config.coordinator_url.clone())
+            .map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?
+            .tls_config(tls)?
+            .connect()
+            .await?;
+
+        Ok(channel)
+    }
+}
+
+fn build_tls_config(
+    trust_mode: &str,
+    server_ca_pem: Option<String>,
+    identity_pem: Option<(String, String)>,
+    hostname: &str,
+) -> Result<ClientTlsConfig> {
+    let mut tls = ClientTlsConfig::new().domain_name(hostname);
+
+    match trust_mode {
+        "ca" => {
+            let ca = server_ca_pem.ok_or_else(|| {
+                Error::NoCredentials(
+                    "Missing server CA certificate. Register using a bundle token to establish trust."
+                        .to_string(),
+                )
+            })?;
+            tls = tls.ca_certificate(Certificate::from_pem(ca));
+        }
+        "chain" => {
+            tls = tls.with_native_roots();
+            if let Some(ca) = server_ca_pem {
+                tls = tls.ca_certificate(Certificate::from_pem(ca));
+            }
+        }
+        _ => {
+            return Err(Error::Certificate(format!(
+                "Invalid server trust mode: {trust_mode}"
+            )))
+        }
+    }
+
+    if let Some((cert_pem, key_pem)) = identity_pem {
+        tls = tls.identity(Identity::from_pem(cert_pem, key_pem));
+    }
+
+    Ok(tls)
 }
 
 /// Hostname detection module (simple implementation).

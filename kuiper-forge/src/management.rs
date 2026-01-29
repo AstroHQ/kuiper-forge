@@ -5,6 +5,7 @@
 //! database access issues and centralizes all state management.
 
 use crate::auth::AuthManager;
+use crate::tls::ServerTrust;
 use anyhow::{Context, Result};
 use kuiper_agent_proto::{
     AgentInfo, CreateTokenRequest, CreateTokenResponse, DeleteTokenRequest, DeleteTokenResponse,
@@ -22,11 +23,15 @@ use tracing::info;
 /// gRPC service implementation for management operations.
 pub struct ManagementServiceImpl {
     auth_manager: Arc<AuthManager>,
+    server_trust: ServerTrust,
 }
 
 impl ManagementServiceImpl {
-    pub fn new(auth_manager: Arc<AuthManager>) -> Self {
-        Self { auth_manager }
+    pub fn new(auth_manager: Arc<AuthManager>, server_trust: ServerTrust) -> Self {
+        Self {
+            auth_manager,
+            server_trust,
+        }
     }
 }
 
@@ -49,7 +54,12 @@ impl ManagementService for ManagementServiceImpl {
             token: token.token,
             expires_at: token.expires_at.to_rfc3339(),
             created_at: token.created_at.to_rfc3339(),
-            ca_cert_pem: self.auth_manager.ca_cert_pem().to_string(),
+            server_ca_pem: self.server_trust.server_ca_pem.clone().unwrap_or_default(),
+            server_trust_mode: match self.server_trust.server_trust_mode {
+                crate::config::ServerTrustMode::Ca => "ca",
+                crate::config::ServerTrustMode::Chain => "chain",
+            }
+            .to_string(),
         }))
     }
 
@@ -135,6 +145,7 @@ impl ManagementService for ManagementServiceImpl {
 /// This should be spawned as a background task when the coordinator starts.
 pub async fn run_management_server(
     auth_manager: Arc<AuthManager>,
+    server_trust: ServerTrust,
     socket_path: PathBuf,
 ) -> Result<()> {
     // Remove stale socket file if it exists (from previous crash)
@@ -150,7 +161,7 @@ pub async fn run_management_server(
 
     let uds_stream = UnixListenerStream::new(uds);
 
-    let svc = ManagementServiceImpl::new(auth_manager);
+    let svc = ManagementServiceImpl::new(auth_manager, server_trust);
 
     info!(path = %socket_path.display(), "Management socket listening");
 

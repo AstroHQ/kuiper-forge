@@ -51,11 +51,26 @@ server_cert = "UPDATE_THIS_PATH/server.crt"
 # Path to server private key (for gRPC/HTTPS server)
 server_key = "UPDATE_THIS_PATH/server.key"
 
+# Optional: CA bundle for agents to validate the coordinator server cert.
+# If omitted, agents default to ca_cert unless server_use_native_roots = true.
+# server_ca_cert = "UPDATE_THIS_PATH/ca.crt"
+
+# Use OS native roots for coordinator server cert validation (e.g., Let's Encrypt)
+# server_use_native_roots = true
+
+# Server trust mode for agents:
+# - "ca": validate chain + hostname using the configured CA bundle (default)
+# - "chain": validate chain + hostname only (public roots)
+# server_trust_mode = "ca"
+
 # Environment variables:
 # - KUIPER_TLS__CA_CERT
 # - KUIPER_TLS__CA_KEY
 # - KUIPER_TLS__SERVER_CERT
 # - KUIPER_TLS__SERVER_KEY
+# - KUIPER_TLS__SERVER_CA_CERT
+# - KUIPER_TLS__SERVER_USE_NATIVE_ROOTS
+# - KUIPER_TLS__SERVER_TRUST_MODE
 
 # =============================================================================
 # Database Configuration
@@ -174,6 +189,8 @@ mode = "fixed_capacity"  # Options: "fixed_capacity" or "webhook"
 # - KUIPER_TLS__CA_KEY                 → tls.ca_key
 # - KUIPER_TLS__SERVER_CERT            → tls.server_cert
 # - KUIPER_TLS__SERVER_KEY             → tls.server_key
+# - KUIPER_TLS__SERVER_CA_CERT         → tls.server_ca_cert
+# - KUIPER_TLS__SERVER_USE_NATIVE_ROOTS → tls.server_use_native_roots
 # - KUIPER_PROVISIONING__MODE          → provisioning.mode
 # - KUIPER_PROVISIONING__WEBHOOK__SECRET → provisioning.webhook.secret
 #

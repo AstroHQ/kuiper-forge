@@ -41,6 +41,7 @@ impl TestFixture {
     async fn new(webhook_mode: bool) -> Self {
         use kuiper_forge::auth::{AuthManager, AuthStore, generate_server_cert, init_ca};
         use kuiper_forge::config::{DatabaseConfig, TlsConfig, WebhookConfig};
+        use kuiper_forge::tls::build_server_trust;
         use kuiper_forge::db::Database;
 
         let temp_dir = TempDir::new().unwrap();
@@ -85,6 +86,8 @@ impl TestFixture {
             ca_key: ca_key_path.clone(),
             server_cert: server_cert_path.clone(),
             server_key: server_key_path.clone(),
+            server_ca_cert: None,
+            server_use_native_roots: false,
         };
 
         // Create server config
@@ -111,12 +114,15 @@ impl TestFixture {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
+        let server_trust = build_server_trust(&tls_config).unwrap();
+
         // Spawn server in background
         let auth_manager_clone = auth_manager.clone();
         let agent_registry_clone = agent_registry.clone();
         tokio::spawn(async move {
             let server_fut = kuiper_forge::server::run_server(
                 server_config,
+                server_trust,
                 auth_manager_clone,
                 agent_registry_clone,
                 None, // fleet_notifier

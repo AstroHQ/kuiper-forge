@@ -42,6 +42,7 @@ use crate::config::{TlsConfig, WebhookConfig};
 use crate::fleet::FleetNotifier;
 use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
+use crate::tls::ServerTrust;
 use crate::webhook::{self, WebhookNotifier, WebhookState};
 
 /// Custom extension for peer certificates when using manual TLS handling.
@@ -52,11 +53,15 @@ pub struct PeerCertificates(pub Vec<Vec<u8>>);
 /// Registration service implementation
 pub struct RegistrationServiceImpl {
     auth_manager: Arc<AuthManager>,
+    server_trust: ServerTrust,
 }
 
 impl RegistrationServiceImpl {
-    pub fn new(auth_manager: Arc<AuthManager>) -> Self {
-        Self { auth_manager }
+    pub fn new(auth_manager: Arc<AuthManager>, server_trust: ServerTrust) -> Self {
+        Self {
+            auth_manager,
+            server_trust,
+        }
     }
 }
 
@@ -102,7 +107,12 @@ impl RegistrationService for RegistrationServiceImpl {
             client_cert_pem: cert.cert_pem,
             client_key_pem: cert.key_pem,
             expires_at: cert.expires_at.to_rfc3339(),
-            ca_cert_pem: self.auth_manager.ca_cert_pem().to_string(),
+            server_ca_pem: self.server_trust.server_ca_pem.clone().unwrap_or_default(),
+            server_trust_mode: match self.server_trust.server_trust_mode {
+                crate::config::ServerTrustMode::Ca => "ca",
+                crate::config::ServerTrustMode::Chain => "chain",
+            }
+            .to_string(),
         }))
     }
 }
@@ -489,6 +499,7 @@ pub struct ServerConfig {
 /// everything else goes to the HTTP webhook handler.
 pub async fn run_server(
     config: ServerConfig,
+    server_trust: ServerTrust,
     auth_manager: Arc<AuthManager>,
     agent_registry: Arc<AgentRegistry>,
     fleet_notifier: Option<FleetNotifier>,
@@ -500,6 +511,7 @@ pub async fn run_server(
     if webhook_config.is_none() {
         return run_grpc_only_server(
             config,
+            server_trust,
             auth_manager,
             agent_registry,
             fleet_notifier,
@@ -555,7 +567,8 @@ pub async fn run_server(
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     // Create gRPC services
-    let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
+    let registration_service =
+        RegistrationServiceImpl::new(Arc::clone(&auth_manager), server_trust.clone());
     let agent_service =
         AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
 
@@ -687,6 +700,7 @@ pub async fn run_server(
 /// This is used when webhook mode is not enabled.
 async fn run_grpc_only_server(
     config: ServerConfig,
+    server_trust: ServerTrust,
     auth_manager: Arc<AuthManager>,
     agent_registry: Arc<AgentRegistry>,
     fleet_notifier: Option<FleetNotifier>,
@@ -711,7 +725,7 @@ async fn run_grpc_only_server(
         .client_auth_optional(true);
 
     // Create services
-    let registration_service = RegistrationServiceImpl::new(Arc::clone(&auth_manager));
+    let registration_service = RegistrationServiceImpl::new(auth_manager.clone(), server_trust);
     let agent_service =
         AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
 

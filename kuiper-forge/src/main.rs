@@ -17,6 +17,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
+use kuiper_forge::tls::build_server_trust;
 use kuiper_forge::config::{self, Config, ProvisioningMode};
 use kuiper_forge::db::Database;
 use kuiper_forge::fleet;
@@ -266,6 +267,8 @@ async fn serve(
         &config.tls.ca_key,
     )?);
 
+    let server_trust = build_server_trust(&config.tls)?;
+
     // Initialize agent registry
     let agent_registry = Arc::new(AgentRegistry::new());
 
@@ -281,8 +284,11 @@ async fn serve(
     let mgmt_socket_path = management::default_socket_path(data_dir);
     let mgmt_socket_path_cleanup = mgmt_socket_path.clone();
     let mgmt_auth = auth_manager.clone();
+    let mgmt_trust = server_trust.clone();
     tokio::spawn(async move {
-        if let Err(e) = management::run_management_server(mgmt_auth, mgmt_socket_path).await {
+        if let Err(e) =
+            management::run_management_server(mgmt_auth, mgmt_trust, mgmt_socket_path).await
+        {
             tracing::error!("Management server error: {}", e);
         }
     });
@@ -415,7 +421,7 @@ async fn serve(
     // Run fleet manager (if enabled) and server concurrently, with graceful shutdown
     let result = if let Some(fm) = fleet_manager {
         tokio::select! {
-            result = run_server(server_config, auth_manager, agent_registry, fleet_notifier, Some(runner_state), Some(pending_job_store), webhook_config) => {
+            result = run_server(server_config, server_trust.clone(), auth_manager, agent_registry, fleet_notifier, Some(runner_state), Some(pending_job_store), webhook_config) => {
                 result
             }
             _ = fm.run() => {
@@ -429,7 +435,7 @@ async fn serve(
         }
     } else {
         tokio::select! {
-            result = run_server(server_config, auth_manager, agent_registry, None, None, None, None) => {
+            result = run_server(server_config, server_trust.clone(), auth_manager, agent_registry, None, None, None, None) => {
                 result
             }
             _ = shutdown_signal() => {
@@ -551,12 +557,23 @@ async fn handle_token_command(command: TokenCommands, data_dir: &Path) -> Result
 
             let resp = client.create_token(expires_secs, "cli").await?;
 
-            // Build a registration bundle: token + CA cert + coordinator URL
-            let bundle_json = serde_json::json!({
-                "t": resp.token,
-                "ca": resp.ca_cert_pem,
-                "u": url,
-            });
+            // Build a registration bundle: token + server trust + coordinator URL
+            let mut bundle_map = serde_json::Map::new();
+            bundle_map.insert("t".to_string(), serde_json::Value::String(resp.token));
+            if !resp.server_ca_pem.is_empty() {
+                bundle_map.insert(
+                    "ca".to_string(),
+                    serde_json::Value::String(resp.server_ca_pem),
+                );
+            }
+            if !resp.server_trust_mode.is_empty() {
+                bundle_map.insert(
+                    "m".to_string(),
+                    serde_json::Value::String(resp.server_trust_mode),
+                );
+            }
+            bundle_map.insert("u".to_string(), serde_json::Value::String(url));
+            let bundle_json = serde_json::Value::Object(bundle_map);
             let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(bundle_json.to_string().as_bytes());
             let bundle = format!("kfr1_{encoded}");
@@ -566,7 +583,7 @@ async fn handle_token_command(command: TokenCommands, data_dir: &Path) -> Result
             println!("  {bundle}");
             println!();
             println!("Register an agent with:");
-            println!("  kuiper-tart-agent --register '{bundle}' --labels macos,arm64");
+            println!("  kuiper-tart-agent register '{bundle}'");
             println!();
             println!("Warning: Single-use, expires in {expires}. Generate new tokens as needed.");
 

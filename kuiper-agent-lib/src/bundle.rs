@@ -1,10 +1,10 @@
-//! Registration bundle: combines token + CA cert + coordinator URL into a single string.
+//! Registration bundle: combines token + server trust + coordinator URL into a single string.
 //!
 //! Format: `kfr1_<base64url-encoded JSON>`
 //!
 //! The JSON payload has the structure:
 //! ```json
-//! {"t":"reg_xxx...","ca":"-----BEGIN CERTIFICATE-----\n...","u":"https://coordinator:9443"}
+//! {"t":"reg_xxx...","ca":"-----BEGIN CERTIFICATE-----\n...","m":"ca","u":"https://coordinator:9443"}
 //! ```
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -20,13 +20,30 @@ pub struct RegistrationBundle {
     #[serde(rename = "t")]
     pub token: String,
 
-    /// CA certificate PEM for verifying the coordinator's TLS certificate
-    #[serde(rename = "ca")]
-    pub ca_cert_pem: String,
+    /// Optional CA certificate PEM for verifying the coordinator's TLS certificate
+    #[serde(rename = "ca", default, skip_serializing_if = "Option::is_none")]
+    pub server_ca_pem: Option<String>,
+
+    /// Server trust mode ("ca" or "chain")
+    #[serde(rename = "m", default)]
+    pub server_trust_mode: ServerTrustMode,
 
     /// Coordinator URL (e.g., "https://coordinator.example.com:9443")
     #[serde(rename = "u")]
     pub coordinator_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerTrustMode {
+    Ca,
+    Chain,
+}
+
+impl Default for ServerTrustMode {
+    fn default() -> Self {
+        ServerTrustMode::Ca
+    }
 }
 
 impl RegistrationBundle {
@@ -57,8 +74,14 @@ impl RegistrationBundle {
         if bundle.token.is_empty() {
             return Err(BundleError::MissingField("token"));
         }
-        if bundle.ca_cert_pem.is_empty() {
-            return Err(BundleError::MissingField("ca_cert_pem"));
+        if matches!(bundle.server_trust_mode, ServerTrustMode::Ca)
+            && bundle
+                .server_ca_pem
+                .as_ref()
+                .map(|p| p.is_empty())
+                .unwrap_or(true)
+        {
+            return Err(BundleError::MissingField("server_ca_pem"));
         }
         if bundle.coordinator_url.is_empty() {
             return Err(BundleError::MissingField("coordinator_url"));
@@ -127,7 +150,7 @@ pub enum BundleError {
     MissingField(&'static str),
     #[error(
         "Registration bundle URL mismatch: bundle was generated for '{bundle_url}' but config specifies '{expected_url}'. \
-         The bundle's CA certificate and token are bound to a specific coordinator URL."
+         The bundle's server trust and token are bound to a specific coordinator URL."
     )]
     UrlMismatch {
         bundle_url: String,
@@ -143,8 +166,11 @@ mod tests {
     fn test_roundtrip() {
         let bundle = RegistrationBundle {
             token: "reg_abcdef1234567890abcdef1234567890".to_string(),
-            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIBxDCCAWq...\n-----END CERTIFICATE-----\n"
-                .to_string(),
+            server_ca_pem: Some(
+                "-----BEGIN CERTIFICATE-----\nMIIBxDCCAWq...\n-----END CERTIFICATE-----\n"
+                    .to_string(),
+            ),
+            server_trust_mode: ServerTrustMode::Ca,
             coordinator_url: "https://coordinator.example.com:9443".to_string(),
         };
 
@@ -154,7 +180,8 @@ mod tests {
 
         let decoded = RegistrationBundle::decode(&encoded).unwrap();
         assert_eq!(decoded.token, bundle.token);
-        assert_eq!(decoded.ca_cert_pem, bundle.ca_cert_pem);
+        assert_eq!(decoded.server_ca_pem, bundle.server_ca_pem);
+        assert_eq!(decoded.server_trust_mode, bundle.server_trust_mode);
         assert_eq!(decoded.coordinator_url, bundle.coordinator_url);
     }
 
@@ -179,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_missing_fields() {
-        let json = serde_json::json!({"t": "", "ca": "cert", "u": "url"});
+        let json = serde_json::json!({"t": "", "m": "ca", "ca": "cert", "u": "url"});
         let encoded = URL_SAFE_NO_PAD.encode(json.to_string().as_bytes());
         let err = RegistrationBundle::decode(&format!("kfr1_{encoded}")).unwrap_err();
         assert!(matches!(err, BundleError::MissingField("token")));
