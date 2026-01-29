@@ -181,12 +181,17 @@ pub struct Config {
     #[serde(default)]
     pub provisioning: ProvisioningConfig,
 
-    /// Runner configurations (used in fixed_capacity mode).
+    /// Global runner scope - where all runners are registered in GitHub.
     ///
-    /// Each configuration defines a pool of runners with specific labels
-    /// and a target count to maintain.
+    /// In fixed capacity mode, agents report their labels and capacity,
+    /// and all runners are registered to this scope.
+    pub runner_scope: RunnerScope,
+
+    /// Optional global runner group (GitHub enterprise feature).
+    ///
+    /// If specified, all runners will be registered to this runner group.
     #[serde(default)]
-    pub runners: Vec<RunnerConfig>,
+    pub runner_group: Option<String>,
 }
 
 /// GitHub App authentication configuration.
@@ -340,28 +345,6 @@ compile_error!("At least one database feature must be enabled: 'sqlite' or 'post
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 compile_error!("Cannot enable both 'sqlite' and 'postgres' features simultaneously. Choose one.");
 
-/// Runner configuration for a specific set of labels.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RunnerConfig {
-    /// Labels that agents must have to run these jobs (also used for GitHub runner registration)
-    pub labels: Vec<String>,
-
-    /// GitHub runner scope (organization or repository)
-    pub runner_scope: RunnerScope,
-
-    /// Number of runners to keep ready (default: 1)
-    #[serde(default = "default_runner_count")]
-    pub count: u32,
-
-    /// Optional runner group
-    #[serde(default)]
-    pub runner_group: Option<String>,
-}
-
-fn default_runner_count() -> u32 {
-    1
-}
-
 /// GitHub runner registration scope.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -479,9 +462,9 @@ impl Config {
             return Ok(config);
         }
 
-        // Create minimal config for dry-run mode with test runners
+        // Create minimal config for dry-run mode with global runner scope
         tracing::info!("Using default configuration for dry-run mode");
-        tracing::info!("Adding default test runners for common label combinations");
+        tracing::info!("Using agent-driven pool discovery");
         Ok(Config {
             github: GitHubConfig {
                 app_id: 0,
@@ -492,33 +475,10 @@ impl Config {
             tls: TlsConfig::with_defaults(data_dir),
             database: DatabaseConfig::default(),
             provisioning: ProvisioningConfig::default(),
-            // Default test runners for dry-run mode
-            runners: vec![
-                RunnerConfig {
-                    labels: vec!["self-hosted".into(), "macOS".into(), "ARM64".into()],
-                    runner_scope: RunnerScope::Organization {
-                        name: "test-org".into(),
-                    },
-                    count: 1,
-                    runner_group: None,
-                },
-                RunnerConfig {
-                    labels: vec!["self-hosted".into(), "Linux".into(), "X64".into()],
-                    runner_scope: RunnerScope::Organization {
-                        name: "test-org".into(),
-                    },
-                    count: 1,
-                    runner_group: None,
-                },
-                RunnerConfig {
-                    labels: vec!["self-hosted".into(), "Windows".into(), "X64".into()],
-                    runner_scope: RunnerScope::Organization {
-                        name: "test-org".into(),
-                    },
-                    count: 1,
-                    runner_group: None,
-                },
-            ],
+            runner_scope: RunnerScope::Organization {
+                name: "test-org".into(),
+            },
+            runner_group: None,
         })
     }
 
@@ -568,6 +528,21 @@ ca_cert = "{data_dir_str}/ca.crt"
 ca_key = "{data_dir_str}/ca.key"
 server_cert = "{data_dir_str}/server.crt"
 server_key = "{data_dir_str}/server.key"
+
+# =============================================================================
+# Runner Scope
+# =============================================================================
+#
+# Define where all runners should be registered in GitHub.
+# Agents report their labels and capacity; pools are automatically created
+# based on connected agents.
+
+[runner_scope]
+type = "organization"
+name = "my-org"
+
+# Optional: GitHub Enterprise runner group
+# runner_group = "my-runner-group"
 
 # =============================================================================
 # Database Configuration
@@ -641,39 +616,6 @@ mode = "fixed_capacity"
 # owner = "my-org"
 # repo = "my-repo"
 
-# =============================================================================
-# Fixed Capacity Mode: Runner Configurations
-# =============================================================================
-#
-# These are used when provisioning.mode = "fixed_capacity"
-# Agents self-register and provide their labels.
-# Fleet manager matches runner requests to available agents by label.
-# Agents use their own configured base images for VM creation.
-
-[[runners]]
-labels = ["self-hosted", "macOS", "ARM64"]
-count = 1
-
-[runners.runner_scope]
-type = "organization"
-name = "my-org"
-
-[[runners]]
-labels = ["self-hosted", "Windows", "X64"]
-count = 1
-
-[runners.runner_scope]
-type = "organization"
-name = "my-org"
-
-[[runners]]
-labels = ["self-hosted", "Linux", "X64"]
-count = 1
-
-[runners.runner_scope]
-type = "repository"
-owner = "my-org"
-repo = "my-repo"
 "#
     )
 }
@@ -707,10 +649,7 @@ ca_key = "/etc/ci-runner/ca.key"
 server_cert = "/etc/ci-runner/server.crt"
 server_key = "/etc/ci-runner/server.key"
 
-[[runners]]
-labels = ["self-hosted", "macOS", "ARM64"]
-
-[runners.runner_scope]
+[runner_scope]
 type = "organization"
 name = "my-org"
 "#;
@@ -718,7 +657,12 @@ name = "my-org"
         let config = parse_config(config_str);
         assert_eq!(config.github.app_id, 123456);
         assert_eq!(config.grpc.listen_addr, "0.0.0.0:9443");
-        assert_eq!(config.runners.len(), 1);
+        assert_eq!(
+            config.runner_scope,
+            RunnerScope::Organization {
+                name: "my-org".to_string()
+            }
+        );
     }
 
     #[test]
@@ -747,6 +691,10 @@ ca_cert = "/etc/ci-runner/ca.crt"
 ca_key = "/etc/ci-runner/ca.key"
 server_cert = "/etc/ci-runner/server.crt"
 server_key = "/etc/ci-runner/server.key"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
 "#;
 
         let config = parse_config(config_str);
@@ -768,6 +716,10 @@ server_key = "/etc/ci-runner/server.key"
 
 [provisioning]
 mode = "fixed_capacity"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
 "#;
 
         let config = parse_config(config_str);
@@ -789,6 +741,10 @@ server_key = "/etc/ci-runner/server.key"
 
 [provisioning]
 mode = "webhook"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
 
 [provisioning.webhook]
 path = "/github/webhook"
@@ -830,6 +786,10 @@ server_key = "/etc/ci-runner/server.key"
 
 [provisioning]
 mode = "webhook"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
 
 [provisioning.webhook]
 secret = "test-secret"

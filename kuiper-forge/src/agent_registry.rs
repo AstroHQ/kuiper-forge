@@ -465,6 +465,41 @@ impl AgentRegistry {
 
         to_remove
     }
+
+    /// Get pool definitions derived from connected agents.
+    ///
+    /// Groups agents by their unique label combinations and calculates
+    /// target counts (sum of max_vms) for each pool.
+    ///
+    /// This is used in the new agent-driven mode where pools are not
+    /// statically configured but derived from connected agents.
+    pub async fn get_pool_definitions(&self) -> Vec<PoolDefinition> {
+        use std::collections::HashMap;
+
+        let agents = self.agents.read().await;
+        let mut pools: HashMap<Vec<String>, u32> = HashMap::new();
+
+        for agent in agents.values() {
+            let agent = agent.read().await;
+
+            // Normalize labels: sort and lowercase for consistent grouping
+            let mut normalized_labels: Vec<String> =
+                agent.labels.iter().map(|l| l.to_lowercase()).collect();
+            normalized_labels.sort();
+
+            // Add this agent's capacity to the pool for this label combination
+            *pools.entry(normalized_labels).or_insert(0) += agent.max_vms as u32;
+        }
+
+        // Convert to PoolDefinition vec
+        pools
+            .into_iter()
+            .map(|(labels, target_count)| PoolDefinition {
+                labels,
+                target_count,
+            })
+            .collect()
+    }
 }
 
 /// Summary information about an agent (for listing)
@@ -477,6 +512,20 @@ pub struct AgentInfo {
     pub max_vms: usize,
     pub active_vms: usize,
     pub last_seen_secs: u64,
+}
+
+/// Pool definition derived from connected agents.
+///
+/// In the new agent-driven mode, each unique label combination
+/// forms a separate pool with a target count equal to the sum
+/// of max_vms across all agents with those labels.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PoolDefinition {
+    /// Labels that define this pool (sorted for consistent comparison)
+    pub labels: Vec<String>,
+
+    /// Target count: sum of max_vms across all agents with these labels
+    pub target_count: u32,
 }
 
 impl AgentInfo {
@@ -569,5 +618,86 @@ mod tests {
         // Should not find available agent now
         let found = registry.find_available_agent(&["macos".to_string()]).await;
         assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_pool_definitions() {
+        let registry = AgentRegistry::new();
+        let (tx1, _rx1) = mpsc::channel(32);
+        let (tx2, _rx2) = mpsc::channel(32);
+        let (tx3, _rx3) = mpsc::channel(32);
+
+        // Register 2 agents with same labels
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                2,
+                vec![
+                    "self-hosted".to_string(),
+                    "macos".to_string(),
+                    "arm64".to_string(),
+                ],
+                tx1,
+            )
+            .await;
+
+        registry
+            .register(
+                "agent_2".to_string(),
+                AgentType::Tart,
+                "mac-mini-2".to_string(),
+                3,
+                vec![
+                    "self-hosted".to_string(),
+                    "macos".to_string(),
+                    "arm64".to_string(),
+                ],
+                tx2,
+            )
+            .await;
+
+        // Register 1 agent with different labels
+        registry
+            .register(
+                "agent_3".to_string(),
+                AgentType::Proxmox,
+                "proxmox-1".to_string(),
+                5,
+                vec![
+                    "self-hosted".to_string(),
+                    "linux".to_string(),
+                    "x64".to_string(),
+                ],
+                tx3,
+            )
+            .await;
+
+        let pools = registry.get_pool_definitions().await;
+
+        // Should have 2 pools
+        assert_eq!(pools.len(), 2);
+
+        // Find macOS pool
+        let macos_pool = pools
+            .iter()
+            .find(|p| p.labels.contains(&"macos".to_string()))
+            .unwrap();
+        assert_eq!(macos_pool.target_count, 5); // 2 + 3
+
+        // Find linux pool
+        let linux_pool = pools
+            .iter()
+            .find(|p| p.labels.contains(&"linux".to_string()))
+            .unwrap();
+        assert_eq!(linux_pool.target_count, 5);
+    }
+
+    #[tokio::test]
+    async fn test_get_pool_definitions_empty() {
+        let registry = AgentRegistry::new();
+        let pools = registry.get_pool_definitions().await;
+        assert_eq!(pools.len(), 0);
     }
 }

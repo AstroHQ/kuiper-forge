@@ -330,7 +330,7 @@ async fn serve(
         );
     }
     info!("Listening on: {}", listen_addr);
-    info!("Managing {} runner configurations", config.runners.len());
+    info!("Runner pools will be derived from connected agents");
 
     // Build webhook config if in webhook mode
     let webhook_config = match (
