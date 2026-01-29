@@ -1,4 +1,7 @@
-# Example coordinator configuration for local testing
+# Example coordinator configuration
+#
+# This file demonstrates ALL possible configuration options for kuiper-forge.
+# Uncomment and customize sections as needed for your deployment.
 #
 # Before using:
 # 1. Run: cargo run --bin kuiper-forge -- ca init --org "Test Org"
@@ -7,44 +10,171 @@
 # Then start the coordinator:
 #   cargo run --bin kuiper-forge -- -c examples/coordinator-config.toml serve
 
+# =============================================================================
+# GitHub App Configuration
+# =============================================================================
 [github]
-# For testing without GitHub, use placeholder values
-# The coordinator will fail to get runner tokens but agent registration will work
+# GitHub App ID (required)
 app_id = 123456
-private_key_path = "/tmp/fake-github-key.pem"  # Won't be used for registration testing
+
+# Option 1: Path to GitHub App private key PEM file
+private_key_path = "/path/to/github-app.pem"
+
+# Option 2: Raw PEM content (useful for containers/environment variables)
+# Supports \n escape sequences for single-line env var values
+# Environment variable: KUIPER_GITHUB__PRIVATE_KEY
+# private_key = "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+
 # Note: installation_id is auto-discovered from your GitHub App installations
 
+# =============================================================================
+# gRPC Server Configuration
+# =============================================================================
 [grpc]
+# Address to listen on (default: "0.0.0.0:9443")
+# Serves both gRPC (agent registration, streaming) and webhooks (if enabled)
 listen_addr = "0.0.0.0:9443"
 
+# =============================================================================
+# TLS/Certificate Configuration
+# =============================================================================
 [tls]
-# UPDATE THESE PATHS for your system!
-# macOS: ~/Library/Application Support/kuiper-forge/
-# Linux: ~/.local/share/kuiper-forge/
-#
-# Example for macOS (replace YOUR_USERNAME):
-# ca_cert = "/Users/YOUR_USERNAME/Library/Application Support/kuiper-forge/ca.crt"
-#
-# Or use the output from: cargo run --bin kuiper-forge -- init-config
+# Path to CA certificate (for signing agent certificates)
 ca_cert = "UPDATE_THIS_PATH/ca.crt"
+
+# Path to CA private key (for signing agent certificates)
 ca_key = "UPDATE_THIS_PATH/ca.key"
+
+# Path to server certificate (for gRPC/HTTPS server)
 server_cert = "UPDATE_THIS_PATH/server.crt"
+
+# Path to server private key (for gRPC/HTTPS server)
 server_key = "UPDATE_THIS_PATH/server.key"
 
-# Database configuration (optional - defaults work for local testing)
+# Environment variables:
+# - KUIPER_TLS__CA_CERT
+# - KUIPER_TLS__CA_KEY
+# - KUIPER_TLS__SERVER_CERT
+# - KUIPER_TLS__SERVER_KEY
+
+# =============================================================================
+# Database Configuration
+# =============================================================================
 # The database backend is selected at compile time:
-#   --features sqlite (default): stores data in coordinator.db
-#   --features postgres: connects to PostgreSQL
+#   cargo build --features sqlite (default)
+#   cargo build --features postgres --no-default-features
+
+# --- SQLite Configuration (when compiled with --features sqlite) ---
 [database]
-# SQLite (default): uncomment to customize path
+# Path to SQLite database file (optional, defaults to data_dir/coordinator.db)
 # path = "UPDATE_THIS_PATH/coordinator.db"
 
-# PostgreSQL: uncomment these when using --features postgres
-# host = "localhost"
-# port = 5432
-# user = "kuiper"
-# password = "secret"
-# database = "kuiper_forge"
+# --- PostgreSQL Configuration (when compiled with --features postgres) ---
+# [database]
+# host = "localhost"              # Database host (default: "localhost")
+# port = 5432                     # Database port (default: 5432)
+# user = "kuiper"                 # Database user (required)
+# password = "secret"             # Database password (required)
+# database = "kuiper_forge"       # Database name (default: "kuiper_forge")
 
-# No runners configured for basic registration testing
-# Add runner configs when you have a working GitHub App
+# Environment variables for PostgreSQL:
+# - KUIPER_DATABASE__HOST
+# - KUIPER_DATABASE__PORT
+# - KUIPER_DATABASE__USER
+# - KUIPER_DATABASE__PASSWORD
+# - KUIPER_DATABASE__DATABASE
+
+# =============================================================================
+# Runner Scope - Where ALL runners are registered in GitHub
+# =============================================================================
+# Defines the global scope for runner registration. In fixed capacity mode,
+# agents report their labels and capacity, and all runners are registered here.
+
+# Option 1: Organization-level runners
+[runner_scope]
+type = "organization"
+name = "my-org"
+
+# Option 2: Repository-level runners
+# [runner_scope]
+# type = "repository"
+# owner = "my-org"
+# repo = "my-repo"
+
+# Optional: GitHub Enterprise runner group
+# If specified, all runners will be registered to this runner group
+# runner_group = "my-runner-group"
+
+# =============================================================================
+# Provisioning Mode Configuration
+# =============================================================================
+# Controls how runners are created:
+# - "fixed_capacity" (default): Maintain a constant pool of runners
+# - "webhook": Create runners on-demand via GitHub webhooks
+
+[provisioning]
+mode = "fixed_capacity"  # Options: "fixed_capacity" or "webhook"
+
+# --- Webhook Mode Configuration (only used when mode = "webhook") ---
+# Webhooks are served on the SAME port as gRPC (configured in [grpc]).
+# The server multiplexes based on content-type:
+#   - application/grpc  → gRPC services (agent registration, streaming)
+#   - application/json  → Webhook endpoint
+
+# [provisioning.webhook]
+# # Webhook endpoint path (default: "/webhook")
+# path = "/webhook"
+#
+# # GitHub webhook secret for validating X-Hub-Signature-256 headers
+# # This secret must match the secret configured in your GitHub webhook settings
+# secret = "your-github-webhook-secret"
+#
+# # Label mappings: map workflow job labels to runner scopes
+# # When a workflow_job webhook arrives, the coordinator checks each mapping
+# # to find a match. A job matches if ALL labels in the mapping are present
+# # in the job's requested labels.
+#
+# # Example 1: macOS ARM64 runners
+# [[provisioning.webhook.label_mappings]]
+# labels = ["self-hosted", "macOS", "ARM64"]
+# runner_group = "macos-runners"  # optional
+#
+# [provisioning.webhook.label_mappings.runner_scope]
+# type = "organization"
+# name = "my-org"
+#
+# # Example 2: Linux X64 runners for specific repo
+# [[provisioning.webhook.label_mappings]]
+# labels = ["self-hosted", "Linux", "X64"]
+#
+# [provisioning.webhook.label_mappings.runner_scope]
+# type = "repository"
+# owner = "my-org"
+# repo = "my-repo"
+#
+# # Example 3: Windows runners with GPU
+# [[provisioning.webhook.label_mappings]]
+# labels = ["self-hosted", "Windows", "X64", "gpu"]
+#
+# [provisioning.webhook.label_mappings.runner_scope]
+# type = "organization"
+# name = "my-org"
+
+# =============================================================================
+# Environment Variable Reference
+# =============================================================================
+# All configuration can be overridden via environment variables using the
+# KUIPER_ prefix with double-underscore for nesting:
+#
+# - KUIPER_GITHUB__APP_ID              → github.app_id
+# - KUIPER_GITHUB__PRIVATE_KEY_PATH    → github.private_key_path
+# - KUIPER_GITHUB__PRIVATE_KEY         → github.private_key (raw PEM)
+# - KUIPER_GRPC__LISTEN_ADDR           → grpc.listen_addr
+# - KUIPER_TLS__CA_CERT                → tls.ca_cert
+# - KUIPER_TLS__CA_KEY                 → tls.ca_key
+# - KUIPER_TLS__SERVER_CERT            → tls.server_cert
+# - KUIPER_TLS__SERVER_KEY             → tls.server_key
+# - KUIPER_PROVISIONING__MODE          → provisioning.mode
+# - KUIPER_PROVISIONING__WEBHOOK__SECRET → provisioning.webhook.secret
+#
+# Note: Complex arrays like label_mappings should be configured via TOML file.

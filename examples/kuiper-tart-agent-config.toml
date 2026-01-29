@@ -1,88 +1,180 @@
 # Example kuiper-tart-agent configuration
 #
-# NOTE: For first-time setup, kuiper-tart-agent can bootstrap from CLI arguments:
-#   kuiper-tart-agent --coordinator-url https://localhost:9443 \
-#              --token REG_TOKEN_FROM_COORDINATOR \
-#              --ca-cert /path/to/ca.crt \
-#              --labels macos,arm64
+# This file demonstrates ALL possible configuration options for kuiper-tart-agent.
+# Uncomment and customize sections as needed for your deployment.
 #
-# This creates a config file automatically. Subsequent runs just need:
+# For initial registration, use the 'register' subcommand with a bundle token:
+#   kuiper-tart-agent --config /path/to/config.toml register kfr1_BUNDLE_TOKEN
+#
+# After registration, run the agent normally:
+#   kuiper-tart-agent --config /path/to/config.toml
+#
+# Or simply:
 #   kuiper-tart-agent
 #
-# This example config file is for reference or manual setup.
+# (The agent will look for config in platform-specific config directories)
 
+# =============================================================================
+# Coordinator Connection Configuration
+# =============================================================================
 [coordinator]
+# gRPC endpoint URL (must use https://)
 url = "https://localhost:9443"
+
+# Hostname for TLS verification (must match coordinator's server certificate)
 hostname = "localhost"
 
+# =============================================================================
+# TLS/Certificate Configuration
+# =============================================================================
 [tls]
-# CA certificate from coordinator (copy from coordinator's data dir)
+# Path to CA certificate from coordinator (optional - supports TOFU mode)
+# When not provided, the agent uses Trust-On-First-Use (TOFU) for the CA cert
+# Supports ~ expansion for home directory
 ca_cert = "~/.config/kuiper-tart-agent/certs/ca.crt"
+
 # Directory where agent stores its client certificate after registration
+# The client certificate is automatically generated during initial registration
 certs_dir = "~/.config/kuiper-tart-agent/certs"
 
+# =============================================================================
+# Agent Configuration
+# =============================================================================
 [agent]
-# Labels this agent advertises - used for job matching
-labels = ["self-hosted", "macos", "arm64", "test-sequoia"]
+# Labels this agent advertises to the coordinator
+# These labels are used for job matching and pool organization
+# Common examples: ["self-hosted", "macOS", "ARM64"], ["macOS", "sequoia"]
+labels = ["self-hosted", "macOS", "ARM64", "sequoia"]
 
+# =============================================================================
+# Tart VM Configuration
+# =============================================================================
 [tart]
-# Default base VM image to clone for runners (used when no mapping matches)
+# Default base VM image to clone for runners (used when no image mapping matches)
+# This can be a local image name or a remote image from a registry
+# Examples:
+#   - "ghcr.io/cirruslabs/macos-sequoia-base:latest"
+#   - "ghcr.io/cirruslabs/macos-sonoma-base:latest"
+#   - "macos-sequoia-xcode16" (local image)
 base_image = "ghcr.io/cirruslabs/macos-sequoia-base:latest"
-# Max concurrent VMs (Apple Virtualization limit is 2)
+
+# Maximum concurrent VMs (default: 2)
+# Apple Virtualization Framework has a hard limit of 2 concurrent VMs
+# Do not increase this value beyond 2
 max_concurrent_vms = 2
+
+# Shared cache directory for VMs (optional)
+# When set, VMs can share a cache directory for things like Homebrew, pip caches, etc.
+# This can speed up builds by avoiding repeated downloads
+# shared_cache_dir = "~/.tart/shared-cache"
+
 # GitHub Actions runner version to install (default: "latest")
-# Use "latest" to auto-fetch from GitHub API, or pin a specific version
-# See https://github.com/actions/runner/releases for available versions
+# Options:
+#   - "latest": Auto-fetch the latest version from GitHub API
+#   - Specific version: "2.321.0" (see https://github.com/actions/runner/releases)
 # runner_version = "latest"
-# runner_version = "2.321.0"  # pin to specific version
+# runner_version = "2.321.0"
 
-# Image mappings for label-based selection (first match wins)
-# Each mapping specifies labels that must ALL be present in job labels
-# Uncomment and customize as needed:
+# Image mappings for label-based VM image selection
+# When a job requests runners with specific labels, the first matching mapping
+# determines which Tart image to use. A mapping matches if ALL its labels
+# are present in the job's requested labels.
+#
+# Example: A job with runs-on: [self-hosted, macOS, sonoma] will match the
+# first mapping below, but not the second (missing "ventura" label).
 
+# Example 1: macOS Sonoma
 # [[tart.image_mappings]]
 # labels = ["macOS", "sonoma"]
 # image = "ghcr.io/cirruslabs/macos-sonoma-base:latest"
 
+# Example 2: macOS Ventura
 # [[tart.image_mappings]]
 # labels = ["macOS", "ventura"]
 # image = "ghcr.io/cirruslabs/macos-ventura-base:latest"
 
+# Example 3: Xcode 16 (local image)
 # [[tart.image_mappings]]
 # labels = ["xcode-16"]
 # image = "macos-sequoia-xcode16"
 
-# SSH configuration for connecting to VMs
+# Example 4: Xcode 15
+# [[tart.image_mappings]]
+# labels = ["xcode-15"]
+# image = "macos-sonoma-xcode15"
+
+# =============================================================================
+# SSH Configuration for VM Access
+# =============================================================================
+# SSH is used to connect to Tart VMs for runner installation and setup
 [tart.ssh]
 # SSH username (default: "admin")
+# This should match the user configured in your Tart VM images
 username = "admin"
-# Authentication method: "password", "key", or "default"
-# - "password": use password field below
-# - "key": use private_key path below
-# - "default": try ~/.ssh/id_ed25519 or ~/.ssh/id_rsa
+
+# Authentication method (default: "default")
+# Options:
+#   - "default": Try default SSH keys (~/.ssh/id_ed25519 or ~/.ssh/id_rsa)
+#   - "password": Use password authentication (requires password field)
+#   - "key": Use specific private key (requires private_key field)
 auth_method = "default"
-# Password for password auth (only used if auth_method = "password")
+
+# Password for password authentication (only used if auth_method = "password")
+# Uncomment and set if your Tart images use password authentication
 # password = "admin"
+
 # Path to private key (only used if auth_method = "key")
+# Supports ~ expansion for home directory
+# Uncomment and set if you want to use a specific key
 # private_key = "~/.ssh/id_ed25519"
-# SSH connection timeout in seconds
+
+# SSH connection timeout in seconds (default: 30)
+# Time to wait for SSH connection to succeed
 timeout_secs = 30
 
+# =============================================================================
+# Cleanup Configuration
+# =============================================================================
 [cleanup]
-# Cleanup stale VMs older than this (hours)
+# Maximum VM age in hours before forced cleanup (default: 2)
+# VMs older than this will be stopped and deleted, even if still running
+# This prevents orphaned VMs from consuming resources indefinitely
 max_vm_age_hours = 2
-# How often to run cleanup (minutes)
+
+# How often to run cleanup checks in minutes (default: 15)
+# The cleanup task runs periodically to remove stale VMs
 cleanup_interval_mins = 15
 
+# =============================================================================
+# Reconnection Configuration
+# =============================================================================
 [reconnect]
-# Initial reconnection delay (seconds)
+# Initial delay before reconnecting in seconds (default: 1)
+# When connection to coordinator is lost, wait this long before first reconnect
 initial_delay_secs = 1
-# Max reconnection delay (seconds)
+
+# Maximum delay between reconnection attempts in seconds (default: 60)
+# The delay increases exponentially (with jitter) up to this maximum
 max_delay_secs = 60
 
+# =============================================================================
+# Host Environment Configuration
+# =============================================================================
 [host]
-# Check DHCP lease time on startup (for Internet Sharing)
-# Options: "error" (exit if wrong, default), "warn" (log warning), "ignore" (skip check)
-# Short lease times (600s) are required for reliable VM IP acquisition.
-# Fix with: sudo defaults write /Library/Preferences/SystemConfiguration/com.apple.InternetSharing.default.plist bootpd -dict DHCPLeaseTimeSecs -int 600
+# Check DHCP lease time on startup (default: "error")
+# Tart VMs use macOS Internet Sharing, which has a default DHCP lease time
+# that's too long for reliable IP acquisition. This check helps catch misconfigurations.
+#
+# Options:
+#   - "error": Exit with error if DHCP lease time is not 600 seconds (recommended)
+#   - "warn": Log a warning but continue if lease time is wrong
+#   - "ignore": Skip the DHCP lease time check entirely
+#
+# To fix DHCP lease time (requires sudo):
+#   sudo defaults write /Library/Preferences/SystemConfiguration/com.apple.InternetSharing.default.plist \
+#     bootpd -dict DHCPLeaseTimeSecs -int 600
+#
+# Then restart Internet Sharing:
+#   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+#   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
 dhcp_lease_check = "error"

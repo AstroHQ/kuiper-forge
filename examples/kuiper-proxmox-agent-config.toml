@@ -1,67 +1,171 @@
 # Example kuiper-proxmox-agent configuration
 #
-# Unlike tart-agent, kuiper-proxmox-agent requires a config file for Proxmox
-# credentials and VM settings. However, the registration token should
-# be passed via CLI:
+# This file demonstrates ALL possible configuration options for kuiper-proxmox-agent.
+# Uncomment and customize sections as needed for your deployment.
 #
-#   kuiper-proxmox-agent --config /path/to/config.toml --token REG_TOKEN
+# kuiper-proxmox-agent requires a config file for Proxmox credentials and VM settings.
 #
-# After initial registration, subsequent runs don't need --token:
+# For initial registration, use the 'register' subcommand with a bundle token:
+#   kuiper-proxmox-agent --config /path/to/config.toml register kfr1_BUNDLE_TOKEN
+#
+# After registration, run the agent normally:
 #   kuiper-proxmox-agent --config /path/to/config.toml
 
+# =============================================================================
+# Coordinator Connection Configuration
+# =============================================================================
 [coordinator]
+# gRPC endpoint URL (must use https://)
 url = "https://localhost:9443"
+
+# Hostname for TLS verification (must match coordinator's server certificate)
 hostname = "localhost"
 
+# =============================================================================
+# TLS/Certificate Configuration
+# =============================================================================
 [tls]
+# Path to CA certificate from coordinator
+# Supports ~ expansion for home directory
 ca_cert = "~/.config/kuiper-proxmox-agent/certs/ca.crt"
+
+# Directory for storing client certificates (auto-populated after registration)
 certs_dir = "~/.config/kuiper-proxmox-agent/certs"
 
+# =============================================================================
+# Agent Configuration
+# =============================================================================
 [agent]
-labels = ["self-hosted", "Windows", "x64"]
+# Labels this agent advertises to the coordinator
+# These labels are used for job matching and pool organization
+# Common examples: ["self-hosted", "Windows", "X64"], ["Linux", "ubuntu"]
+labels = ["self-hosted", "Windows", "X64"]
 
+# =============================================================================
+# Proxmox API Configuration
+# =============================================================================
 [proxmox]
+# Proxmox API URL (typically https://hostname:8006)
 api_url = "https://192.168.1.253:8006"
-node = "pve"
-token_id = "ci-runner@pve!runner"
-token_secret = "your-token-secret-here"
-accept_invalid_certs = true  # For self-signed Proxmox certs
 
+# Proxmox node name (run `pvesh get /nodes` to list nodes)
+node = "pve"
+
+# API token ID (format: user@realm!token-name)
+# Example: "ci-runner@pve!runner"
+# Create via Proxmox UI: Datacenter → Permissions → API Tokens
+token_id = "ci-runner@pve!runner"
+
+# API token secret (generated when creating the API token)
+token_secret = "your-token-secret-here"
+
+# Accept invalid/self-signed TLS certificates (default: false)
+# Set to true for self-signed Proxmox certificates
+accept_invalid_certs = true
+
+# =============================================================================
+# VM Configuration
+# =============================================================================
 [vm]
-# Default template VM ID to clone from (used when no mapping matches)
+# Default template VM ID to clone from (used when no template mapping matches)
+# This should be a Proxmox VM template (right-click VM → Convert to Template)
 template_vmid = 102
+
+# Storage pool for VM clones (e.g., "local-lvm", "ceph-pool")
+# Run `pvesh get /storage` to list available storage pools
 storage = "local-lvm"
+
+# Use linked clones for faster cloning (default: true)
+# Requires LVM-thin, ZFS, or other CoW-capable storage
+# Set to false for full clones (slower but works with any storage)
 linked_clone = true
+
+# Maximum concurrent VMs this agent can run (default: 4)
 concurrent_vms = 2
+
+# Timeout in seconds for VM to acquire an IP address (default: 120)
+# Increase if VMs take longer to boot and get DHCP lease
 ip_timeout_secs = 120
+
+# Timeout in seconds for clone operation to complete (default: 300)
+# Increase for slower storage or large VM templates
 clone_timeout_secs = 300
 
-# Template mappings for label-based selection (first match wins)
-# Each mapping specifies labels that must ALL be present in job labels
-# Uncomment and customize as needed:
+# GitHub Actions runner version to install (default: "latest")
+# Options:
+#   - "latest": Auto-fetch the latest version from GitHub API
+#   - Specific version: "2.321.0" (see https://github.com/actions/runner/releases)
+runner_version = "latest"
 
+# Template mappings for label-based VM template selection
+# When a job requests runners with specific labels, the first matching mapping
+# determines which Proxmox template to use. A mapping matches if ALL its labels
+# are present in the job's requested labels.
+#
+# Example: A job with runs-on: [self-hosted, Windows, 2022] will match the
+# first mapping below, but not the second (missing "2019" label).
+
+# Example 1: Windows Server 2022
 # [[vm.template_mappings]]
 # labels = ["Windows", "2022"]
 # template_vmid = 9001
 
+# Example 2: Windows Server 2019
 # [[vm.template_mappings]]
 # labels = ["Windows", "2019"]
 # template_vmid = 9002
 
+# Example 3: Ubuntu Linux
 # [[vm.template_mappings]]
 # labels = ["Linux", "ubuntu"]
 # template_vmid = 9003
 
+# Example 4: Ubuntu with GPU
+# [[vm.template_mappings]]
+# labels = ["Linux", "ubuntu", "gpu"]
+# template_vmid = 9004
+
+# =============================================================================
+# SSH Configuration
+# =============================================================================
+# SSH is used to connect to cloned VMs for runner installation and setup
 [ssh]
-# Authentication: provide private_key_path, password, or both
-# If both are provided, key auth is tried first, then password
+# SSH authentication: provide private_key_path, password, or both
+# If both are provided, key authentication is tried first, then password
+
+# Option 1: SSH private key authentication
+# Path to SSH private key (supports ~ expansion)
 private_key_path = "~/.ssh/id_ed25519"
+
+# Option 2: SSH password authentication
+# Uncomment to use password authentication
 password = "vagrant"
+
+# SSH username (default: "ci")
+# This should match the user configured in your VM template
 username = "vagrant"
+
+# SSH port (default: 22)
 port = 22
+
+# Connection timeout in seconds (default: 30)
+# Time to wait for SSH connection to succeed
 timeout_secs = 30
+
+# Number of connection retries (default: 10)
+# The agent will retry SSH connections this many times before giving up
+# Useful for VMs that take time to boot and start SSH service
 retries = 10
 
+# =============================================================================
+# Cleanup Configuration
+# =============================================================================
 [cleanup]
+# Maximum VM age in hours before forced cleanup (default: 2)
+# VMs older than this will be stopped and deleted, even if still running
+# This prevents orphaned VMs from consuming resources indefinitely
 max_vm_age_hours = 2
+
+# How often to run cleanup checks in minutes (default: 15)
+# The cleanup task runs periodically to remove stale VMs
 cleanup_interval_mins = 15
