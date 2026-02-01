@@ -732,7 +732,7 @@ pub async fn run_server(
 
     // Accept connections and route them
     loop {
-        let (mut tcp_stream, remote_addr) = match listener.accept().await {
+        let (tcp_stream, remote_addr) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
@@ -740,24 +740,40 @@ pub async fn run_server(
             }
         };
 
-        // Parse PROXY protocol header if enabled (before TLS handshake)
-        let real_addr = if proxy_protocol {
-            match parse_proxy_protocol(&mut tcp_stream, remote_addr).await {
-                Ok(addr) => addr,
-                Err(e) => {
-                    debug!("PROXY protocol parse failed from {}: {}", remote_addr, e);
-                    continue;
-                }
-            }
-        } else {
-            remote_addr
-        };
-
         let tls_acceptor = tls_acceptor.clone();
         let grpc_service = grpc_service.clone();
         let http_router = http_router.clone();
 
+        // Spawn per-connection task immediately to avoid blocking accept loop
         tokio::spawn(async move {
+            // Parse PROXY protocol header if enabled (before TLS handshake)
+            // Done inside spawned task to prevent slow clients from blocking new connections
+            let (tcp_stream, real_addr) = if proxy_protocol {
+                let mut stream = tcp_stream;
+                // 5 second timeout for PROXY header to prevent slow-connection DoS
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    parse_proxy_protocol(&mut stream, remote_addr),
+                )
+                .await
+                {
+                    Ok(Ok(addr)) => (stream, addr),
+                    Ok(Err(e)) => {
+                        debug!("PROXY protocol parse failed from {}: {}", remote_addr, e);
+                        return;
+                    }
+                    Err(_) => {
+                        debug!(
+                            "PROXY protocol timeout from {} (no header within 5s)",
+                            remote_addr
+                        );
+                        return;
+                    }
+                }
+            } else {
+                (tcp_stream, remote_addr)
+            };
+
             let _real_addr = real_addr; // Available for logging if needed
 
             // TLS handshake
@@ -921,7 +937,7 @@ async fn run_grpc_only_server(
 
         // Accept connections with PROXY protocol support
         loop {
-            let (mut tcp_stream, remote_addr) = match listener.accept().await {
+            let (tcp_stream, remote_addr) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
@@ -929,19 +945,35 @@ async fn run_grpc_only_server(
                 }
             };
 
-            // Parse PROXY protocol header before TLS
-            let real_addr = match parse_proxy_protocol(&mut tcp_stream, remote_addr).await {
-                Ok(addr) => addr,
-                Err(e) => {
-                    debug!("PROXY protocol parse failed from {}: {}", remote_addr, e);
-                    continue;
-                }
-            };
-
             let tls_acceptor = tls_acceptor.clone();
             let grpc_service = grpc_service.clone();
 
+            // Spawn per-connection task immediately to avoid blocking accept loop
             tokio::spawn(async move {
+                // Parse PROXY protocol header before TLS (with timeout to prevent DoS)
+                let (tcp_stream, real_addr) = {
+                    let mut stream = tcp_stream;
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        parse_proxy_protocol(&mut stream, remote_addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(addr)) => (stream, addr),
+                        Ok(Err(e)) => {
+                            debug!("PROXY protocol parse failed from {}: {}", remote_addr, e);
+                            return;
+                        }
+                        Err(_) => {
+                            debug!(
+                                "PROXY protocol timeout from {} (no header within 5s)",
+                                remote_addr
+                            );
+                            return;
+                        }
+                    }
+                };
+
                 let _real_addr = real_addr;
 
                 // TLS handshake
