@@ -65,9 +65,12 @@ ENV KUIPER_GRPC__LISTEN_ADDR=0.0.0.0:9443
 #   KUIPER_GRPC__PROXY_PROTOCOL=true  - parse PROXY protocol v1/v2 headers
 #   WARNING: Only enable if ALL traffic comes through a PROXY protocol-enabled LB
 ENV KUIPER_NO_LOG_FILE=true
+# Config file path - mount a ConfigMap here for label_mappings, etc.
+# Optional: if not present, runs purely from environment variables
+ENV KUIPER_CONFIG=/data/config.toml
 
 VOLUME /data
 EXPOSE 9443
 
 ENTRYPOINT ["entrypoint.sh"]
-CMD ["kuiper-forge", "serve"]
+CMD ["kuiper-forge", "serve", "--config", "/data/config.toml"]

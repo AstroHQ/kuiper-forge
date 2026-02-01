@@ -154,6 +154,18 @@ pub fn validate_signature(secret: &str, payload: &[u8], signature_header: &str) 
     mac.verify_slice(&signature_bytes).is_ok()
 }
 
+/// Check if job labels contain all required labels (case-insensitive).
+///
+/// Returns `true` if ALL required labels are present in job_labels.
+/// Empty required_labels returns `true` (no filtering).
+pub fn has_required_labels(job_labels: &[String], required_labels: &[String]) -> bool {
+    required_labels.iter().all(|required| {
+        job_labels
+            .iter()
+            .any(|job_label| job_label.eq_ignore_ascii_case(required))
+    })
+}
+
 /// Match job labels against configured label mappings.
 ///
 /// Returns the first matching `LabelMapping`, or `None` if no match.
@@ -226,23 +238,19 @@ async fn handle_webhook(
                 event.workflow_job.id, event.workflow_job.labels
             );
 
-            // Match labels to find runner scope
-            let mapping = match match_labels(
-                &event.workflow_job.labels,
-                &state.config.label_mappings,
-            ) {
-                Some(m) => m,
-                None => {
-                    info!(
-                        "No label mapping matches job {} labels {:?} - ignoring (probably a GitHub-hosted runner job)",
-                        event.workflow_job.id, event.workflow_job.labels
-                    );
-                    return StatusCode::OK;
-                }
-            };
+            // Pre-filter: check required labels (default: "self-hosted")
+            if !has_required_labels(&event.workflow_job.labels, &state.config.required_labels) {
+                info!(
+                    "Job {} missing required labels {:?} (has {:?}) - ignoring",
+                    event.workflow_job.id,
+                    state.config.required_labels,
+                    event.workflow_job.labels
+                );
+                return StatusCode::OK;
+            }
 
-            // Use configured runner_scope, or default to the organization from the webhook
-            let runner_scope = mapping.runner_scope.clone().unwrap_or_else(|| {
+            // Helper to compute default runner scope from webhook event
+            let default_runner_scope = || {
                 // Prefer organization login if available, fall back to repository owner
                 let org_name = event
                     .organization
@@ -250,12 +258,37 @@ async fn handle_webhook(
                     .map(|o| o.login.clone())
                     .unwrap_or_else(|| event.repository.owner.login.clone());
                 RunnerScope::Organization { name: org_name }
-            });
+            };
 
-            info!(
-                "Matched job {} to runner scope {:?} (mapping labels: {:?})",
-                event.workflow_job.id, runner_scope, mapping.labels
-            );
+            // Try to match labels to find runner scope and runner group
+            let (runner_scope, runner_group) = if state.config.label_mappings.is_empty() {
+                // No mappings configured - use default scope for all matching jobs
+                let scope = default_runner_scope();
+                info!(
+                    "No label mappings configured - accepting job {} with default scope {:?}",
+                    event.workflow_job.id, scope
+                );
+                (scope, None)
+            } else {
+                // Match against configured mappings
+                match match_labels(&event.workflow_job.labels, &state.config.label_mappings) {
+                    Some(mapping) => {
+                        let scope = mapping.runner_scope.clone().unwrap_or_else(default_runner_scope);
+                        info!(
+                            "Matched job {} to runner scope {:?} (mapping labels: {:?})",
+                            event.workflow_job.id, scope, mapping.labels
+                        );
+                        (scope, mapping.runner_group.clone())
+                    }
+                    None => {
+                        info!(
+                            "No label mapping matches job {} labels {:?} - ignoring",
+                            event.workflow_job.id, event.workflow_job.labels
+                        );
+                        return StatusCode::OK;
+                    }
+                }
+            };
 
             // Build request and persist to DB first (this is the critical path)
             // Use job labels for agent matching - agents with a superset of these labels will match
@@ -263,7 +296,7 @@ async fn handle_webhook(
                 job_labels: event.workflow_job.labels.clone(),
                 agent_labels: event.workflow_job.labels,
                 runner_scope,
-                runner_group: mapping.runner_group.clone(),
+                runner_group,
                 job_id: event.workflow_job.id,
             };
 
@@ -439,6 +472,42 @@ mod tests {
         }];
         let job_labels: Vec<String> = vec![];
         assert!(match_labels(&job_labels, &mappings).is_none());
+    }
+
+    #[test]
+    fn test_has_required_labels() {
+        // Default: require "self-hosted"
+        let required = vec!["self-hosted".into()];
+
+        // Has self-hosted
+        let job_labels = vec!["self-hosted".into(), "macOS".into()];
+        assert!(has_required_labels(&job_labels, &required));
+
+        // Case-insensitive
+        let job_labels = vec!["SELF-HOSTED".into()];
+        assert!(has_required_labels(&job_labels, &required));
+
+        // Missing self-hosted (github-hosted runner)
+        let job_labels = vec!["ubuntu-latest".into()];
+        assert!(!has_required_labels(&job_labels, &required));
+
+        // Empty job labels
+        let job_labels: Vec<String> = vec![];
+        assert!(!has_required_labels(&job_labels, &required));
+
+        // Empty required labels = accept all
+        let required: Vec<String> = vec![];
+        let job_labels = vec!["ubuntu-latest".into()];
+        assert!(has_required_labels(&job_labels, &required));
+
+        // Multiple required labels
+        let required = vec!["self-hosted".into(), "macOS".into()];
+        let job_labels = vec!["self-hosted".into(), "macOS".into(), "ARM64".into()];
+        assert!(has_required_labels(&job_labels, &required));
+
+        // Missing one of multiple required
+        let job_labels = vec!["self-hosted".into(), "Linux".into()];
+        assert!(!has_required_labels(&job_labels, &required));
     }
 
     #[test]

@@ -117,6 +117,7 @@ impl TestFixture {
             let wh_config = WebhookConfig {
                 path: "/webhook".to_string(),
                 secret: "test-secret".to_string(),
+                required_labels: vec!["self-hosted".to_string()],
                 label_mappings: vec![],
             };
             let pending_store =
