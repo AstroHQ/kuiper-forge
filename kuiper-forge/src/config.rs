@@ -243,12 +243,24 @@ pub struct GrpcConfig {
     /// Address to listen on
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
+
+    /// Enable PROXY protocol support (v1 and v2).
+    ///
+    /// When enabled, the server expects incoming connections to begin with a
+    /// PROXY protocol header (sent by load balancers like HAProxy, AWS NLB,
+    /// DigitalOcean LB). The real client IP is extracted from this header.
+    ///
+    /// WARNING: Only enable this if ALL traffic comes through a proxy that
+    /// sends PROXY protocol headers. Direct connections will fail.
+    #[serde(default)]
+    pub proxy_protocol: bool,
 }
 
 impl Default for GrpcConfig {
     fn default() -> Self {
         Self {
             listen_addr: default_listen_addr(),
+            proxy_protocol: false,
         }
     }
 }

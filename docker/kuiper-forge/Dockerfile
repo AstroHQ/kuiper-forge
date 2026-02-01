@@ -49,15 +49,21 @@ RUN mkdir -p /data && chown kuiper:kuiper /data
 
 USER kuiper
 
-# TLS paths default to /data (entrypoint passes --data-dir /data to the binary)
+# TLS paths - defaults to /data, override for externally-provided certs (e.g., cert-manager)
 ENV KUIPER_TLS__CA_CERT=/data/ca.crt
 ENV KUIPER_TLS__CA_KEY=/data/ca.key
 ENV KUIPER_TLS__SERVER_CERT=/data/server.crt
 ENV KUIPER_TLS__SERVER_KEY=/data/server.key
+# Skip auto-generation when using external certificates:
+#   KUIPER_SKIP_CA_INIT=1           - skip CA generation (mount your own CA or use server_use_native_roots)
+#   KUIPER_SKIP_SERVER_CERT_INIT=1  - skip server cert generation (e.g., using cert-manager)
 # GitHub App private key: provide ONE of these in your compose/env:
 #   KUIPER_GITHUB__PRIVATE_KEY_PATH=/data/github-app.pem  (file mount)
 #   KUIPER_GITHUB__PRIVATE_KEY="-----BEGIN RSA..."         (inline PEM, supports \n escapes)
 ENV KUIPER_GRPC__LISTEN_ADDR=0.0.0.0:9443
+# PROXY protocol support (for load balancers like HAProxy, AWS NLB, DO LB):
+#   KUIPER_GRPC__PROXY_PROTOCOL=true  - parse PROXY protocol v1/v2 headers
+#   WARNING: Only enable if ALL traffic comes through a PROXY protocol-enabled LB
 ENV KUIPER_NO_LOG_FILE=true
 
 VOLUME /data

@@ -25,7 +25,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -44,6 +44,136 @@ use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
 use crate::tls::ServerTrust;
 use crate::webhook::{self, WebhookNotifier, WebhookState};
+
+/// Parse PROXY protocol header from an incoming TCP connection.
+///
+/// Supports both PROXY protocol v1 (text) and v2 (binary).
+/// Returns the real client address extracted from the header.
+///
+/// The PROXY protocol header is sent by load balancers (HAProxy, AWS NLB, DO LB)
+/// to pass the original client IP to the backend server.
+async fn parse_proxy_protocol(
+    stream: &mut TcpStream,
+    fallback_addr: SocketAddr,
+) -> Result<SocketAddr> {
+    use ppp::v1::Addresses as V1Addr;
+    use ppp::v2::Addresses as V2Addr;
+    use ppp::HeaderResult;
+    use tokio::io::AsyncReadExt;
+
+    // PROXY protocol headers are at most 107 bytes (v1) or 232 bytes (v2)
+    // Read incrementally to avoid over-reading into TLS data
+    let mut buf = Vec::with_capacity(232);
+    let mut tmp = [0u8; 1];
+
+    // First, determine if this is v1 (text) or v2 (binary) by reading the first byte
+    // v1 starts with "PROXY " (0x50 = 'P')
+    // v2 starts with signature: 0x0D 0x0A 0x0D 0x0A 0x00 0x0D 0x0A 0x51 0x55 0x49 0x54 0x0A
+
+    // Read first byte to determine protocol version
+    let n = stream
+        .read(&mut tmp)
+        .await
+        .context("Failed to read PROXY protocol header")?;
+    if n == 0 {
+        anyhow::bail!("Connection closed before PROXY protocol header received");
+    }
+    buf.push(tmp[0]);
+
+    let is_v2 = tmp[0] == 0x0D; // v2 signature starts with 0x0D
+
+    if is_v2 {
+        // For v2, read byte-by-byte until ppp says complete
+        loop {
+            let result = HeaderResult::parse(&buf);
+
+            if let HeaderResult::V2(Ok(header)) = result {
+                let real_addr = match header.addresses {
+                    V2Addr::IPv4(addr) => {
+                        SocketAddr::from((addr.source_address, addr.source_port))
+                    }
+                    V2Addr::IPv6(addr) => {
+                        SocketAddr::from((addr.source_address, addr.source_port))
+                    }
+                    V2Addr::Unix(_) | V2Addr::Unspecified => fallback_addr,
+                };
+
+                debug!(
+                    proxy_version = 2,
+                    real_addr = %real_addr,
+                    header_len = buf.len(),
+                    "Parsed PROXY protocol v2 header"
+                );
+
+                return Ok(real_addr);
+            }
+
+            // Need more data for v2
+            if buf.len() >= 536 {
+                anyhow::bail!("PROXY protocol v2 header too large or malformed");
+            }
+
+            let n = stream
+                .read(&mut tmp)
+                .await
+                .context("Failed to read PROXY protocol header")?;
+            if n == 0 {
+                anyhow::bail!("Connection closed while reading PROXY protocol v2 header");
+            }
+            buf.push(tmp[0]);
+        }
+    } else {
+        // For v1, read until \r\n (the v1 header is a single line)
+        // v1 format: "PROXY TCP4|TCP6|UNKNOWN <src> <dst> <srcport> <dstport>\r\n"
+        loop {
+            if buf.len() >= 2 && buf[buf.len() - 2] == b'\r' && buf[buf.len() - 1] == b'\n' {
+                // Found end of v1 header
+                break;
+            }
+            if buf.len() > 107 {
+                anyhow::bail!("PROXY protocol v1 header too long (max 107 bytes)");
+            }
+
+            let n = stream
+                .read(&mut tmp)
+                .await
+                .context("Failed to read PROXY protocol header")?;
+            if n == 0 {
+                anyhow::bail!("Connection closed while reading PROXY protocol v1 header");
+            }
+            buf.push(tmp[0]);
+        }
+
+        // Now parse the complete v1 header
+        let result = HeaderResult::parse(&buf);
+
+        match result {
+            HeaderResult::V1(Ok(header)) => {
+                let real_addr = match header.addresses {
+                    V1Addr::Tcp4(addr) => SocketAddr::from((addr.source_address, addr.source_port)),
+                    V1Addr::Tcp6(addr) => SocketAddr::from((addr.source_address, addr.source_port)),
+                    V1Addr::Unknown => fallback_addr,
+                };
+
+                debug!(
+                    proxy_version = 1,
+                    real_addr = %real_addr,
+                    header_len = buf.len(),
+                    "Parsed PROXY protocol v1 header"
+                );
+
+                return Ok(real_addr);
+            }
+            HeaderResult::V1(Err(e)) => {
+                anyhow::bail!("Invalid PROXY protocol v1 header: {:?}", e);
+            }
+            HeaderResult::V2(_) => {
+                // Should not happen since first byte wasn't 0x0D
+                anyhow::bail!("Unexpected v2 result for v1 header");
+            }
+        }
+    }
+}
 
 /// Custom extension for peer certificates when using manual TLS handling.
 /// Used in webhook mode where we handle TLS ourselves instead of letting tonic do it.
@@ -483,6 +613,9 @@ pub struct ServerConfig {
 
     /// TLS configuration paths
     pub tls: TlsConfig,
+
+    /// Enable PROXY protocol support (v1 and v2)
+    pub proxy_protocol: bool,
 }
 
 /// Start the gRPC server with optional mTLS.
@@ -595,9 +728,11 @@ pub async fn run_server(
         .await
         .context("Failed to bind to address")?;
 
+    let proxy_protocol = config.proxy_protocol;
+
     // Accept connections and route them
     loop {
-        let (tcp_stream, remote_addr) = match listener.accept().await {
+        let (mut tcp_stream, remote_addr) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
@@ -605,11 +740,26 @@ pub async fn run_server(
             }
         };
 
+        // Parse PROXY protocol header if enabled (before TLS handshake)
+        let real_addr = if proxy_protocol {
+            match parse_proxy_protocol(&mut tcp_stream, remote_addr).await {
+                Ok(addr) => addr,
+                Err(e) => {
+                    debug!("PROXY protocol parse failed from {}: {}", remote_addr, e);
+                    continue;
+                }
+            }
+        } else {
+            remote_addr
+        };
+
         let tls_acceptor = tls_acceptor.clone();
         let grpc_service = grpc_service.clone();
         let http_router = http_router.clone();
 
         tokio::spawn(async move {
+            let _real_addr = real_addr; // Available for logging if needed
+
             // TLS handshake
             let tls_stream = match tls_acceptor.accept(tcp_stream).await {
                 Ok(stream) => stream,
@@ -714,34 +864,159 @@ async fn run_grpc_only_server(
     let ca_cert = std::fs::read_to_string(&config.tls.ca_cert)
         .with_context(|| format!("Failed to read CA cert: {:?}", config.tls.ca_cert))?;
 
-    let identity = Identity::from_pem(&server_cert, &server_key);
-
-    // Configure TLS with optional client auth
-    // - client_ca_root: CA to verify client certs (if presented)
-    // - client_auth_optional: don't reject connections without client certs
-    let tls_config = ServerTlsConfig::new()
-        .identity(identity)
-        .client_ca_root(Certificate::from_pem(&ca_cert))
-        .client_auth_optional(true);
-
     // Create services
-    let registration_service = RegistrationServiceImpl::new(auth_manager.clone(), server_trust);
+    let registration_service =
+        RegistrationServiceImpl::new(Arc::clone(&auth_manager), server_trust);
     let agent_service =
         AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
 
-    info!(
-        addr = %config.listen_addr,
-        "Starting gRPC server (optional mTLS - agent service requires client cert)"
-    );
+    // If PROXY protocol is enabled, we need manual connection handling
+    if config.proxy_protocol {
+        info!(
+            addr = %config.listen_addr,
+            proxy_protocol = true,
+            "Starting gRPC server with PROXY protocol support (optional mTLS)"
+        );
 
-    Server::builder()
-        .tls_config(tls_config)
-        .context("Failed to configure TLS")?
-        .add_service(RegistrationServiceServer::new(registration_service))
-        .add_service(AgentServiceServer::new(agent_service))
-        .serve(config.listen_addr)
-        .await
-        .context("gRPC server error")?;
+        // Build TLS config using rustls (same as webhook mode)
+        let certs = rustls_pemfile::certs(&mut server_cert.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to parse server certificate")?;
+        let key = rustls_pemfile::private_key(&mut server_key.as_bytes())
+            .context("Failed to parse server key")?
+            .context("No private key found")?;
+        let ca_certs = rustls_pemfile::certs(&mut ca_cert.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("Failed to parse CA certificate")?;
+
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            root_store
+                .add(cert)
+                .context("Failed to add CA cert to root store")?;
+        }
+
+        let client_verifier =
+            tokio_rustls::rustls::server::WebPkiClientVerifier::builder(root_store.into())
+                .allow_unauthenticated()
+                .build()
+                .context("Failed to create client verifier")?;
+
+        let mut tls_config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)
+            .context("Failed to configure TLS")?;
+
+        tls_config.alpn_protocols = vec![b"h2".to_vec()];
+        let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+        // Build gRPC service
+        let grpc_service = Routes::new(RegistrationServiceServer::new(registration_service))
+            .add_service(AgentServiceServer::new(agent_service));
+
+        // Bind TCP listener
+        let listener = TcpListener::bind(config.listen_addr)
+            .await
+            .context("Failed to bind to address")?;
+
+        // Accept connections with PROXY protocol support
+        loop {
+            let (mut tcp_stream, remote_addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("Failed to accept connection: {}", e);
+                    continue;
+                }
+            };
+
+            // Parse PROXY protocol header before TLS
+            let real_addr = match parse_proxy_protocol(&mut tcp_stream, remote_addr).await {
+                Ok(addr) => addr,
+                Err(e) => {
+                    debug!("PROXY protocol parse failed from {}: {}", remote_addr, e);
+                    continue;
+                }
+            };
+
+            let tls_acceptor = tls_acceptor.clone();
+            let grpc_service = grpc_service.clone();
+
+            tokio::spawn(async move {
+                let _real_addr = real_addr;
+
+                // TLS handshake
+                let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        debug!("TLS handshake failed from {}: {}", remote_addr, e);
+                        return;
+                    }
+                };
+
+                // Extract peer certificates for mTLS
+                let peer_certs: Option<PeerCertificates> = tls_stream
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .map(|certs| PeerCertificates(certs.iter().map(|c| c.to_vec()).collect()));
+
+                let io = TokioIo::new(tls_stream);
+
+                type UnsyncBody =
+                    http_body_util::combinators::UnsyncBoxBody<hyper::body::Bytes, std::io::Error>;
+
+                let service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                    let mut grpc = grpc_service.clone();
+                    let peer_certs = peer_certs.clone();
+
+                    async move {
+                        let mut req = req;
+                        if let Some(certs) = peer_certs {
+                            req.extensions_mut().insert(certs);
+                        }
+
+                        match grpc.call(req).await {
+                            Ok(resp) => {
+                                let (parts, body) = resp.into_parts();
+                                let body: UnsyncBody = body
+                                    .map_err(|e| std::io::Error::other(e.to_string()))
+                                    .boxed_unsync();
+                                Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
+                            }
+                            Err(e) => Err(std::io::Error::other(e.to_string())),
+                        }
+                    }
+                });
+
+                let builder = HttpBuilder::new(TokioExecutor::new());
+                if let Err(e) = builder.serve_connection(io, service).await {
+                    debug!("Connection error from {}: {}", remote_addr, e);
+                }
+            });
+        }
+    } else {
+        // Standard tonic path (no PROXY protocol)
+        let identity = Identity::from_pem(&server_cert, &server_key);
+
+        let tls_config = ServerTlsConfig::new()
+            .identity(identity)
+            .client_ca_root(Certificate::from_pem(&ca_cert))
+            .client_auth_optional(true);
+
+        info!(
+            addr = %config.listen_addr,
+            "Starting gRPC server (optional mTLS - agent service requires client cert)"
+        );
+
+        Server::builder()
+            .tls_config(tls_config)
+            .context("Failed to configure TLS")?
+            .add_service(RegistrationServiceServer::new(registration_service))
+            .add_service(AgentServiceServer::new(agent_service))
+            .serve(config.listen_addr)
+            .await
+            .context("gRPC server error")?;
+    }
 
     Ok(())
 }

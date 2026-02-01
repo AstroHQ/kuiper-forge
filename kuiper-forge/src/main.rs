@@ -358,6 +358,7 @@ async fn serve(
     let server_config = ServerConfig {
         listen_addr,
         tls: config.tls.clone(),
+        proxy_protocol: config.grpc.proxy_protocol,
     };
 
     // Spawn stale agent cleanup task
