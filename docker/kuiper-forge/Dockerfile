@@ -73,4 +73,4 @@ VOLUME /data
 EXPOSE 9443
 
 ENTRYPOINT ["entrypoint.sh"]
-CMD ["kuiper-forge", "serve", "--config", "/data/config.toml"]
+CMD ["kuiper-forge", "serve"]
