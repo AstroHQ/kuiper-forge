@@ -280,6 +280,9 @@ pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result
 ///
 /// This is designed for long-running commands like the GitHub runner where we want
 /// to capture all output for debugging purposes.
+///
+/// NOTE: For macOS GUI context requirements, use `start_runner_gui_and_wait` instead.
+#[allow(dead_code)]
 pub async fn ssh_exec_with_logging(
     ip: Ipv4Addr,
     config: &SshConfig,
@@ -535,6 +538,10 @@ pub async fn configure_runner(
 /// Returns Ok if the runner exited normally (exit code 0), Err otherwise.
 ///
 /// All runner output (stdout/stderr) is captured to the specified log file.
+///
+/// NOTE: This runs the runner directly via SSH. For operations requiring macOS
+/// GUI context (code signing, keychain, notarization), use `start_runner_gui_and_wait` instead.
+#[allow(dead_code)]
 pub async fn start_runner_and_wait(
     ip: Ipv4Addr,
     config: &SshConfig,
@@ -561,6 +568,173 @@ pub async fn start_runner_and_wait(
             Err(e)
         }
     }
+}
+
+/// Wrapper script for running the GitHub Actions runner in GUI context.
+/// This script is uploaded to the VM and launched via Terminal.app.
+const GUI_RUNNER_SCRIPT: &str =
+    include_str!("../../kuiper-agent-lib/scripts/run_runner_gui_macos.sh");
+
+/// Start the GitHub Actions runner in a GUI context using Terminal.app.
+///
+/// This launches the runner via `open -a Terminal` which provides access to
+/// macOS GUI services (code signing, keychain, notarization, etc.) that don't
+/// work in a headless SSH session.
+///
+/// For ephemeral runners, the process exits when the job completes.
+/// Returns Ok if the runner exited normally (exit code 0), Err otherwise.
+///
+/// All runner output is captured to the specified log file by polling.
+pub async fn start_runner_gui_and_wait(
+    ip: Ipv4Addr,
+    config: &SshConfig,
+    log_path: &Path,
+) -> Result<()> {
+    info!(
+        "Starting runner in GUI mode on {} (logging to {})",
+        ip,
+        log_path.display()
+    );
+
+    // Upload the runner wrapper script to the VM
+    let script_path = "~/start-runner.sh";
+    let upload_cmd = format!(
+        "cat > {} << 'RUNNER_SCRIPT_EOF'\n{}\nRUNNER_SCRIPT_EOF\nchmod +x {}",
+        script_path, GUI_RUNNER_SCRIPT, script_path
+    );
+    ssh_exec(ip, config, &upload_cmd).await.map_err(|e| {
+        Error::Ssh(format!("Failed to upload runner script: {e}"))
+    })?;
+    debug!("Uploaded runner script to {}", script_path);
+
+    // Clean up any previous signal file
+    let _ = ssh_exec(ip, config, "rm -f ~/runner-exit-status").await;
+
+    // Launch via Terminal.app for GUI context
+    let launch_cmd = format!("open -a Terminal {}", script_path);
+    ssh_exec(ip, config, &launch_cmd).await.map_err(|e| {
+        Error::Ssh(format!("Failed to launch runner in Terminal: {e}"))
+    })?;
+    info!("Runner launched in Terminal.app GUI context on {}", ip);
+
+    // Open local log file for writing
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .await
+        .map_err(|e| Error::Ssh(format!("Failed to open log file: {e}")))?;
+
+    // Write header
+    let header = format!(
+        "\n=== Runner (GUI mode) started at {} ===\n\n",
+        Local::now().format("%Y-%m-%d %H:%M:%S"),
+    );
+    log_file
+        .write_all(header.as_bytes())
+        .await
+        .map_err(|e| Error::Ssh(format!("Failed to write to log file: {e}")))?;
+
+    // Poll for completion with 6-hour timeout (for long-running jobs)
+    let timeout = Duration::from_secs(6 * 3600);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_secs(5);
+    let mut last_log_size: u64 = 0;
+
+    loop {
+        // Check for timeout
+        if tokio::time::Instant::now() > deadline {
+            return Err(Error::Timeout("waiting for runner completion (6 hours)"));
+        }
+
+        // Try to read new log content and append to local log
+        // Use wc -c to get file size, then tail if there's new content
+        last_log_size = poll_and_stream_log(ip, config, &mut log_file, last_log_size).await?;
+
+        // Check if runner completed by looking for exit status file
+        if let Ok(exit_content) = ssh_exec(ip, config, "cat ~/runner-exit-status 2>/dev/null").await {
+            let exit_content = exit_content.trim();
+            if !exit_content.is_empty() {
+                // Runner completed - parse exit code
+                let exit_code: i32 = exit_content.parse().unwrap_or(-1);
+
+                // Final log flush - read any remaining content
+                let _ = poll_and_stream_log(ip, config, &mut log_file, last_log_size).await;
+
+                // Write footer
+                let footer = format!(
+                    "\n=== Runner (GUI mode) exited at {} with code {} ===\n",
+                    Local::now().format("%Y-%m-%d %H:%M:%S"),
+                    exit_code
+                );
+                log_file
+                    .write_all(footer.as_bytes())
+                    .await
+                    .map_err(|e| Error::Ssh(format!("Failed to write to log: {e}")))?;
+                log_file
+                    .flush()
+                    .await
+                    .map_err(|e| Error::Ssh(format!("Failed to flush log: {e}")))?;
+
+                if exit_code == 0 {
+                    info!("Runner (GUI mode) completed successfully on {}", ip);
+                    return Ok(());
+                } else {
+                    error!("Runner (GUI mode) failed on {} with exit code {}", ip, exit_code);
+                    return Err(Error::Ssh(format!(
+                        "Runner failed (exit code: {}). See log: {}",
+                        exit_code,
+                        log_path.display()
+                    )));
+                }
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// Poll the remote log file and stream any new content to the local log file.
+/// Returns the new log size after polling.
+async fn poll_and_stream_log(
+    ip: Ipv4Addr,
+    config: &SshConfig,
+    log_file: &mut tokio::fs::File,
+    last_log_size: u64,
+) -> Result<u64> {
+    let size_str = match ssh_exec(ip, config, "wc -c < ~/runner.log 2>/dev/null || echo 0").await {
+        Ok(s) => s,
+        Err(_) => return Ok(last_log_size),
+    };
+
+    let current_size: u64 = match size_str.trim().parse() {
+        Ok(s) => s,
+        Err(_) => return Ok(last_log_size),
+    };
+
+    if current_size <= last_log_size {
+        return Ok(last_log_size);
+    }
+
+    // Read new content using tail with byte offset
+    let bytes_to_read = current_size - last_log_size;
+    let tail_cmd = format!("tail -c {} ~/runner.log 2>/dev/null", bytes_to_read);
+
+    if let Ok(new_content) = ssh_exec(ip, config, &tail_cmd).await
+        && !new_content.is_empty()
+    {
+        log_file
+            .write_all(new_content.as_bytes())
+            .await
+            .map_err(|e| Error::Ssh(format!("Failed to write to log: {e}")))?;
+
+        // Log to tracing for real-time visibility
+        for line in new_content.lines() {
+            debug!("[runner gui] {}", line);
+        }
+    }
+
+    Ok(current_size)
 }
 
 #[cfg(test)]
