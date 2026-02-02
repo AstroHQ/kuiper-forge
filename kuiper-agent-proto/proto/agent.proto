@@ -62,8 +62,17 @@ message AgentStatus {
     string agent_id = 4;      // Agent ID from registration
     string hostname = 5;      // Hostname for display
     string agent_type = 6;    // "tart" or "proxmox"
-    repeated string labels = 7;  // Agent labels for matching
+    repeated string labels = 7;  // Base agent labels (deprecated, use label_sets)
     uint32 max_vms = 8;       // Maximum VMs this agent can handle
+    // Each label set represents one capability the agent can fulfill.
+    // A job matches if its labels are a subset of ANY label set.
+    // Example: [["self-hosted","macos","sequoia"], ["self-hosted","macos","ventura"]]
+    repeated LabelSet label_sets = 9;
+}
+
+// A set of labels representing one capability an agent can fulfill.
+message LabelSet {
+    repeated string labels = 1;
 }
 
 message VmInfo {

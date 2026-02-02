@@ -108,16 +108,33 @@ pub struct WebhookConfig {
     /// The coordinator validates the `X-Hub-Signature-256` header.
     pub secret: String,
 
+    /// Required labels that ALL jobs must have to be accepted (default: ["self-hosted"]).
+    ///
+    /// This is a pre-filter before checking `label_mappings`. Jobs that don't have
+    /// ALL of these labels are ignored. This prevents accepting GitHub-hosted runner
+    /// jobs by mistake.
+    ///
+    /// Set to empty `[]` to disable the filter (not recommended).
+    #[serde(default = "default_required_labels")]
+    pub required_labels: Vec<String>,
+
     /// Label mappings: maps workflow labels to runner scopes.
     ///
     /// When a webhook event arrives, the coordinator looks up the job's labels
     /// to determine which runner scope to use for registration.
+    ///
+    /// If empty and `required_labels` matches, jobs are accepted with the
+    /// organization/repository scope from the webhook event.
     #[serde(default)]
     pub label_mappings: Vec<LabelMapping>,
 }
 
 fn default_webhook_path() -> String {
     "/webhook".to_string()
+}
+
+fn default_required_labels() -> Vec<String> {
+    vec!["self-hosted".to_string()]
 }
 
 /// Maps a set of labels to a runner scope for webhook-driven provisioning.
@@ -243,12 +260,24 @@ pub struct GrpcConfig {
     /// Address to listen on
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
+
+    /// Enable PROXY protocol support (v1 and v2).
+    ///
+    /// When enabled, the server expects incoming connections to begin with a
+    /// PROXY protocol header (sent by load balancers like HAProxy, AWS NLB,
+    /// DigitalOcean LB). The real client IP is extracted from this header.
+    ///
+    /// WARNING: Only enable this if ALL traffic comes through a proxy that
+    /// sends PROXY protocol headers. Direct connections will fail.
+    #[serde(default)]
+    pub proxy_protocol: bool,
 }
 
 impl Default for GrpcConfig {
     fn default() -> Self {
         Self {
             listen_addr: default_listen_addr(),
+            proxy_protocol: false,
         }
     }
 }
@@ -639,7 +668,13 @@ mode = "fixed_capacity"
 # path = "/webhook"                    # Webhook endpoint path (default: /webhook)
 # secret = "your-github-webhook-secret" # For validating X-Hub-Signature-256
 #
-# # Label mappings: map workflow labels to runner scopes
+# # Required labels pre-filter (default: ["self-hosted"])
+# # Jobs must have ALL these labels to be considered. This prevents accepting
+# # GitHub-hosted runner jobs by mistake. Set to [] to disable (not recommended).
+# required_labels = ["self-hosted"]
+#
+# # Label mappings: map workflow labels to runner scopes (optional)
+# # If empty, all jobs passing required_labels are accepted with org scope from webhook.
 # [[provisioning.webhook.label_mappings]]
 # labels = ["self-hosted", "macOS", "ARM64"]
 # runner_group = "my-runner-group"  # optional
@@ -838,5 +873,6 @@ secret = "test-secret"
         let config = parse_config(config_str);
         let webhook = config.provisioning.webhook.unwrap();
         assert_eq!(webhook.path, "/webhook"); // default path
+        assert_eq!(webhook.required_labels, vec!["self-hosted"]); // default required labels
     }
 }

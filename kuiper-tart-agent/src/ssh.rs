@@ -547,7 +547,8 @@ pub async fn start_runner_and_wait(
     );
 
     // Run the runner - for ephemeral runners, this blocks until the job completes
-    let run_cmd = "cd ~/actions-runner && ./run.sh";
+    // Use a login shell to ensure PATH includes Homebrew and other user-installed tools
+    let run_cmd = "zsh -l -c 'cd ~/actions-runner && ./run.sh'";
 
     match ssh_exec_with_logging(ip, config, run_cmd, log_path).await {
         Ok(()) => {

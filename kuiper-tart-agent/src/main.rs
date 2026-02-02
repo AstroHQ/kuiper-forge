@@ -33,8 +33,8 @@ use std::time::Duration;
 use clap::Parser;
 use kuiper_agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationBundle};
 use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Pong, RunnerEvent,
-    RunnerEventType,
+    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, LabelSet, Pong,
+    RunnerEvent, RunnerEventType,
 };
 use tokio::signal;
 use tokio::sync::mpsc;
@@ -158,7 +158,44 @@ async fn main() -> anyhow::Result<()> {
     info!("kuiper-tart-agent starting");
     info!("Coordinator: {}", config.coordinator.url);
     info!("Max concurrent VMs: {}", config.tart.max_concurrent_vms);
-    info!("Labels: {:?}", config.agent.labels);
+
+    // Build label_sets: each set is base_labels + one image_mapping's labels
+    // This represents the capabilities this agent can fulfill
+    let base_labels: Vec<String> = config
+        .agent
+        .labels
+        .iter()
+        .map(|l| l.to_lowercase())
+        .collect();
+
+    let label_sets: Vec<Vec<String>> = if config.tart.image_mappings.is_empty() {
+        // No image mappings - just use base labels as a single capability
+        vec![base_labels.clone()]
+    } else {
+        // Each image_mapping defines a capability: base_labels + mapping labels
+        config
+            .tart
+            .image_mappings
+            .iter()
+            .map(|mapping| {
+                let mut labels = base_labels.clone();
+                for label in &mapping.labels {
+                    let lower = label.to_lowercase();
+                    if !labels.iter().any(|l| l.eq_ignore_ascii_case(&lower)) {
+                        labels.push(lower);
+                    }
+                }
+                labels
+            })
+            .collect()
+    };
+
+    info!(
+        "Label sets: {:?} (base: {:?}, image_mappings: {:?})",
+        label_sets,
+        config.agent.labels,
+        config.tart.image_mappings.iter().map(|m| &m.labels).collect::<Vec<_>>()
+    );
 
     // Initialize VM manager with SSH config from file
     let tart_config = config.tart.clone();
@@ -175,7 +212,8 @@ async fn main() -> anyhow::Result<()> {
         coordinator_hostname: config.coordinator.hostname.clone(),
         registration_token: None, // Already registered, using stored certificates
         agent_type: "tart".to_string(),
-        labels: config.agent.labels.clone(),
+        labels: base_labels,
+        label_sets,
         max_vms: config.tart.max_concurrent_vms,
     };
 
@@ -253,8 +291,9 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         coordinator_hostname: hostname.clone(),
         registration_token: Some(bundle.token),
         agent_type: "tart".to_string(),
-        labels: vec![], // Empty for registration - user will set in config
-        max_vms: 2,     // Default - user will set in config
+        labels: vec![],       // Empty for registration - user will set in config
+        label_sets: vec![],   // Empty for registration - derived from image_mappings
+        max_vms: 2,           // Default - user will set in config
     };
 
     // 5. Connect and register
@@ -775,6 +814,16 @@ impl TartAgent {
     async fn build_status(&self) -> AgentStatus {
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
+        // Convert Vec<Vec<String>> to Vec<LabelSet>
+        let label_sets: Vec<LabelSet> = self
+            .agent_config
+            .label_sets
+            .iter()
+            .map(|ls| LabelSet {
+                labels: ls.clone(),
+            })
+            .collect();
+
         AgentStatus {
             active_vms: self.vm_manager.active_count().await as u32,
             available_slots: self.vm_manager.available_slots().await,
@@ -785,6 +834,7 @@ impl TartAgent {
             agent_type: self.agent_config.agent_type.clone(),
             labels: self.agent_config.labels.clone(),
             max_vms: self.agent_config.max_vms,
+            label_sets,
         }
     }
 }

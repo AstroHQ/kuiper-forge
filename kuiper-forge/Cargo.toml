@@ -1,6 +1,6 @@
 [package]
 name = "kuiper-forge"
-version = "0.1.0"
+version = "0.1.7"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -73,7 +73,13 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 bytes = "1"
 
+# PROXY protocol support (for load balancers)
+ppp = "2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio-stream = { workspace = true }
 rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+h2 = "0.4"
+http = "1"
