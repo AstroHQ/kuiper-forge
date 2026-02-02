@@ -174,9 +174,25 @@ pub const DELETE_PENDING_JOB: &str = "DELETE FROM pending_webhook_jobs WHERE job
 pub const DELETE_PENDING_JOB: &str = "DELETE FROM pending_webhook_jobs WHERE job_id = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs WHERE job_id = ?";
+pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count FROM pending_webhook_jobs WHERE job_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs WHERE job_id = $1";
+pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count FROM pending_webhook_jobs WHERE job_id = $1";
 
-pub const SELECT_ALL_PENDING_JOBS: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at FROM pending_webhook_jobs ORDER BY created_at ASC";
+pub const SELECT_ALL_PENDING_JOBS: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count FROM pending_webhook_jobs ORDER BY created_at ASC";
+
+#[cfg(feature = "sqlite")]
+pub const INCREMENT_PENDING_JOB_RETRY: &str =
+    "UPDATE pending_webhook_jobs SET retry_count = retry_count + 1 WHERE job_id = ? RETURNING retry_count";
+
+#[cfg(feature = "postgres")]
+pub const INCREMENT_PENDING_JOB_RETRY: &str =
+    "UPDATE pending_webhook_jobs SET retry_count = retry_count + 1 WHERE job_id = $1 RETURNING retry_count";
+
+#[cfg(feature = "sqlite")]
+pub const GET_PENDING_JOB_RETRY_COUNT: &str =
+    "SELECT retry_count FROM pending_webhook_jobs WHERE job_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const GET_PENDING_JOB_RETRY_COUNT: &str =
+    "SELECT retry_count FROM pending_webhook_jobs WHERE job_id = $1";

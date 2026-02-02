@@ -14,8 +14,12 @@ pub struct AgentConfig {
     pub registration_token: Option<String>,
     /// Agent type identifier ("tart" or "proxmox")
     pub agent_type: String,
-    /// Labels this agent advertises
+    /// Labels this agent advertises (legacy flat list)
     pub labels: Vec<String>,
+    /// Label sets representing capabilities this agent can fulfill.
+    /// Each set is one capability (base labels + one image_mapping).
+    /// If non-empty, coordinator uses these instead of flat labels for matching.
+    pub label_sets: Vec<Vec<String>>,
     /// Maximum concurrent VMs this agent can handle
     pub max_vms: u32,
 }

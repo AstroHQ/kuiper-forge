@@ -445,7 +445,11 @@ impl RunnerConfigBuilder {
             );
             self.wrap_powershell(&ps_cmd)
         } else {
-            format!("cd {} && ./run.sh", escape_posix_path(&self.runner_dir))
+            // Use a login shell to ensure PATH includes user-installed tools
+            format!(
+                "bash -l -c 'cd {} && ./run.sh'",
+                escape_posix_path(&self.runner_dir)
+            )
         }
     }
 

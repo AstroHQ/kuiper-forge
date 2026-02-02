@@ -261,6 +261,7 @@ async fn test_agent_service_requires_mtls_grpc_only_mode() {
             agent_type: "tart".to_string(),
             labels: vec!["test".to_string()],
             max_vms: 2,
+            label_sets: vec![],
         })),
     })
     .await
@@ -341,6 +342,7 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
             agent_type: "tart".to_string(),
             labels: vec!["test".to_string()],
             max_vms: 2,
+            label_sets: vec![],
         })),
     })
     .await

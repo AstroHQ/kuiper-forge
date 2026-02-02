@@ -275,6 +275,9 @@ impl FleetManager {
         // Process any pending jobs from previous run on startup
         self.process_pending_jobs().await;
 
+        // Poll GitHub API for queued jobs that may have been missed during downtime
+        self.recover_queued_jobs_from_github().await;
+
         // Periodic check interval - ensures pending jobs are processed even if
         // notifications are lost (belt-and-suspenders with the DB-backed queue)
         let check_interval = Duration::from_secs(30);
@@ -332,37 +335,134 @@ impl FleetManager {
         }
     }
 
+    /// Recover queued jobs from GitHub API that may have been missed.
+    ///
+    /// This is called on startup to catch jobs that were queued while the
+    /// coordinator was down or if webhooks were lost.
+    async fn recover_queued_jobs_from_github(&self) {
+        use crate::webhook::{has_required_labels, WebhookRunnerRequest};
+
+        // Get required_labels from webhook config
+        let required_labels = match &self.config.provisioning.webhook {
+            Some(webhook_config) => webhook_config.required_labels.clone(),
+            None => {
+                debug!("No webhook config - skipping GitHub job recovery");
+                return;
+            }
+        };
+
+        info!("Polling GitHub API for queued jobs that may have been missed...");
+
+        // Query GitHub for queued jobs
+        let queued_jobs = match self.token_provider.list_queued_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                warn!("Failed to list queued jobs from GitHub: {}", e);
+                return;
+            }
+        };
+
+        if queued_jobs.is_empty() {
+            info!("No queued jobs found in GitHub");
+            return;
+        }
+
+        info!("Found {} queued job(s) in GitHub - checking against filters", queued_jobs.len());
+
+        let mut added_count = 0;
+        for job in queued_jobs {
+            // Check if job matches required_labels
+            if !has_required_labels(&job.labels, &required_labels) {
+                debug!(
+                    "Job {} doesn't match required labels {:?} - skipping",
+                    job.job_id, required_labels
+                );
+                continue;
+            }
+
+            // Check if we already have this job in pending queue
+            if self.pending_job_store.has_job(job.job_id).await {
+                debug!("Job {} already in pending queue - skipping", job.job_id);
+                continue;
+            }
+
+            // Check if we already have a runner for this job
+            if self.runner_state.has_runner_for_job(job.job_id).await {
+                debug!("Job {} already has active runner - skipping", job.job_id);
+                continue;
+            }
+
+            // Add to pending queue
+            let request = WebhookRunnerRequest {
+                job_id: job.job_id,
+                job_labels: job.labels.clone(),
+                agent_labels: job.labels.clone(), // Use job labels for agent matching
+                runner_scope: job.runner_scope,
+                runner_group: None,
+            };
+
+            if self.pending_job_store.add_job(&request).await {
+                info!(
+                    "Recovered queued job {} from GitHub (labels: {:?})",
+                    job.job_id, job.labels
+                );
+                added_count += 1;
+            }
+        }
+
+        if added_count > 0 {
+            info!("Recovered {} job(s) from GitHub API - processing", added_count);
+            self.process_pending_jobs().await;
+        }
+    }
+
     /// Process pending jobs when capacity becomes available.
     async fn process_pending_jobs(&self) {
-        // Get all pending jobs from DB (ordered by created_at, FIFO)
-        let pending_requests = self.pending_job_store.get_pending_requests().await;
+        use crate::pending_jobs::MAX_RETRIES;
 
-        for request in pending_requests {
-            // Skip if a runner already exists for this job (crash recovery edge case:
-            // runner was created but pending job wasn't removed before crash)
-            if self.runner_state.has_runner_for_job(request.job_id).await {
-                debug!(
-                    "Pending job {} already has active runner - removing from queue",
-                    request.job_id
+        // Get all pending jobs from DB (ordered by created_at, FIFO)
+        let pending_jobs = match self.pending_job_store.get_all_pending_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                error!("Failed to get pending jobs: {}", e);
+                return;
+            }
+        };
+
+        for (job_id, job_info) in pending_jobs {
+            // Check retry count - abandon jobs that have failed too many times
+            if job_info.retry_count >= MAX_RETRIES {
+                warn!(
+                    "Pending job {} has exceeded max retries ({}) - abandoning",
+                    job_id, MAX_RETRIES
                 );
-                self.pending_job_store.remove_job(request.job_id).await;
+                self.pending_job_store.remove_job(job_id).await;
+                continue;
+            }
+
+            // Skip if a runner already exists for this job (it's already being processed)
+            if self.runner_state.has_runner_for_job(job_id).await {
+                debug!(
+                    "Pending job {} already has active runner - skipping",
+                    job_id
+                );
                 continue;
             }
 
             // Try to create a runner for this job
             match self
                 .create_runner_on_demand(
-                    &request.agent_labels,
-                    &request.runner_scope,
-                    request.runner_group.as_deref(),
-                    request.job_id,
+                    &job_info.agent_labels,
+                    &job_info.runner_scope,
+                    job_info.runner_group.as_deref(),
+                    job_id,
                 )
                 .await
             {
                 Ok(()) => {
-                    // Success - remove from DB
-                    self.pending_job_store.remove_job(request.job_id).await;
-                    info!("Created runner for pending job {}", request.job_id);
+                    // Runner creation initiated - job stays in DB until runner completes/fails
+                    // The has_runner_for_job check will skip it on subsequent iterations
+                    info!("Created runner for pending job {}", job_id);
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
@@ -371,12 +471,26 @@ impl FleetManager {
                         debug!("No more capacity for pending jobs");
                         return;
                     } else {
-                        // Different error - remove from queue and log
-                        self.pending_job_store.remove_job(request.job_id).await;
-                        error!(
-                            "Failed to create runner for pending job {}: {}",
-                            request.job_id, e
-                        );
+                        // Different error (token fetch failed, etc.) - increment retry count
+                        if let Some(new_count) =
+                            self.pending_job_store.increment_retry_count(job_id).await
+                        {
+                            if new_count >= MAX_RETRIES {
+                                warn!(
+                                    "Job {} failed to create runner and exceeded max retries: {}",
+                                    job_id, e
+                                );
+                                self.pending_job_store.remove_job(job_id).await;
+                            } else {
+                                warn!(
+                                    "Job {} failed to create runner (attempt {}/{}): {}",
+                                    job_id,
+                                    new_count,
+                                    MAX_RETRIES,
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -461,10 +575,39 @@ impl FleetManager {
         // Clone for async task
         let agent_registry = self.agent_registry.clone();
         let token_provider = self.token_provider.clone();
+        let pending_job_store = self.pending_job_store.clone();
         let runner_scope = runner_scope.clone();
         let runner_name_clone = runner_name.clone();
         let runner_state = self.runner_state.clone();
         let agent_id_clone = agent_id.clone();
+
+        // Helper to handle retry counting on command-level failures
+        // (agent rejection, timeout, unexpected response)
+        async fn handle_command_failure(
+            pending_job_store: &crate::pending_jobs::PendingJobStore,
+            job_id: u64,
+            error_context: &str,
+        ) {
+            use crate::pending_jobs::MAX_RETRIES;
+
+            if let Some(new_count) = pending_job_store.increment_retry_count(job_id).await {
+                if new_count >= MAX_RETRIES {
+                    warn!(
+                        job_id = %job_id,
+                        "Job exceeded max retries ({}) after {error_context} - abandoning",
+                        MAX_RETRIES
+                    );
+                    pending_job_store.remove_job(job_id).await;
+                } else {
+                    warn!(
+                        job_id = %job_id,
+                        retry_count = %new_count,
+                        max_retries = %MAX_RETRIES,
+                        "Job will be retried after {error_context}"
+                    );
+                }
+            }
+        }
 
         // Spawn task to send command and handle response
         tokio::spawn(async move {
@@ -496,8 +639,13 @@ impl FleetManager {
                                     runner_name_clone, e
                                 );
                             }
-                            // Removing the runner from state makes the job_id available for retry
                             runner_state.remove_runner(&runner_name_clone).await;
+                            handle_command_failure(
+                                &pending_job_store,
+                                job_id,
+                                &format!("agent rejection: {}", ack.error),
+                            )
+                            .await;
                         }
                     }
                     Some(AgentPayload::Result(result)) => {
@@ -508,8 +656,16 @@ impl FleetManager {
                                 "Runner {} completed successfully (webhook)",
                                 runner_name_clone
                             );
+                            // Success - remove from pending queue
+                            pending_job_store.remove_job(job_id).await;
                         } else {
                             warn!("Runner {} failed: {}", runner_name_clone, result.error);
+                            handle_command_failure(
+                                &pending_job_store,
+                                job_id,
+                                &format!("runner failure: {}", result.error),
+                            )
+                            .await;
                         }
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)
@@ -538,21 +694,29 @@ impl FleetManager {
                             );
                         }
                         runner_state.remove_runner(&runner_name_clone).await;
+                        handle_command_failure(
+                            &pending_job_store,
+                            job_id,
+                            "unexpected agent response",
+                        )
+                        .await;
                     }
                 },
                 Err(e) => {
                     error!("CreateRunner command failed (webhook): {}", e);
                     agent_registry.release_slot(&agent_id_clone).await;
-                    if let Err(e) = token_provider
+                    if let Err(e_inner) = token_provider
                         .remove_runner(&runner_scope, &runner_name_clone)
                         .await
                     {
                         warn!(
                             "Could not remove runner '{}' from GitHub: {}",
-                            runner_name_clone, e
+                            runner_name_clone, e_inner
                         );
                     }
                     runner_state.remove_runner(&runner_name_clone).await;
+                    handle_command_failure(&pending_job_store, job_id, &format!("command error: {}", e))
+                        .await;
                 }
             }
         });
@@ -686,30 +850,85 @@ impl FleetManager {
                 // Agent slot freed - try to process pending webhook jobs
                 self.process_pending_jobs().await;
 
-                match event_type {
-                    RunnerEventType::Failed => {
-                        warn!(
-                            agent_id = %event.agent_id,
-                            runner_name = %runner_name,
-                            error = %event.event.error,
-                            "Runner failed"
-                        );
-                        // Removing the runner from state makes the job_id available for retry
-                        // (deduplication is now DB-backed via has_runner_for_job)
+                // Handle pending job state based on runner outcome
+                if let Some(job_id) = runner_info.job_id {
+                    use crate::pending_jobs::MAX_RETRIES;
+
+                    match event_type {
+                        RunnerEventType::Completed => {
+                            // Success - remove from pending queue
+                            self.pending_job_store.remove_job(job_id).await;
+                            info!(
+                                agent_id = %event.agent_id,
+                                runner_name = %runner_name,
+                                job_id = %job_id,
+                                "Runner completed successfully"
+                            );
+                        }
+                        RunnerEventType::Failed | RunnerEventType::Destroyed => {
+                            // Failure - increment retry count for potential retry
+                            if let Some(new_count) =
+                                self.pending_job_store.increment_retry_count(job_id).await
+                            {
+                                if new_count >= MAX_RETRIES {
+                                    warn!(
+                                        agent_id = %event.agent_id,
+                                        runner_name = %runner_name,
+                                        job_id = %job_id,
+                                        error = %event.event.error,
+                                        "Runner failed and job exceeded max retries ({}) - abandoning",
+                                        MAX_RETRIES
+                                    );
+                                    self.pending_job_store.remove_job(job_id).await;
+                                } else {
+                                    warn!(
+                                        agent_id = %event.agent_id,
+                                        runner_name = %runner_name,
+                                        job_id = %job_id,
+                                        error = %event.event.error,
+                                        retry_count = %new_count,
+                                        max_retries = %MAX_RETRIES,
+                                        "Runner failed - job will be retried"
+                                    );
+                                }
+                            } else {
+                                // Job not in pending store (already completed/removed externally)
+                                warn!(
+                                    agent_id = %event.agent_id,
+                                    runner_name = %runner_name,
+                                    job_id = %job_id,
+                                    error = %event.event.error,
+                                    "Runner failed (job no longer in pending queue)"
+                                );
+                            }
+                        }
+                        _ => {}
                     }
-                    RunnerEventType::Destroyed => {
-                        info!(
-                            agent_id = %event.agent_id,
-                            runner_name = %runner_name,
-                            "Runner destroyed"
-                        );
-                    }
-                    _ => {
-                        info!(
-                            agent_id = %event.agent_id,
-                            runner_name = %runner_name,
-                            "Runner completed"
-                        );
+                } else {
+                    // No job_id means this is a fixed-capacity runner, not webhook-triggered
+                    match event_type {
+                        RunnerEventType::Failed => {
+                            warn!(
+                                agent_id = %event.agent_id,
+                                runner_name = %runner_name,
+                                error = %event.event.error,
+                                "Runner failed"
+                            );
+                        }
+                        RunnerEventType::Destroyed => {
+                            info!(
+                                agent_id = %event.agent_id,
+                                runner_name = %runner_name,
+                                "Runner destroyed"
+                            );
+                        }
+                        _ => {
+                            info!(
+                                agent_id = %event.agent_id,
+                                runner_name = %runner_name,
+                                "Runner completed"
+                            );
+                        }
                     }
                 }
 

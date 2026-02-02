@@ -3,6 +3,9 @@
 //! Persists webhook-triggered runner requests that are waiting for agent capacity.
 //! This ensures jobs survive coordinator restarts and aren't lost if the webhook
 //! processing channel is full.
+//!
+//! Jobs are retried when runners fail due to configuration errors (SSH keys, VM boot, etc.).
+//! After MAX_RETRIES failed attempts, the job is abandoned.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,10 @@ use crate::config::RunnerScope;
 use crate::db::DbPool;
 use crate::sql;
 use crate::webhook::WebhookRunnerRequest;
+
+/// Maximum number of retry attempts for failed runners.
+/// After this many failures, the job is removed and not retried.
+pub const MAX_RETRIES: i32 = 3;
 
 /// Stored information about a pending webhook job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +34,9 @@ pub struct PendingJobInfo {
     pub runner_group: Option<String>,
     /// When the job was received
     pub created_at: DateTime<Utc>,
+    /// Number of failed runner attempts
+    #[serde(default)]
+    pub retry_count: i32,
 }
 
 /// Persistent store for pending webhook jobs.
@@ -143,6 +153,52 @@ impl PendingJobStore {
         }
     }
 
+    /// Increment the retry count for a pending job.
+    ///
+    /// Returns the new retry count, or None if the job doesn't exist.
+    pub async fn increment_retry_count(&self, job_id: u64) -> Option<i32> {
+        let result = sqlx::query(sql::INCREMENT_PENDING_JOB_RETRY)
+            .bind(job_id as i64)
+            .fetch_optional(&self.pool)
+            .await;
+
+        match result {
+            Ok(Some(row)) => {
+                let count: i32 = row.try_get("retry_count").ok()?;
+                debug!("Incremented retry count for job {} to {}", job_id, count);
+                Some(count)
+            }
+            Ok(None) => {
+                debug!("Job {} not found when incrementing retry count", job_id);
+                None
+            }
+            Err(e) => {
+                error!(
+                    "Failed to increment retry count for job {}: {}",
+                    job_id, e
+                );
+                None
+            }
+        }
+    }
+
+    /// Get the current retry count for a pending job.
+    pub async fn get_retry_count(&self, job_id: u64) -> Option<i32> {
+        let result = sqlx::query(sql::GET_PENDING_JOB_RETRY_COUNT)
+            .bind(job_id as i64)
+            .fetch_optional(&self.pool)
+            .await;
+
+        match result {
+            Ok(Some(row)) => row.try_get("retry_count").ok(),
+            Ok(None) => None,
+            Err(e) => {
+                error!("Failed to get retry count for job {}: {}", job_id, e);
+                None
+            }
+        }
+    }
+
     /// Check if a job exists in the pending store.
     pub async fn has_job(&self, job_id: u64) -> bool {
         let result = sqlx::query(sql::SELECT_PENDING_JOB)
@@ -195,6 +251,7 @@ impl PendingJobStore {
         let scope_json: String = row.try_get("runner_scope").ok()?;
         let runner_group: Option<String> = row.try_get("runner_group").ok()?;
         let created_at_str: String = row.try_get("created_at").ok()?;
+        let retry_count: i32 = row.try_get("retry_count").unwrap_or(0);
 
         let job_labels: Vec<String> = match serde_json::from_str(&job_labels_json) {
             Ok(l) => l,
@@ -242,6 +299,7 @@ impl PendingJobStore {
                 runner_scope,
                 runner_group,
                 created_at,
+                retry_count,
             },
         ))
     }

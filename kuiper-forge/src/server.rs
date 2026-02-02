@@ -358,43 +358,56 @@ impl AgentService for AgentServiceImpl {
             .map_err(|e| Status::internal(format!("Stream error: {e}")))?;
 
         // Extract metadata from status message (identity comes from cert, not message)
-        let (hostname, agent_type, labels, max_vms, vm_names) = match &first_msg.payload {
-            Some(AgentPayload::Status(status)) => {
-                let agent_type = match status.agent_type.to_lowercase().as_str() {
-                    "tart" => AgentType::Tart,
-                    "proxmox" => AgentType::Proxmox,
-                    _ => {
-                        return Err(Status::invalid_argument(format!(
-                            "Unknown agent type: {}",
-                            status.agent_type
-                        )));
-                    }
-                };
+        let (hostname, agent_type, labels, label_sets, max_vms, active_vms, vm_names) =
+            match &first_msg.payload {
+                Some(AgentPayload::Status(status)) => {
+                    let agent_type = match status.agent_type.to_lowercase().as_str() {
+                        "tart" => AgentType::Tart,
+                        "proxmox" => AgentType::Proxmox,
+                        _ => {
+                            return Err(Status::invalid_argument(format!(
+                                "Unknown agent type: {}",
+                                status.agent_type
+                            )));
+                        }
+                    };
 
-                // Extract VM names for recovery
-                let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
+                    // Extract VM names for recovery
+                    let vm_names: Vec<String> =
+                        status.vms.iter().map(|vm| vm.name.clone()).collect();
 
-                (
-                    status.hostname.clone(),
-                    agent_type,
-                    status.labels.clone(),
-                    status.max_vms as usize,
-                    vm_names,
-                )
-            }
-            _ => {
-                return Err(Status::invalid_argument(
-                    "First message must be a status message",
-                ));
-            }
-        };
+                    // Extract label_sets (capability sets) - each LabelSet becomes a Vec<String>
+                    let label_sets: Vec<Vec<String>> = status
+                        .label_sets
+                        .iter()
+                        .map(|ls| ls.labels.clone())
+                        .collect();
+
+                    (
+                        status.hostname.clone(),
+                        agent_type,
+                        status.labels.clone(),
+                        label_sets,
+                        status.max_vms as usize,
+                        status.active_vms as usize,
+                        vm_names,
+                    )
+                }
+                _ => {
+                    return Err(Status::invalid_argument(
+                        "First message must be a status message",
+                    ));
+                }
+            };
 
         info!(
             agent_id = %agent_id,
             hostname = %hostname,
             agent_type = %agent_type,
             labels = ?labels,
+            label_sets = ?label_sets,
             max_vms = max_vms,
+            active_vms = active_vms,
             "Agent stream connected"
         );
 
@@ -412,7 +425,9 @@ impl AgentService for AgentServiceImpl {
                 agent_type,
                 hostname,
                 max_vms,
+                active_vms,
                 labels,
+                label_sets,
                 command_tx,
             )
             .await;

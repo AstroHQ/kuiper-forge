@@ -16,8 +16,8 @@ pub use proto::registration_service_server::{RegistrationService, RegistrationSe
 
 pub use proto::{
     AgentMessage, AgentStatus, CommandAck, CommandResult, CoordinatorMessage, CreateRunnerCommand,
-    CreateRunnerResult, DestroyRunnerCommand, DestroyRunnerResult, Ping, Pong, RegisterRequest,
-    RegisterResponse, RunnerEvent, VmInfo,
+    CreateRunnerResult, DestroyRunnerCommand, DestroyRunnerResult, LabelSet, Ping, Pong,
+    RegisterRequest, RegisterResponse, RunnerEvent, VmInfo,
 };
 
 // Re-export the payload enums for pattern matching

@@ -18,7 +18,7 @@ use kuiper_agent_lib::{
     AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector, RegistrationBundle,
 };
 use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, Ping, Pong,
+    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, LabelSet, Ping, Pong,
     RunnerEvent, RunnerEventType, VmInfo,
 };
 use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
@@ -191,8 +191,9 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         coordinator_hostname: hostname.clone(),
         registration_token: Some(bundle.token),
         agent_type: "proxmox".to_string(),
-        labels: vec![], // Empty for registration - user will set in config
-        max_vms: 5,     // Default - user will set in config
+        labels: vec![],      // Empty for registration - user will set in config
+        label_sets: vec![],  // Empty for registration - user will set in config
+        max_vms: 5,          // Default - user will set in config
     };
 
     // 5. Connect and register
@@ -361,12 +362,15 @@ impl ProxmoxAgent {
     async fn connect_and_run(self: &Arc<Self>) -> Result<()> {
         // Create agent config for connector
         // Use registration token from CLI args (for first-time registration)
+        // For proxmox, label_sets is just a single set containing the configured labels
+        let labels = self.config.agent.labels.clone();
         let agent_config = LibAgentConfig {
             coordinator_url: self.config.coordinator.url.clone(),
             coordinator_hostname: self.config.coordinator.hostname.clone(),
             registration_token: None, // Already registered, using stored certificates
             agent_type: "proxmox".to_string(),
-            labels: self.config.agent.labels.clone(),
+            labels: labels.clone(),
+            label_sets: vec![labels], // Single capability set
             max_vms: self.config.vm.concurrent_vms,
         };
 
@@ -651,6 +655,12 @@ impl ProxmoxAgent {
         let available = self.config.vm.concurrent_vms.saturating_sub(active_count);
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
+        // Convert labels to label_sets (single capability set for proxmox)
+        let labels = self.config.agent.labels.clone();
+        let label_sets = vec![LabelSet {
+            labels: labels.clone(),
+        }];
+
         AgentStatus {
             active_vms: active_count,
             available_slots: available,
@@ -667,8 +677,9 @@ impl ProxmoxAgent {
             agent_id: self.cert_store.get_agent_id().unwrap_or_default(),
             hostname,
             agent_type: "proxmox".to_string(),
-            labels: self.config.agent.labels.clone(),
+            labels,
             max_vms: self.config.vm.concurrent_vms,
+            label_sets,
         }
     }
 }

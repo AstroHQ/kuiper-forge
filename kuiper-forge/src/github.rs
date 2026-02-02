@@ -19,6 +19,17 @@ use tracing::{debug, info};
 
 use crate::config::RunnerScope;
 
+/// Information about a queued workflow job discovered from GitHub API.
+#[derive(Debug, Clone)]
+pub struct QueuedJob {
+    /// The workflow job ID
+    pub job_id: u64,
+    /// Labels requested by this job
+    pub labels: Vec<String>,
+    /// The scope (org or repo) where this job was queued
+    pub runner_scope: RunnerScope,
+}
+
 /// Trait for obtaining runner registration tokens and managing runners.
 ///
 /// This abstracts the token source so we can use either:
@@ -32,6 +43,10 @@ pub trait RunnerTokenProvider: Send + Sync {
     /// Remove a runner from GitHub by name.
     /// This is called when a runner VM is destroyed or agent disconnects.
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()>;
+
+    /// List all queued workflow jobs across all installations.
+    /// This is used on startup to recover jobs that may have been missed.
+    async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>>;
 }
 
 /// Mock token provider for dry-run/testing mode.
@@ -57,6 +72,11 @@ impl RunnerTokenProvider for MockTokenProvider {
             runner_name, scope
         );
         Ok(())
+    }
+
+    async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
+        info!("DRY-RUN: list_queued_jobs returns empty (no GitHub API access)");
+        Ok(Vec::new())
     }
 }
 
@@ -133,6 +153,56 @@ struct Installation {
 #[derive(Debug, Deserialize)]
 struct InstallationAccount {
     login: String,
+}
+
+/// Response from list workflow runs endpoint
+#[derive(Debug, Deserialize)]
+struct WorkflowRunsResponse {
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+/// Individual workflow run from GitHub API
+#[derive(Debug, Deserialize)]
+struct WorkflowRun {
+    id: u64,
+    #[allow(dead_code)]
+    status: String,
+}
+
+/// Response from list jobs for a workflow run
+#[derive(Debug, Deserialize)]
+struct WorkflowJobsResponse {
+    jobs: Vec<WorkflowJob>,
+}
+
+/// Individual workflow job from GitHub API
+#[derive(Debug, Deserialize)]
+struct WorkflowJob {
+    id: u64,
+    status: String,
+    labels: Vec<String>,
+}
+
+/// Repository owner from GitHub API
+#[derive(Debug, Deserialize, Clone)]
+struct RepoOwner {
+    login: String,
+}
+
+/// Response from list installation repositories endpoint
+#[derive(Debug, Deserialize)]
+struct InstallationReposResponse {
+    repositories: Vec<RepoInfo>,
+}
+
+/// Repository info from installation repositories endpoint
+#[derive(Debug, Deserialize, Clone)]
+struct RepoInfo {
+    full_name: String,
+    owner: RepoOwner,
+    name: String,
+    /// Last push time - used to filter for recently active repos
+    pushed_at: Option<String>,
 }
 
 /// GitHub API client for managing runners
@@ -514,6 +584,224 @@ impl GitHubClient {
             }
         }
     }
+
+    /// List all queued workflow jobs across all installations.
+    ///
+    /// Queries each repository for active workflow runs, then checks jobs.
+    /// Uses parallelization to speed up the queries.
+    pub async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
+        info!("Scanning GitHub for queued workflow jobs...");
+
+        // Ensure installations are discovered
+        self.discover_installations().await?;
+
+        let mut all_jobs = Vec::new();
+
+        // Get all installation IDs
+        let installation_ids: Vec<(String, u64)> = {
+            let cache = self.installation_ids.read().await;
+            cache.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        };
+
+        for (account, installation_id) in installation_ids {
+            debug!("Scanning installation for account: {}", account);
+
+            // Get access token for this installation
+            let access_token = match self.get_access_token(installation_id).await {
+                Ok(token) => token,
+                Err(e) => {
+                    debug!("Failed to get access token for {}: {}", account, e);
+                    continue;
+                }
+            };
+
+            // List repositories accessible to this installation (with pagination)
+            let mut repos: Vec<RepoInfo> = Vec::new();
+            let mut page = 1;
+            loop {
+                let repos_url = format!(
+                    "{GITHUB_API_URL}/installation/repositories?per_page=100&page={}",
+                    page
+                );
+                let repos_response = self
+                    .http_client
+                    .get(&repos_url)
+                    .header("Authorization", format!("Bearer {access_token}"))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .send()
+                    .await;
+
+                let page_repos: Vec<RepoInfo> = match repos_response {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<InstallationReposResponse>().await {
+                            Ok(r) => r.repositories,
+                            Err(e) => {
+                                debug!("Failed to parse repos for {}: {}", account, e);
+                                break;
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        debug!("Failed to list repos for {} ({})", account, resp.status());
+                        break;
+                    }
+                    Err(e) => {
+                        debug!("Failed to list repos for {}: {}", account, e);
+                        break;
+                    }
+                };
+
+                let count = page_repos.len();
+                repos.extend(page_repos);
+
+                if count < 100 {
+                    break;
+                }
+                page += 1;
+            }
+
+            debug!("Found {} repos for installation {}", repos.len(), account);
+
+            // Filter to only repos with recent activity (pushed in last 24 hours)
+            // Jobs can only be queued if there was a recent push triggering a workflow
+            let cutoff = Utc::now() - Duration::hours(24);
+            let active_repos: Vec<_> = repos
+                .into_iter()
+                .filter(|repo| {
+                    repo.pushed_at
+                        .as_ref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|t| t.with_timezone(&Utc) > cutoff)
+                        .unwrap_or(true) // Include if we can't parse the date
+                })
+                .collect();
+
+            debug!(
+                "Filtered to {} recently active repos for {}",
+                active_repos.len(),
+                account
+            );
+
+            // Query repos in parallel batches (limit concurrency to avoid rate limits)
+            const BATCH_SIZE: usize = 20;
+
+            for chunk in active_repos.chunks(BATCH_SIZE) {
+                let mut handles = Vec::with_capacity(chunk.len());
+                for repo in chunk {
+                    let client = self.http_client.clone();
+                    let token = access_token.clone();
+                    let repo = repo.clone();
+                    handles.push(tokio::spawn(async move {
+                        Self::find_queued_jobs_in_repo(&client, &token, &repo).await
+                    }));
+                }
+
+                for handle in handles {
+                    if let Ok(jobs) = handle.await {
+                        all_jobs.extend(jobs);
+                    }
+                }
+            }
+        }
+
+        info!(
+            "Found {} queued workflow jobs across all installations",
+            all_jobs.len()
+        );
+        Ok(all_jobs)
+    }
+
+    /// Find queued jobs in a single repository.
+    async fn find_queued_jobs_in_repo(
+        client: &Client,
+        token: &str,
+        repo: &RepoInfo,
+    ) -> Vec<QueuedJob> {
+        let mut jobs = Vec::new();
+
+        // Query runs with statuses that may have queued jobs
+        for run_status in ["queued", "in_progress", "waiting"] {
+            let runs_url = format!(
+                "{GITHUB_API_URL}/repos/{}/actions/runs?status={}&per_page=100",
+                repo.full_name, run_status
+            );
+
+            let runs_response = client
+                .get(&runs_url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await;
+
+            let runs: Vec<WorkflowRun> = match runs_response {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<WorkflowRunsResponse>().await {
+                        Ok(r) => r.workflow_runs,
+                        Err(_) => continue,
+                    }
+                }
+                _ => continue,
+            };
+
+            if !runs.is_empty() {
+                debug!(
+                    "Found {} {} runs in {}",
+                    runs.len(),
+                    run_status,
+                    repo.full_name
+                );
+            }
+
+            // For each run, get the jobs
+            for run in runs {
+                let jobs_url = format!(
+                    "{GITHUB_API_URL}/repos/{}/actions/runs/{}/jobs",
+                    repo.full_name, run.id
+                );
+
+                let jobs_response = client
+                    .get(&jobs_url)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .send()
+                    .await;
+
+                let run_jobs: Vec<WorkflowJob> = match jobs_response {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<WorkflowJobsResponse>().await {
+                            Ok(r) => r.jobs,
+                            Err(_) => continue,
+                        }
+                    }
+                    _ => continue,
+                };
+
+                // Filter for queued/pending jobs (jobs waiting for a runner)
+                for job in run_jobs {
+                    if job.status == "queued" || job.status == "waiting" {
+                        debug!(
+                            "Found {} job {} in {}: labels={:?}",
+                            job.status, job.id, repo.full_name, job.labels
+                        );
+                        // Use org-level scope (matches webhook behavior and GitHub App permissions)
+                        let scope = RunnerScope::Organization {
+                            name: repo.owner.login.clone(),
+                        };
+                        jobs.push(QueuedJob {
+                            job_id: job.id,
+                            labels: job.labels,
+                            runner_scope: scope,
+                        });
+                    }
+                }
+            }
+        }
+
+        jobs
+    }
 }
 
 #[async_trait]
@@ -526,6 +814,11 @@ impl RunnerTokenProvider for GitHubClient {
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {
         // Delegate to the inherent method
         GitHubClient::remove_runner(self, scope, runner_name).await
+    }
+
+    async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
+        // Delegate to the inherent method
+        GitHubClient::list_queued_jobs(self).await
     }
 }
 

@@ -64,7 +64,13 @@ pub struct ConnectedAgent {
     reserved_slots: usize,
 
     /// Labels this agent supports (e.g., ["macos", "arm64"])
+    /// Deprecated: use label_sets for capability-based matching
     pub labels: Vec<String>,
+
+    /// Label sets representing capabilities this agent can fulfill.
+    /// Each set is one capability (e.g., base labels + one image_mapping).
+    /// A job matches if its labels are a subset of ANY label set.
+    pub label_sets: Vec<Vec<String>>,
 
     /// Channel to send commands to this agent
     pub command_tx: mpsc::Sender<CoordinatorMessage>,
@@ -83,7 +89,9 @@ impl ConnectedAgent {
         agent_type: AgentType,
         hostname: String,
         max_vms: usize,
+        active_vms: usize,
         labels: Vec<String>,
+        label_sets: Vec<Vec<String>>,
         command_tx: mpsc::Sender<CoordinatorMessage>,
     ) -> Self {
         Self {
@@ -91,9 +99,10 @@ impl ConnectedAgent {
             agent_type,
             hostname,
             max_vms,
-            active_vms: 0,
+            active_vms,
             reserved_slots: 0,
             labels,
+            label_sets,
             command_tx,
             pending_commands: RwLock::new(HashMap::new()),
             last_seen: std::time::Instant::now(),
@@ -129,13 +138,30 @@ impl ConnectedAgent {
         self.reserved_slots = self.reserved_slots.saturating_sub(1);
     }
 
-    /// Check if this agent matches all required labels (case-insensitive)
+    /// Check if this agent can handle a job with the given labels.
+    ///
+    /// If label_sets are configured, returns true if required_labels is a subset
+    /// of ANY label set (each set represents one capability the agent can fulfill).
+    ///
+    /// Falls back to legacy flat labels matching if no label_sets are configured.
     pub fn matches_labels(&self, required_labels: &[String]) -> bool {
-        required_labels.iter().all(|required| {
-            self.labels
-                .iter()
-                .any(|label| label.eq_ignore_ascii_case(required))
-        })
+        if !self.label_sets.is_empty() {
+            // New capability-based matching: job labels must be subset of ANY label set
+            self.label_sets.iter().any(|label_set| {
+                required_labels.iter().all(|required| {
+                    label_set
+                        .iter()
+                        .any(|label| label.eq_ignore_ascii_case(required))
+                })
+            })
+        } else {
+            // Legacy flat labels matching
+            required_labels.iter().all(|required| {
+                self.labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case(required))
+            })
+        }
     }
 
     /// Register a pending command and return the response channel
@@ -188,7 +214,9 @@ impl AgentRegistry {
         agent_type: AgentType,
         hostname: String,
         max_vms: usize,
+        active_vms: usize,
         labels: Vec<String>,
+        label_sets: Vec<Vec<String>>,
         command_tx: mpsc::Sender<CoordinatorMessage>,
     ) -> Arc<RwLock<ConnectedAgent>> {
         let agent = Arc::new(RwLock::new(ConnectedAgent::new(
@@ -196,7 +224,9 @@ impl AgentRegistry {
             agent_type,
             hostname.clone(),
             max_vms,
+            active_vms,
             labels.clone(),
+            label_sets.clone(),
             command_tx,
         )));
 
@@ -208,7 +238,9 @@ impl AgentRegistry {
             agent_type = %agent_type,
             hostname = %hostname,
             labels = ?labels,
+            label_sets = ?label_sets,
             max_vms = max_vms,
+            active_vms = active_vms,
             "Agent registered"
         );
 
@@ -365,13 +397,22 @@ impl AgentRegistry {
     pub async fn update_status(&self, agent_id: &str, active_vms: usize) {
         if let Some(agent) = self.get(agent_id).await {
             let mut agent = agent.write().await;
+            let old_active = agent.active_vms;
             agent.active_vms = active_vms;
-            // Clear reserved slots when we get a status update since active_vms is authoritative
-            agent.reserved_slots = 0;
+
+            // Only reduce reserved_slots when active_vms increases (VM creation completed).
+            // Don't clear all reserved_slots on every status update - the status might arrive
+            // before the VM is created, which would cause us to over-schedule.
+            if active_vms > old_active {
+                let newly_active = active_vms - old_active;
+                agent.reserved_slots = agent.reserved_slots.saturating_sub(newly_active);
+            }
+
             agent.touch();
             debug!(
                 agent_id = %agent_id,
                 active_vms = active_vms,
+                reserved_slots = agent.reserved_slots,
                 "Agent status updated"
             );
         }
@@ -570,7 +611,9 @@ mod tests {
                 AgentType::Tart,
                 "mac-mini-1".to_string(),
                 2,
+                0, // active_vms
                 vec!["macos".to_string(), "arm64".to_string()],
+                vec![], // no label_sets - use legacy flat labels
                 tx,
             )
             .await;
@@ -603,7 +646,9 @@ mod tests {
                 AgentType::Tart,
                 "mac-mini-1".to_string(),
                 2,
+                0, // active_vms
                 vec!["macos".to_string()],
+                vec![], // no label_sets
                 tx,
             )
             .await;
@@ -621,6 +666,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reserved_slots_preserved_on_status_update() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                2,
+                0, // active_vms
+                vec!["macos".to_string()],
+                vec![],
+                tx,
+            )
+            .await;
+
+        // Reserve both slots (simulating coordinator sending 2 CreateRunner commands)
+        assert!(registry.reserve_slot("agent_1").await);
+        assert!(registry.reserve_slot("agent_1").await);
+
+        // Now at capacity (0 active, 2 reserved)
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
+
+        // Status update arrives with active_vms=0 (VMs not created yet)
+        // This should NOT clear reserved_slots
+        registry.update_status("agent_1", 0).await;
+
+        // Should still be at capacity
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
+
+        // Now VM is created - status update with active_vms=1
+        // Should reduce reserved_slots by 1
+        registry.update_status("agent_1", 1).await;
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0); // 1 active + 1 reserved = 2
+
+        // Second VM created
+        registry.update_status("agent_1", 2).await;
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0); // 2 active + 0 reserved
+
+        // VM destroyed
+        registry.update_status("agent_1", 1).await;
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 1); // 1 active
+    }
+
+    #[tokio::test]
     async fn test_get_pool_definitions() {
         let registry = AgentRegistry::new();
         let (tx1, _rx1) = mpsc::channel(32);
@@ -634,11 +725,13 @@ mod tests {
                 AgentType::Tart,
                 "mac-mini-1".to_string(),
                 2,
+                0, // active_vms
                 vec![
                     "self-hosted".to_string(),
                     "macos".to_string(),
                     "arm64".to_string(),
                 ],
+                vec![], // no label_sets
                 tx1,
             )
             .await;
@@ -649,11 +742,13 @@ mod tests {
                 AgentType::Tart,
                 "mac-mini-2".to_string(),
                 3,
+                0, // active_vms
                 vec![
                     "self-hosted".to_string(),
                     "macos".to_string(),
                     "arm64".to_string(),
                 ],
+                vec![], // no label_sets
                 tx2,
             )
             .await;
@@ -665,11 +760,13 @@ mod tests {
                 AgentType::Proxmox,
                 "proxmox-1".to_string(),
                 5,
+                0, // active_vms
                 vec![
                     "self-hosted".to_string(),
                     "linux".to_string(),
                     "x64".to_string(),
                 ],
+                vec![], // no label_sets
                 tx3,
             )
             .await;
@@ -699,5 +796,75 @@ mod tests {
         let registry = AgentRegistry::new();
         let pools = registry.get_pool_definitions().await;
         assert_eq!(pools.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_label_sets_matching() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+
+        // Register agent with two label sets (capabilities):
+        // - Can handle jobs requiring [self-hosted, macos, sequoia]
+        // - Can handle jobs requiring [self-hosted, macos, ventura]
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                2,
+                0, // active_vms
+                vec!["self-hosted".to_string(), "macos".to_string()], // base labels
+                vec![
+                    vec![
+                        "self-hosted".to_string(),
+                        "macos".to_string(),
+                        "sequoia".to_string(),
+                    ],
+                    vec![
+                        "self-hosted".to_string(),
+                        "macos".to_string(),
+                        "ventura".to_string(),
+                    ],
+                ],
+                tx,
+            )
+            .await;
+
+        // Should match job requiring sequoia
+        let found = registry
+            .find_available_agent(&[
+                "self-hosted".to_string(),
+                "macOS".to_string(), // case-insensitive
+                "sequoia".to_string(),
+            ])
+            .await;
+        assert_eq!(found, Some("agent_1".to_string()));
+
+        // Should match job requiring ventura
+        let found = registry
+            .find_available_agent(&[
+                "self-hosted".to_string(),
+                "macos".to_string(),
+                "ventura".to_string(),
+            ])
+            .await;
+        assert_eq!(found, Some("agent_1".to_string()));
+
+        // Should NOT match job requiring both sequoia AND ventura (no single capability has both)
+        let found = registry
+            .find_available_agent(&[
+                "self-hosted".to_string(),
+                "macos".to_string(),
+                "sequoia".to_string(),
+                "ventura".to_string(),
+            ])
+            .await;
+        assert!(found.is_none());
+
+        // Should match job requiring only base labels
+        let found = registry
+            .find_available_agent(&["self-hosted".to_string(), "macos".to_string()])
+            .await;
+        assert_eq!(found, Some("agent_1".to_string()));
     }
 }
