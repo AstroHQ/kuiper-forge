@@ -266,6 +266,8 @@ impl VmManager {
     }
 
     /// Wait for the runner to complete its job.
+    ///
+    /// Uses Terminal.app GUI context for macOS services (code signing, keychain, notarization).
     pub async fn wait_for_runner_exit(&self, vm_id: &str) -> Result<()> {
         let ip = {
             let vms = self.active_vms.read().await;
@@ -274,14 +276,15 @@ impl VmManager {
                 .ok_or_else(|| Error::VmNotFound(vm_id.to_string()))?
         };
 
-        info!("Starting runner and waiting for completion on VM {}", vm_id);
+        info!("Starting runner in GUI mode and waiting for completion on VM {}", vm_id);
 
         // Create log file path for this runner with date
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
         let log_file = self.log_dir.join(format!("runner-{vm_id}-{timestamp}.log"));
 
-        // Start the runner and wait for it to complete, streaming output to log file
-        ssh::start_runner_and_wait(ip, &self.ssh_config, &log_file).await?;
+        // Start the runner in GUI context and wait for it to complete
+        // GUI mode enables code signing, keychain access, and other macOS GUI services
+        ssh::start_runner_gui_and_wait(ip, &self.ssh_config, &log_file).await?;
 
         info!(
             "Runner completed on VM {} (log: {})",
