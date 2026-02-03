@@ -200,6 +200,7 @@ struct InstallationReposResponse {
 struct RepoInfo {
     full_name: String,
     owner: RepoOwner,
+    #[allow(dead_code)]
     name: String,
     /// Last push time - used to filter for recently active repos
     pushed_at: Option<String>,
