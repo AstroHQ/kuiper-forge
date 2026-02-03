@@ -1,0 +1,138 @@
+{% extends "admin/layout.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block body %}
+<nav>
+    <div class="nav-links">
+        <span class="nav-brand">KuiperForge</span>
+        <a href="/admin/dashboard">Dashboard</a>
+    </div>
+    <div class="nav-user">
+        {{ base.username }}
+        <form method="post" action="/admin/logout" style="display: inline;">
+            <button type="submit" style="background: none; border: none; color: #aaa; cursor: pointer; margin-left: 10px;">Logout</button>
+        </form>
+    </div>
+</nav>
+
+<div class="container">
+    <h1>Dashboard</h1>
+
+    <div class="stats-grid">
+        <div class="card stat-card">
+            <div class="stat-value">{{ connected_agents }}</div>
+            <div class="stat-label">Connected Agents</div>
+        </div>
+
+        <div class="card stat-card">
+            <div class="stat-value">{{ agents.len() }}</div>
+            <div class="stat-label">Registered Agents</div>
+        </div>
+
+        <div class="card stat-card">
+            <div class="stat-value">{{ active_runners }}</div>
+            <div class="stat-label">Active Runners</div>
+        </div>
+
+        <div class="card stat-card">
+            <div class="stat-value">{{ pending_jobs }}</div>
+            <div class="stat-label">Pending Jobs</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">
+            Register New Agent
+            <form method="post" action="/admin/tokens/create" style="display: inline; float: right;">
+                <button type="submit" class="btn btn-primary">Create Token</button>
+            </form>
+        </div>
+        {% if let Some(bundle) = new_token %}
+        <div class="token-display">
+            <p><strong>New registration bundle created!</strong> Copy this bundle now - it will not be shown again.</p>
+            <code class="token-value">{{ bundle }}</code>
+            <p style="color: #666; margin-top: 10px;">Run on the agent: <code>kuiper-tart-agent register '{{ bundle }}'</code></p>
+        </div>
+        {% endif %}
+        {% if !tokens.is_empty() %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Token</th>
+                    <th>Created By</th>
+                    <th>Expires</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for token in tokens %}
+                <tr>
+                    <td><code>{{ token.token }}</code></td>
+                    <td>{{ token.created_by }}</td>
+                    <td>{{ token.expires_at }}</td>
+                    <td>
+                        <form method="post" action="/admin/tokens/{{ token.token }}/delete" style="display: inline;">
+                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else if new_token.is_none() %}
+        <p style="color: #666; padding: 20px 0;">No pending registration tokens. Create one to register a new agent.</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-title">Agents</div>
+        {% if agents.is_empty() %}
+        <p style="text-align: center; color: #666; padding: 40px;">No agents registered yet.</p>
+        {% else %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Agent ID</th>
+                    <th>Hostname</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Capacity</th>
+                    <th>Labels</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for agent in agents %}
+                <tr>
+                    <td>
+                        <a href="/admin/agents/{{ agent.agent_id }}">{{ agent.agent_id }}</a>
+                    </td>
+                    <td>{{ agent.hostname }}</td>
+                    <td>{{ agent.agent_type }}</td>
+                    <td>
+                        {% if agent.revoked %}
+                        <span class="badge badge-revoked">Revoked</span>
+                        {% else if agent.is_online %}
+                        <span class="badge badge-online">Online</span>
+                        {% else %}
+                        <span class="badge badge-offline">Offline</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ agent.active_vms }}/{{ agent.max_vms }}</td>
+                    <td>
+                        {% for label in agent.labels %}
+                        <span class="badge badge-label">{{ label }}</span>
+                        {% endfor %}
+                    </td>
+                    <td>
+                        <a href="/admin/agents/{{ agent.agent_id }}" class="btn btn-secondary btn-sm">View</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

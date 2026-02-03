@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use kuiper_forge::admin::{AdminAuthStore, AdminState};
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
 use kuiper_forge::tls::build_server_trust;
@@ -85,6 +86,12 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Admin user management
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -143,6 +150,26 @@ enum AgentCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AdminCommands {
+    /// Create a new admin user
+    CreateUser {
+        /// Username for the new admin user
+        #[arg(long)]
+        username: String,
+    },
+
+    /// List all admin users
+    ListUsers,
+
+    /// Reset an admin user's password
+    ResetPassword {
+        /// Username of the admin user
+        #[arg(long)]
+        username: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -183,6 +210,10 @@ async fn main() -> Result<()> {
         Commands::InitConfig { output } => {
             init_cli_logging(filter);
             generate_config(output)
+        }
+        Commands::Admin { command } => {
+            init_cli_logging(filter);
+            handle_admin_command(command, &cli.config, &cli.data_dir).await
         }
     }
 }
@@ -279,6 +310,24 @@ async fn serve(
     // Initialize persistent pending job store for webhook mode (using shared database)
     let pending_job_store = Arc::new(pending_jobs::PendingJobStore::new(db.pool()));
     pending_job_store.load_and_log().await;
+
+    // Initialize admin UI state if enabled
+    let admin_state = if config.admin.enabled {
+        info!("Admin UI enabled at /admin");
+        let admin_auth_store = AdminAuthStore::new(db.pool());
+        Some(Arc::new(AdminState {
+            auth_store: admin_auth_store,
+            session_timeout_secs: config.admin.session_timeout_secs,
+            auth_manager: auth_manager.clone(),
+            agent_registry: agent_registry.clone(),
+            runner_state: runner_state.clone(),
+            pending_jobs: pending_job_store.clone(),
+            server_trust: server_trust.clone(),
+            coordinator_url: config.admin.coordinator_url.clone(),
+        }))
+    } else {
+        None
+    };
 
     // Start management socket server for CLI communication
     let mgmt_socket_path = management::default_socket_path(data_dir);
@@ -422,7 +471,7 @@ async fn serve(
     // Run fleet manager (if enabled) and server concurrently, with graceful shutdown
     let result = if let Some(fm) = fleet_manager {
         tokio::select! {
-            result = run_server(server_config, server_trust.clone(), auth_manager, agent_registry, fleet_notifier, Some(runner_state), Some(pending_job_store), webhook_config) => {
+            result = run_server(server_config, server_trust.clone(), auth_manager, agent_registry, fleet_notifier, Some(runner_state), Some(pending_job_store), webhook_config, admin_state) => {
                 result
             }
             _ = fm.run() => {
@@ -436,7 +485,7 @@ async fn serve(
         }
     } else {
         tokio::select! {
-            result = run_server(server_config, server_trust.clone(), auth_manager, agent_registry, None, None, None, None) => {
+            result = run_server(server_config, server_trust.clone(), auth_manager, agent_registry, None, None, None, None, admin_state) => {
                 result
             }
             _ = shutdown_signal() => {
@@ -730,6 +779,94 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
             } else {
                 println!("Agent not found.");
             }
+            Ok(())
+        }
+    }
+}
+
+/// Handle admin subcommands
+async fn handle_admin_command(command: AdminCommands, config_path: &Path, data_dir: &Path) -> Result<()> {
+    use std::io::{self, Write};
+
+    // Load config to get database settings
+    let config = Config::load(config_path)?;
+
+    // Initialize database
+    let db = Database::new(&config.database, data_dir).await?;
+    let admin_store = AdminAuthStore::new(db.pool());
+
+    match command {
+        AdminCommands::CreateUser { username } => {
+            // Prompt for password
+            print!("Password: ");
+            io::stdout().flush()?;
+            let password = rpassword::read_password().context("Failed to read password")?;
+
+            if password.is_empty() {
+                return Err(anyhow!("Password cannot be empty"));
+            }
+
+            print!("Confirm password: ");
+            io::stdout().flush()?;
+            let confirm = rpassword::read_password().context("Failed to read password")?;
+
+            if password != confirm {
+                return Err(anyhow!("Passwords do not match"));
+            }
+
+            admin_store.create_user(&username, &password).await?;
+            println!("Admin user '{}' created successfully.", username);
+            Ok(())
+        }
+
+        AdminCommands::ListUsers => {
+            let users = admin_store.list_users().await?;
+
+            if users.is_empty() {
+                println!("No admin users.");
+                return Ok(());
+            }
+
+            println!("{:<20} {:<25} {:<25}", "USERNAME", "CREATED", "LAST LOGIN");
+            println!("{}", "-".repeat(70));
+
+            for user in users {
+                let created = user.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
+                let last_login = user
+                    .last_login
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                println!("{:<20} {:<25} {:<25}", user.username, created, last_login);
+            }
+
+            Ok(())
+        }
+
+        AdminCommands::ResetPassword { username } => {
+            // Check if user exists
+            if admin_store.get_user(&username).await?.is_none() {
+                return Err(anyhow!("User '{}' not found", username));
+            }
+
+            // Prompt for new password
+            print!("New password: ");
+            io::stdout().flush()?;
+            let password = rpassword::read_password().context("Failed to read password")?;
+
+            if password.is_empty() {
+                return Err(anyhow!("Password cannot be empty"));
+            }
+
+            print!("Confirm password: ");
+            io::stdout().flush()?;
+            let confirm = rpassword::read_password().context("Failed to read password")?;
+
+            if password != confirm {
+                return Err(anyhow!("Passwords do not match"));
+            }
+
+            admin_store.update_password(&username, &password).await?;
+            println!("Password for '{}' updated successfully.", username);
             Ok(())
         }
     }

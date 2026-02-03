@@ -10,6 +10,7 @@ compile_error!("Cannot enable both 'sqlite' and 'postgres' features simultaneous
 #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
 compile_error!("At least one database feature must be enabled: 'sqlite' or 'postgres'");
 
+pub mod admin;
 pub mod agent_registry;
 pub mod auth;
 pub mod config;

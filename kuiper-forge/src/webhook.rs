@@ -192,6 +192,28 @@ pub fn webhook_router(state: Arc<WebhookState>) -> Router {
         .with_state(state)
 }
 
+/// Build the combined HTTP router with webhook and admin UI.
+pub fn http_router(
+    webhook_state: Arc<WebhookState>,
+    admin_state: Option<Arc<crate::admin::AdminState>>,
+) -> Router {
+    use axum::response::Redirect;
+    use axum::routing::get;
+
+    let mut router = webhook_router(webhook_state);
+
+    // Add admin UI routes if enabled
+    if let Some(admin_state) = admin_state {
+        // Handle both /admin and /admin/ by redirecting to dashboard
+        router = router
+            .route("/admin", get(|| async { Redirect::to("/admin/dashboard") }))
+            .route("/admin/", get(|| async { Redirect::to("/admin/dashboard") }))
+            .nest("/admin", crate::admin::admin_router(admin_state));
+    }
+
+    router
+}
+
 /// Handle incoming GitHub webhook.
 async fn handle_webhook(
     State(state): State<Arc<WebhookState>>,

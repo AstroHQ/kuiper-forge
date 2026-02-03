@@ -1,0 +1,97 @@
+{% extends "admin/layout.html" %}
+
+{% block title %}Agent: {{ agent.agent_id }}{% endblock %}
+
+{% block body %}
+<nav>
+    <div class="nav-links">
+        <span class="nav-brand">KuiperForge</span>
+        <a href="/admin/dashboard">Dashboard</a>
+    </div>
+    <div class="nav-user">
+        {{ base.username }}
+        <form method="post" action="/admin/logout" style="display: inline;">
+            <button type="submit" style="background: none; border: none; color: #aaa; cursor: pointer; margin-left: 10px;">Logout</button>
+        </form>
+    </div>
+</nav>
+
+<div class="container">
+    <div class="page-header">
+        <h1>Agent: {{ agent.agent_id }}</h1>
+        <div>
+            <a href="/admin/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+            {% if !agent.revoked %}
+            <form method="post" action="/admin/agents/{{ agent.agent_id }}/revoke" style="display: inline;"
+                onsubmit="return confirm('Are you sure you want to revoke this agent? This will disconnect the agent and require re-registration.');">
+                <button type="submit" class="btn btn-danger">Revoke Certificate</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Agent Details</div>
+        <div class="detail-grid">
+            <div class="detail-label">Agent ID</div>
+            <div>{{ agent.agent_id }}</div>
+
+            <div class="detail-label">Hostname</div>
+            <div>{{ agent.hostname }}</div>
+
+            <div class="detail-label">Type</div>
+            <div>{{ agent.agent_type }}</div>
+
+            <div class="detail-label">Status</div>
+            <div>
+                {% if agent.revoked %}
+                <span class="badge badge-revoked">Revoked</span>
+                {% else if agent.is_online %}
+                <span class="badge badge-online">Online</span>
+                {% else %}
+                <span class="badge badge-offline">Offline</span>
+                {% endif %}
+            </div>
+
+            <div class="detail-label">Capacity</div>
+            <div>{{ agent.active_vms }} / {{ agent.max_vms }} VMs</div>
+
+            <div class="detail-label">Labels</div>
+            <div>
+                {% for label in agent.labels %}
+                <span class="badge badge-label">{{ label }}</span>
+                {% endfor %}
+            </div>
+
+            <div class="detail-label">Registered</div>
+            <div>{{ agent.created_at }}</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Active Runners ({{ runners.len() }})</div>
+        {% if runners.is_empty() %}
+        <p style="color: #666;">No active runners on this agent.</p>
+        {% else %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Runner Name</th>
+                    <th>VM Name</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for runner in runners %}
+                <tr>
+                    <td>{{ runner.runner_name }}</td>
+                    <td>{{ runner.vm_name }}</td>
+                    <td>{{ runner.created_at }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

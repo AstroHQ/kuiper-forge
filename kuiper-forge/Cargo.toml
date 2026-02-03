@@ -76,6 +76,13 @@ bytes = "1"
 # PROXY protocol support (for load balancers)
 ppp = "2"
 
+# Admin UI
+askama = { version = "0.12", features = ["with-axum"] }
+askama_axum = "0.4"
+argon2 = { version = "0.5", features = ["std"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+rpassword = "7"
+
 [dev-dependencies]
 tempfile = "3"
 tokio-stream = { workspace = true }

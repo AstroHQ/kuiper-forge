@@ -142,6 +142,7 @@ impl TestFixture {
                 None, // runner_state
                 pending_job_store,
                 webhook_config,
+                None, // admin_state
             );
 
             tokio::select! {
