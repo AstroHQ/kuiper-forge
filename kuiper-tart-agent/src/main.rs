@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
                 return cmd_install(no_load, force, &config_path).await;
             }
             Commands::Uninstall { purge } => {
-                return cmd_uninstall(purge).await;
+                return cmd_uninstall(purge, &config_path).await;
             }
         }
     }
@@ -466,7 +466,7 @@ async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::
 }
 
 /// Handle the uninstall subcommand to remove the LaunchAgent.
-async fn cmd_uninstall(purge: bool) -> anyhow::Result<()> {
+async fn cmd_uninstall(purge: bool, config_path: &Path) -> anyhow::Result<()> {
     let plist_path = install::plist_path();
 
     if !plist_path.exists() {
@@ -495,10 +495,9 @@ async fn cmd_uninstall(purge: bool) -> anyhow::Result<()> {
     if purge {
         println!("\nPurging data files...");
 
-        let config_path = Config::default_path();
         if config_path.exists() {
             print!("Removing config at {}... ", config_path.display());
-            std::fs::remove_file(&config_path)?;
+            std::fs::remove_file(config_path)?;
             println!("done");
         }
 
