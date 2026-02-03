@@ -56,6 +56,10 @@ pub enum Error {
     /// VM is already running.
     #[error("VM already running: {0}")]
     VmAlreadyRunning(String),
+
+    /// Installation error.
+    #[error("Install error: {0}")]
+    Install(String),
 }
 
 /// Result type alias for kuiper-tart-agent.

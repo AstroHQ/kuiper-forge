@@ -22,6 +22,7 @@
 mod config;
 mod error;
 mod host_checks;
+mod install;
 mod ssh;
 mod vm_manager;
 
@@ -67,6 +68,21 @@ enum Commands {
         /// Registration bundle token from coordinator (kfr1_...)
         bundle: String,
     },
+    /// Install as a macOS LaunchAgent (runs on login, restarts on crash)
+    Install {
+        /// Don't load the service after installation (just generate plist)
+        #[arg(long)]
+        no_load: bool,
+        /// Force overwrite existing plist
+        #[arg(long, short)]
+        force: bool,
+    },
+    /// Uninstall the LaunchAgent service
+    Uninstall {
+        /// Also remove configuration and data files
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[tokio::main]
@@ -83,6 +99,12 @@ async fn main() -> anyhow::Result<()> {
         match command {
             Commands::Register { bundle } => {
                 return cmd_register(&bundle, &config_path).await;
+            }
+            Commands::Install { no_load, force } => {
+                return cmd_install(no_load, force, &config_path).await;
+            }
+            Commands::Uninstall { purge } => {
+                return cmd_uninstall(purge, &config_path).await;
             }
         }
     }
@@ -358,6 +380,136 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
 
     println!("Certificate location: {}", cert_store.base_dir().display());
     println!("Config location:      {}", config_path.display());
+
+    Ok(())
+}
+
+/// Handle the install subcommand to set up the agent as a LaunchAgent.
+async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::Result<()> {
+    println!("Installing kuiper-tart-agent as LaunchAgent...\n");
+
+    // 1. Check binary is in PATH
+    print!("Checking binary location... ");
+    let binary_path = install::find_binary_in_path()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    println!("found at {}", binary_path.display());
+
+    // 2. Check config exists
+    print!("Checking configuration... ");
+    if !config_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Config file not found at {}.\nRun 'kuiper-tart-agent register <token>' first.",
+            config_path.display()
+        ));
+    }
+    println!("found at {}", config_path.display());
+
+    // 3. Check for existing installation
+    let plist_path = install::plist_path();
+    if plist_path.exists() {
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Service already installed at {}.\nUse --force to overwrite.",
+                plist_path.display()
+            ));
+        }
+        // Always unload before overwriting - service may be loaded even if not "running"
+        print!("Unloading existing service... ");
+        let _ = install::unload_service(); // Ignore errors
+        println!("done");
+    }
+
+    // 4. Ensure log directory exists
+    let log_dir = Config::default_data_dir().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // 5. Generate plist
+    let plist_content = install::generate_plist(&binary_path, config_path, &log_dir);
+
+    // 6. Ensure LaunchAgents directory exists
+    let launch_agents_dir = install::launch_agents_dir();
+    if !launch_agents_dir.exists() {
+        std::fs::create_dir_all(&launch_agents_dir)?;
+    }
+
+    // 8. Write plist
+    print!("Writing plist to {}... ", plist_path.display());
+    std::fs::write(&plist_path, &plist_content)?;
+    println!("done");
+
+    // 9. Load service
+    if !no_load {
+        print!("Loading service... ");
+        install::load_service()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        println!("done");
+
+        // Brief delay then check status
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if install::is_service_running() {
+            println!("\n\u{2713} Service is running.");
+        } else {
+            println!("\nWarning: Service may not have started. Check logs at {}", log_dir.display());
+        }
+    } else {
+        println!("\nPlist generated but not loaded (--no-load specified).");
+    }
+
+    println!("\nInstallation complete!");
+    println!("\nUseful commands:");
+    println!("  View logs:    tail -f {}/launchd-stdout.log", log_dir.display());
+    println!("  Stop:         launchctl unload {}", plist_path.display());
+    println!("  Start:        launchctl load {}", plist_path.display());
+    println!("  Uninstall:    kuiper-tart-agent uninstall");
+
+    Ok(())
+}
+
+/// Handle the uninstall subcommand to remove the LaunchAgent.
+async fn cmd_uninstall(purge: bool, config_path: &Path) -> anyhow::Result<()> {
+    let plist_path = install::plist_path();
+
+    if !plist_path.exists() {
+        println!("Service not installed (no plist at {}).", plist_path.display());
+        if !purge {
+            return Ok(());
+        }
+    } else {
+        println!("Found service at {}", plist_path.display());
+
+        // Unload if running
+        if install::is_service_running() {
+            print!("Stopping service... ");
+            let _ = install::unload_service(); // Ignore errors
+            println!("done");
+        }
+
+        // Remove plist
+        print!("Removing plist... ");
+        std::fs::remove_file(&plist_path)?;
+        println!("done");
+
+        println!("\u{2713} Service uninstalled.");
+    }
+
+    if purge {
+        println!("\nPurging data files...");
+
+        if config_path.exists() {
+            print!("Removing config at {}... ", config_path.display());
+            std::fs::remove_file(config_path)?;
+            println!("done");
+        }
+
+        let data_dir = Config::default_data_dir();
+        if data_dir.exists() {
+            print!("Removing data directory at {}... ", data_dir.display());
+            std::fs::remove_dir_all(&data_dir)?;
+            println!("done");
+        }
+
+        println!("\u{2713} All data purged.");
+    }
 
     Ok(())
 }
