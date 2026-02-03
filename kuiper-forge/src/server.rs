@@ -691,9 +691,8 @@ pub async fn run_server(
     webhook_config: Option<(WebhookConfig, WebhookNotifier)>,
     admin_state: Option<Arc<AdminState>>,
 ) -> Result<()> {
-    // If no webhook config, use the simple gRPC-only path
-    // Note: Admin UI requires webhook mode (combined HTTP+gRPC server)
-    if webhook_config.is_none() {
+    // If no webhook config and no admin state, use the simple gRPC-only path
+    if webhook_config.is_none() && admin_state.is_none() {
         return run_grpc_only_server(
             config,
             server_trust,
@@ -705,8 +704,27 @@ pub async fn run_server(
         .await;
     }
 
-    let (wh_config, wh_notifier) = webhook_config.unwrap();
-    let pending_job_store = pending_job_store.expect("pending_job_store required in webhook mode");
+    // Build HTTP router based on what's enabled
+    let (http_router, wh_path_for_log, pending_job_store_for_grpc) =
+        match (webhook_config, admin_state.clone()) {
+            (Some((wh_config, wh_notifier)), admin) => {
+                // Webhook mode (with optional admin)
+                let pjs = pending_job_store.expect("pending_job_store required in webhook mode");
+                let webhook_state = Arc::new(WebhookState {
+                    config: wh_config.clone(),
+                    notifier: wh_notifier,
+                    pending_job_store: pjs.clone(),
+                });
+                let router = webhook::http_router(webhook_state, admin);
+                (router, Some(wh_config.path), Some(pjs))
+            }
+            (None, Some(admin)) => {
+                // Admin-only mode (no webhook)
+                let router = webhook::admin_only_router(admin);
+                (router, None, pending_job_store)
+            }
+            (None, None) => unreachable!(), // Already handled above
+        };
 
     // Load TLS credentials
     let server_cert = std::fs::read_to_string(&config.tls.server_cert)
@@ -759,36 +777,39 @@ pub async fn run_server(
         agent_registry,
         fleet_notifier,
         runner_state,
-        Some(pending_job_store.clone()),
+        pending_job_store_for_grpc,
     );
 
     // Build gRPC service using tonic Routes
     let grpc_service = Routes::new(RegistrationServiceServer::new(registration_service))
         .add_service(AgentServiceServer::new(agent_service));
 
-    // Build HTTP router (webhook + optional admin UI)
-    let webhook_state = Arc::new(WebhookState {
-        config: wh_config.clone(),
-        notifier: wh_notifier,
-        pending_job_store,
-    });
-    let admin_enabled = admin_state.is_some();
-    let http_router = webhook::http_router(webhook_state, admin_state);
-
     // Log startup info
-    if admin_enabled {
-        info!(
-            addr = %config.listen_addr,
-            webhook_path = %wh_config.path,
-            admin_ui = "/admin",
-            "Starting server with gRPC + HTTP webhook + Admin UI (optional mTLS)"
-        );
-    } else {
-        info!(
-            addr = %config.listen_addr,
-            webhook_path = %wh_config.path,
-            "Starting server with gRPC + HTTP webhook (optional mTLS)"
-        );
+    let admin_enabled = admin_state.is_some();
+    match (&wh_path_for_log, admin_enabled) {
+        (Some(wh_path), true) => {
+            info!(
+                addr = %config.listen_addr,
+                webhook_path = %wh_path,
+                admin_ui = "/admin",
+                "Starting server with gRPC + HTTP webhook + Admin UI (optional mTLS)"
+            );
+        }
+        (Some(wh_path), false) => {
+            info!(
+                addr = %config.listen_addr,
+                webhook_path = %wh_path,
+                "Starting server with gRPC + HTTP webhook (optional mTLS)"
+            );
+        }
+        (None, true) => {
+            info!(
+                addr = %config.listen_addr,
+                admin_ui = "/admin",
+                "Starting server with gRPC + Admin UI (optional mTLS)"
+            );
+        }
+        (None, false) => unreachable!(), // Already handled by gRPC-only path
     }
 
     // Bind TCP listener

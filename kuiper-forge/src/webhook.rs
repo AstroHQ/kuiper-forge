@@ -214,6 +214,19 @@ pub fn http_router(
     router
 }
 
+/// Build an admin-only HTTP router (no webhook).
+///
+/// Used when admin UI is enabled but webhook mode is not configured.
+pub fn admin_only_router(admin_state: Arc<crate::admin::AdminState>) -> Router {
+    use axum::response::Redirect;
+    use axum::routing::get;
+
+    Router::new()
+        .route("/admin", get(|| async { Redirect::to("/admin/dashboard") }))
+        .route("/admin/", get(|| async { Redirect::to("/admin/dashboard") }))
+        .nest("/admin", crate::admin::admin_router(admin_state))
+}
+
 /// Handle incoming GitHub webhook.
 async fn handle_webhook(
     State(state): State<Arc<WebhookState>>,
