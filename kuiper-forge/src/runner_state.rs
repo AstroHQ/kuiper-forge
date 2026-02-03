@@ -200,16 +200,15 @@ impl RunnerStateStore {
 
     /// Reconcile persisted runners for an agent against the current VM list.
     ///
-    /// Returns the names of runners that were removed (VM no longer exists).
-    /// This is called when we receive a status update from an agent - if a
-    /// persisted runner's VM is no longer in the VM list, the runner has completed.
+    /// Returns runners whose VMs are missing from the agent's reported list.
+    /// The caller decides whether and when to remove them from state.
     pub async fn reconcile_agent_vms(
         &self,
         agent_id: &str,
         vm_names: &[String],
     ) -> Vec<(String, RunnerInfo)> {
         let runners_for_agent = self.get_runners_for_agent(agent_id).await;
-        let mut removed = Vec::new();
+        let mut missing = Vec::new();
 
         for (runner_name, runner_info) in runners_for_agent {
             // Check if the runner's VM is still in the agent's VM list
@@ -218,16 +217,11 @@ impl RunnerStateStore {
                     "Runner '{}' VM '{}' no longer on agent '{}' - marking for cleanup",
                     runner_name, runner_info.vm_name, agent_id
                 );
-                removed.push((runner_name, runner_info));
+                missing.push((runner_name, runner_info));
             }
         }
 
-        // Remove the completed runners from state
-        for (runner_name, _) in &removed {
-            self.remove_runner(runner_name).await;
-        }
-
-        removed
+        missing
     }
 
     /// Convert a database row to a (runner_name, RunnerInfo) tuple.

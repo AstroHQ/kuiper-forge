@@ -253,6 +253,7 @@ pub struct AgentServiceImpl {
     agent_registry: Arc<AgentRegistry>,
     fleet_notifier: Option<FleetNotifier>,
     runner_state: Option<Arc<RunnerStateStore>>,
+    pending_job_store: Option<Arc<PendingJobStore>>,
 }
 
 impl AgentServiceImpl {
@@ -261,12 +262,14 @@ impl AgentServiceImpl {
         agent_registry: Arc<AgentRegistry>,
         fleet_notifier: Option<FleetNotifier>,
         runner_state: Option<Arc<RunnerStateStore>>,
+        pending_job_store: Option<Arc<PendingJobStore>>,
     ) -> Self {
         Self {
             auth_manager,
             agent_registry,
             fleet_notifier,
             runner_state,
+            pending_job_store,
         }
     }
 
@@ -453,6 +456,7 @@ impl AgentService for AgentServiceImpl {
         let agent_registry = Arc::clone(&self.agent_registry);
         let runner_state = self.runner_state.clone();
         let fleet_notifier = self.fleet_notifier.clone();
+        let pending_job_store = self.pending_job_store.clone();
         let agent_id_clone = agent_id.clone();
 
         // Spawn task to handle inbound messages and forward commands
@@ -472,6 +476,7 @@ impl AgentService for AgentServiceImpl {
                                     agent_msg,
                                     runner_state.as_ref(),
                                     fleet_notifier.as_ref(),
+                                    pending_job_store.as_ref(),
                                 )
                                 .await;
                             }
@@ -532,6 +537,7 @@ async fn handle_agent_message(
     msg: AgentMessage,
     runner_state: Option<&Arc<RunnerStateStore>>,
     fleet_notifier: Option<&FleetNotifier>,
+    pending_job_store: Option<&Arc<PendingJobStore>>,
 ) {
     match msg.payload {
         Some(AgentPayload::Status(status)) => {
@@ -550,13 +556,40 @@ async fn handle_agent_message(
             // This allows the recovery watcher to detect when VMs have completed
             if let Some(rs) = runner_state {
                 let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
-                let removed = rs.reconcile_agent_vms(agent_id, &vm_names).await;
-                if !removed.is_empty() {
+                let missing = rs.reconcile_agent_vms(agent_id, &vm_names).await;
+                if !missing.is_empty() {
+                    let mut deferred = 0usize;
+                    let has_pending_store = pending_job_store.is_some();
+
+                    for (runner_name, runner_info) in &missing {
+                        if has_pending_store {
+                            if let Some(job_id) = runner_info.job_id {
+                                deferred += 1;
+                                debug!(
+                                    agent_id = %agent_id,
+                                    runner_name = %runner_name,
+                                    job_id = %job_id,
+                                    "Runner VM missing - deferring cleanup until runner event"
+                                );
+                                continue;
+                            }
+                        }
+
+                        rs.remove_runner(runner_name).await;
+                        debug!(
+                            agent_id = %agent_id,
+                            runner_name = %runner_name,
+                            "Removed runner from state during reconciliation"
+                        );
+                    }
+
                     info!(
                         agent_id = %agent_id,
-                        removed_count = removed.len(),
-                        "Reconciled runner state - {} runner(s) marked as completed",
-                        removed.len()
+                        missing_count = missing.len(),
+                        deferred_count = deferred,
+                        "Reconciled runner state - {} runner(s) missing ({} deferred)",
+                        missing.len(),
+                        deferred
                     );
                 }
             }
@@ -717,8 +750,13 @@ pub async fn run_server(
     // Create gRPC services
     let registration_service =
         RegistrationServiceImpl::new(Arc::clone(&auth_manager), server_trust.clone());
-    let agent_service =
-        AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
+    let agent_service = AgentServiceImpl::new(
+        auth_manager,
+        agent_registry,
+        fleet_notifier,
+        runner_state,
+        Some(pending_job_store.clone()),
+    );
 
     // Build gRPC service using tonic Routes
     let grpc_service = Routes::new(RegistrationServiceServer::new(registration_service))
@@ -898,8 +936,13 @@ async fn run_grpc_only_server(
     // Create services
     let registration_service =
         RegistrationServiceImpl::new(Arc::clone(&auth_manager), server_trust);
-    let agent_service =
-        AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
+    let agent_service = AgentServiceImpl::new(
+        auth_manager,
+        agent_registry,
+        fleet_notifier,
+        runner_state,
+        None, // No pending_job_store in gRPC-only mode
+    );
 
     // If PROXY protocol is enabled, we need manual connection handling
     if config.proxy_protocol {

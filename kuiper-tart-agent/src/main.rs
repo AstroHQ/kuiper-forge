@@ -745,6 +745,13 @@ impl TartAgent {
                     "CreateRunner completed successfully: vm={}, ip={}",
                     vm_id, ip
                 );
+                // Send immediate status update so coordinator knows capacity is available
+                let status = self.build_status().await;
+                let _ = tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await;
                 send_runner_event(
                     tx,
                     vm_name,
@@ -764,6 +771,13 @@ impl TartAgent {
                         vm_name, cleanup_err
                     );
                 }
+                // Send immediate status update so coordinator knows capacity is available
+                let status = self.build_status().await;
+                let _ = tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await;
                 send_runner_event(
                     tx,
                     vm_name.clone(),
@@ -787,6 +801,13 @@ impl TartAgent {
         match self.vm_manager.destroy_vm(&vm_id).await {
             Ok(()) => {
                 info!("DestroyRunner completed: vm={}", vm_id);
+                // Send immediate status update so coordinator knows capacity is available
+                let status = self.build_status().await;
+                let _ = tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await;
                 send_runner_event(
                     tx,
                     vm_id.clone(),

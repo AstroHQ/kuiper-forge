@@ -464,7 +464,7 @@ impl ProxmoxAgent {
 
     /// Handle a message from the coordinator.
     async fn handle_coordinator_message(
-        &self,
+        self: &Arc<Self>,
         msg: kuiper_agent_proto::CoordinatorMessage,
         tx: &mpsc::Sender<AgentMessage>,
     ) -> Result<()> {
@@ -545,12 +545,13 @@ impl ProxmoxAgent {
 
     /// Handle a CreateRunner command.
     async fn handle_create_runner(
-        &self,
+        self: &Arc<Self>,
         cmd: kuiper_agent_proto::CreateRunnerCommand,
         tx: mpsc::Sender<AgentMessage>,
     ) {
         let vm_manager = self.vm_manager.clone();
         let runner_name = cmd.vm_name.clone();
+        let agent = Arc::clone(self);
 
         // Select template based on job labels
         let template_vmid = self.select_template(&cmd.labels);
@@ -570,6 +571,13 @@ impl ProxmoxAgent {
             match result {
                 Ok((vmid, ip)) => {
                     info!("Runner {} completed successfully", runner_name);
+                    // Send immediate status update so coordinator knows capacity is available
+                    let status = agent.build_status().await;
+                    let _ = tx
+                        .send(AgentMessage {
+                            payload: Some(AgentPayload::Status(status)),
+                        })
+                        .await;
                     if let Err(e) = send_runner_event(
                         &tx,
                         runner_name,
@@ -585,6 +593,13 @@ impl ProxmoxAgent {
                 }
                 Err(e) => {
                     error!("Runner {} failed: {}", runner_name, e);
+                    // Send immediate status update so coordinator knows capacity is available
+                    let status = agent.build_status().await;
+                    let _ = tx
+                        .send(AgentMessage {
+                            payload: Some(AgentPayload::Status(status)),
+                        })
+                        .await;
                     if let Err(e) = send_runner_event(
                         &tx,
                         runner_name,
@@ -603,13 +618,14 @@ impl ProxmoxAgent {
 
     /// Handle a DestroyRunner command.
     async fn handle_destroy_runner(
-        &self,
+        self: &Arc<Self>,
         cmd: kuiper_agent_proto::DestroyRunnerCommand,
         tx: mpsc::Sender<AgentMessage>,
     ) {
         let vm_manager = self.vm_manager.clone();
         let vm_id = cmd.vm_id.clone();
         let runner_name = vm_id.clone();
+        let agent = Arc::clone(self);
 
         // Spawn task to handle destruction
         tokio::spawn(async move {
@@ -618,6 +634,13 @@ impl ProxmoxAgent {
             match result {
                 Ok(()) => {
                     info!("VM {} destroyed successfully", vm_id);
+                    // Send immediate status update so coordinator knows capacity is available
+                    let status = agent.build_status().await;
+                    let _ = tx
+                        .send(AgentMessage {
+                            payload: Some(AgentPayload::Status(status)),
+                        })
+                        .await;
                     if let Err(e) = send_runner_event(
                         &tx,
                         runner_name,
