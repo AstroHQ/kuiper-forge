@@ -556,29 +556,41 @@ async fn handle_agent_message(
             // This allows the recovery watcher to detect when VMs have completed
             if let Some(rs) = runner_state {
                 let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
-                let removed = rs.reconcile_agent_vms(agent_id, &vm_names).await;
-                if !removed.is_empty() {
-                    info!(
-                        agent_id = %agent_id,
-                        removed_count = removed.len(),
-                        "Reconciled runner state - {} runner(s) marked as completed",
-                        removed.len()
-                    );
+                let missing = rs.reconcile_agent_vms(agent_id, &vm_names).await;
+                if !missing.is_empty() {
+                    let mut deferred = 0usize;
+                    let has_pending_store = pending_job_store.is_some();
 
-                    // Also remove any associated jobs from the pending queue
-                    // This prevents creating duplicate runners for jobs that completed
-                    if let Some(pjs) = pending_job_store {
-                        for (_runner_name, runner_info) in &removed {
+                    for (runner_name, runner_info) in &missing {
+                        if has_pending_store {
                             if let Some(job_id) = runner_info.job_id {
-                                pjs.remove_job(job_id).await;
+                                deferred += 1;
                                 debug!(
                                     agent_id = %agent_id,
+                                    runner_name = %runner_name,
                                     job_id = %job_id,
-                                    "Removed completed job from pending queue during reconciliation"
+                                    "Runner VM missing - deferring cleanup until runner event"
                                 );
+                                continue;
                             }
                         }
+
+                        rs.remove_runner(runner_name).await;
+                        debug!(
+                            agent_id = %agent_id,
+                            runner_name = %runner_name,
+                            "Removed runner from state during reconciliation"
+                        );
                     }
+
+                    info!(
+                        agent_id = %agent_id,
+                        missing_count = missing.len(),
+                        deferred_count = deferred,
+                        "Reconciled runner state - {} runner(s) missing ({} deferred)",
+                        missing.len(),
+                        deferred
+                    );
                 }
             }
         }
