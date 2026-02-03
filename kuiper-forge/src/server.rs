@@ -253,6 +253,7 @@ pub struct AgentServiceImpl {
     agent_registry: Arc<AgentRegistry>,
     fleet_notifier: Option<FleetNotifier>,
     runner_state: Option<Arc<RunnerStateStore>>,
+    pending_job_store: Option<Arc<PendingJobStore>>,
 }
 
 impl AgentServiceImpl {
@@ -261,12 +262,14 @@ impl AgentServiceImpl {
         agent_registry: Arc<AgentRegistry>,
         fleet_notifier: Option<FleetNotifier>,
         runner_state: Option<Arc<RunnerStateStore>>,
+        pending_job_store: Option<Arc<PendingJobStore>>,
     ) -> Self {
         Self {
             auth_manager,
             agent_registry,
             fleet_notifier,
             runner_state,
+            pending_job_store,
         }
     }
 
@@ -453,6 +456,7 @@ impl AgentService for AgentServiceImpl {
         let agent_registry = Arc::clone(&self.agent_registry);
         let runner_state = self.runner_state.clone();
         let fleet_notifier = self.fleet_notifier.clone();
+        let pending_job_store = self.pending_job_store.clone();
         let agent_id_clone = agent_id.clone();
 
         // Spawn task to handle inbound messages and forward commands
@@ -472,6 +476,7 @@ impl AgentService for AgentServiceImpl {
                                     agent_msg,
                                     runner_state.as_ref(),
                                     fleet_notifier.as_ref(),
+                                    pending_job_store.as_ref(),
                                 )
                                 .await;
                             }
@@ -532,6 +537,7 @@ async fn handle_agent_message(
     msg: AgentMessage,
     runner_state: Option<&Arc<RunnerStateStore>>,
     fleet_notifier: Option<&FleetNotifier>,
+    pending_job_store: Option<&Arc<PendingJobStore>>,
 ) {
     match msg.payload {
         Some(AgentPayload::Status(status)) => {
@@ -558,6 +564,21 @@ async fn handle_agent_message(
                         "Reconciled runner state - {} runner(s) marked as completed",
                         removed.len()
                     );
+
+                    // Also remove any associated jobs from the pending queue
+                    // This prevents creating duplicate runners for jobs that completed
+                    if let Some(pjs) = pending_job_store {
+                        for (_runner_name, runner_info) in &removed {
+                            if let Some(job_id) = runner_info.job_id {
+                                pjs.remove_job(job_id).await;
+                                debug!(
+                                    agent_id = %agent_id,
+                                    job_id = %job_id,
+                                    "Removed completed job from pending queue during reconciliation"
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -717,8 +738,13 @@ pub async fn run_server(
     // Create gRPC services
     let registration_service =
         RegistrationServiceImpl::new(Arc::clone(&auth_manager), server_trust.clone());
-    let agent_service =
-        AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
+    let agent_service = AgentServiceImpl::new(
+        auth_manager,
+        agent_registry,
+        fleet_notifier,
+        runner_state,
+        Some(pending_job_store.clone()),
+    );
 
     // Build gRPC service using tonic Routes
     let grpc_service = Routes::new(RegistrationServiceServer::new(registration_service))
@@ -898,8 +924,13 @@ async fn run_grpc_only_server(
     // Create services
     let registration_service =
         RegistrationServiceImpl::new(Arc::clone(&auth_manager), server_trust);
-    let agent_service =
-        AgentServiceImpl::new(auth_manager, agent_registry, fleet_notifier, runner_state);
+    let agent_service = AgentServiceImpl::new(
+        auth_manager,
+        agent_registry,
+        fleet_notifier,
+        runner_state,
+        None, // No pending_job_store in gRPC-only mode
+    );
 
     // If PROXY protocol is enabled, we need manual connection handling
     if config.proxy_protocol {

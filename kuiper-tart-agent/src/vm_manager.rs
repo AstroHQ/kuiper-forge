@@ -10,7 +10,11 @@ use std::time::Duration;
 use kuiper_agent_proto::VmInfo;
 use tokio::process::Command;
 use tokio::sync::RwLock;
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
+
+/// Timeout for tart CLI commands (clone, stop, delete, ip).
+/// This prevents the agent from hanging indefinitely if tart gets stuck.
+const TART_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 use tracing::{debug, error, info, warn};
 
 use crate::config::TartConfig;
@@ -378,10 +382,14 @@ impl VmManager {
 
     /// Clone a VM from template.
     async fn tart_clone(&self, source: &str, target: &str) -> Result<()> {
-        let output = Command::new("tart")
-            .args(["clone", source, target])
-            .output()
-            .await?;
+        let output = timeout(
+            TART_COMMAND_TIMEOUT,
+            Command::new("tart")
+                .args(["clone", source, target])
+                .output(),
+        )
+        .await
+        .map_err(|_| Error::Timeout("tart clone"))??;
 
         if output.status.success() {
             Ok(())
@@ -410,7 +418,12 @@ impl VmManager {
 
     /// Stop a VM.
     async fn tart_stop(&self, name: &str) -> Result<()> {
-        let output = Command::new("tart").args(["stop", name]).output().await?;
+        let output = timeout(
+            TART_COMMAND_TIMEOUT,
+            Command::new("tart").args(["stop", name]).output(),
+        )
+        .await
+        .map_err(|_| Error::Timeout("tart stop"))??;
 
         // Ignore failure - VM might already be stopped
         if !output.status.success() {
@@ -425,7 +438,12 @@ impl VmManager {
 
     /// Delete a VM.
     async fn tart_delete(&self, name: &str) -> Result<()> {
-        let output = Command::new("tart").args(["delete", name]).output().await?;
+        let output = timeout(
+            TART_COMMAND_TIMEOUT,
+            Command::new("tart").args(["delete", name]).output(),
+        )
+        .await
+        .map_err(|_| Error::Timeout("tart delete"))??;
 
         if output.status.success() {
             Ok(())
@@ -437,7 +455,12 @@ impl VmManager {
 
     /// Get the IP address of a VM.
     async fn tart_ip(&self, name: &str) -> Result<Option<Ipv4Addr>> {
-        let output = Command::new("tart").args(["ip", name]).output().await?;
+        let output = timeout(
+            TART_COMMAND_TIMEOUT,
+            Command::new("tart").args(["ip", name]).output(),
+        )
+        .await
+        .map_err(|_| Error::Timeout("tart ip"))??;
 
         if output.status.success() {
             let ip_str = String::from_utf8_lossy(&output.stdout);

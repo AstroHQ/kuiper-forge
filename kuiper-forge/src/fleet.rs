@@ -273,6 +273,7 @@ impl FleetManager {
         info!("Webhook provisioning mode active - waiting for webhook events");
 
         // Process any pending jobs from previous run on startup
+        info!("Checking for pending jobs from previous run...");
         self.process_pending_jobs().await;
 
         // Poll GitHub API for queued jobs that may have been missed during downtime
@@ -291,7 +292,7 @@ impl FleetManager {
                 }
                 Some(()) = self.notify_rx.recv() => {
                     // Agent connected - check if we can assign pending jobs
-                    debug!("Agent connected - checking pending job queue");
+                    info!("Agent notification received - checking pending job queue");
                     self.process_pending_jobs().await;
                 }
                 Some(recovery_info) = self.recovery_rx.recv() => {
@@ -367,7 +368,8 @@ impl FleetManager {
             return;
         }
 
-        info!("Found {} queued job(s) in GitHub - checking against filters", queued_jobs.len());
+        let total_jobs = queued_jobs.len();
+        info!("Found {} queued job(s) in GitHub - checking against filters", total_jobs);
 
         let mut added_count = 0;
         for job in queued_jobs {
@@ -413,6 +415,11 @@ impl FleetManager {
         if added_count > 0 {
             info!("Recovered {} job(s) from GitHub API - processing", added_count);
             self.process_pending_jobs().await;
+        } else {
+            info!(
+                "All {} GitHub job(s) already in pending queue or have runners - no new jobs to add",
+                total_jobs
+            );
         }
     }
 
@@ -428,6 +435,16 @@ impl FleetManager {
                 return;
             }
         };
+
+        if pending_jobs.is_empty() {
+            debug!("No pending jobs to process");
+            return;
+        }
+
+        info!(
+            "Processing {} pending job(s)",
+            pending_jobs.len()
+        );
 
         for (job_id, job_info) in pending_jobs {
             // Check retry count - abandon jobs that have failed too many times
@@ -467,9 +484,13 @@ impl FleetManager {
                 Err(e) => {
                     let err_msg = e.to_string();
                     if err_msg.contains("No available agent") {
-                        // No more capacity - stop processing
-                        debug!("No more capacity for pending jobs");
-                        return;
+                        // No agent matches this job's labels - try other jobs
+                        // (different jobs may have different label requirements)
+                        debug!(
+                            "No available agent for job {} with labels {:?} - trying next job",
+                            job_id, job_info.agent_labels
+                        );
+                        continue;
                     } else {
                         // Different error (token fetch failed, etc.) - increment retry count
                         if let Some(new_count) =
@@ -832,23 +853,25 @@ impl FleetManager {
                 );
             }
             RunnerEventType::Completed | RunnerEventType::Failed | RunnerEventType::Destroyed => {
-                let runner_info = self.runner_state.get_runner(&runner_name).await;
-                let Some(runner_info) = runner_info else {
-                    warn!(
-                        agent_id = %event.agent_id,
-                        runner_name = %runner_name,
-                        "Runner event received for unknown runner"
-                    );
-                    return;
-                };
-
-                // Note: Pool index lookup removed - pools are now dynamically derived.
-                // Pending counts are managed during reconcile_pool based on current agents.
-
+                // Always release slot and process pending jobs, even if runner is unknown.
+                // The runner may have been removed from state by reconciliation (when agent
+                // sends status update before runner event after VM destruction).
                 self.agent_registry.release_slot(&event.agent_id).await;
 
                 // Agent slot freed - try to process pending webhook jobs
                 self.process_pending_jobs().await;
+
+                let runner_info = self.runner_state.get_runner(&runner_name).await;
+                let Some(runner_info) = runner_info else {
+                    // Runner already removed from state (e.g., by reconciliation).
+                    // Slot released and pending jobs processed above.
+                    debug!(
+                        agent_id = %event.agent_id,
+                        runner_name = %runner_name,
+                        "Runner event for runner already removed from state"
+                    );
+                    return;
+                };
 
                 // Handle pending job state based on runner outcome
                 if let Some(job_id) = runner_info.job_id {

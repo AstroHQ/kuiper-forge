@@ -226,7 +226,7 @@ mod hostname {
     #[cfg(unix)]
     pub fn get() -> std::io::Result<OsString> {
         use std::ffi::CStr;
-        let mut buf = vec![0i8; 256];
+        let mut buf = vec![0 as libc::c_char; 256];
         let result = unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) };
         if result == 0 {
             let cstr = unsafe { CStr::from_ptr(buf.as_ptr()) };
