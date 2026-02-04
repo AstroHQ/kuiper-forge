@@ -190,6 +190,10 @@ pub struct Config {
     #[serde(default)]
     pub database: DatabaseConfig,
 
+    /// Admin web UI configuration.
+    #[serde(default)]
+    pub admin: AdminConfig,
+
     /// Provisioning mode and settings.
     ///
     /// Controls how runners are created:
@@ -403,6 +407,35 @@ compile_error!("At least one database feature must be enabled: 'sqlite' or 'post
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 compile_error!("Cannot enable both 'sqlite' and 'postgres' features simultaneously. Choose one.");
 
+// =============================================================================
+// Admin UI Configuration
+// =============================================================================
+
+/// Admin web UI configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AdminConfig {
+    /// Enable the admin web UI (default: false).
+    pub enabled: bool,
+
+    /// Session timeout in seconds (default: 3600 = 1 hour).
+    pub session_timeout_secs: u64,
+
+    /// Coordinator URL for registration bundles (default: https://localhost:9443).
+    /// Used when generating registration tokens in the admin UI.
+    pub coordinator_url: String,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            session_timeout_secs: 3600,
+            coordinator_url: "https://localhost:9443".to_string(),
+        }
+    }
+}
+
 /// GitHub runner registration scope.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -532,6 +565,7 @@ impl Config {
             grpc: GrpcConfig::default(),
             tls: TlsConfig::with_defaults(data_dir),
             database: DatabaseConfig::default(),
+            admin: AdminConfig::default(),
             provisioning: ProvisioningConfig::default(),
             runner_scope: RunnerScope::Organization {
                 name: "test-org".into(),
@@ -635,6 +669,20 @@ name = "my-org"
 # user = "kuiper"
 # password = "secret"
 # database = "kuiper_forge"
+
+# =============================================================================
+# Admin Web UI
+# =============================================================================
+#
+# Optional web UI for managing agents and registration tokens.
+# Access at https://<coordinator>:9443/admin/
+#
+# Create admin users with: coordinator admin create-user --username <name>
+
+[admin]
+enabled = false
+# session_timeout_secs = 3600  # Session timeout (default: 1 hour)
+# coordinator_url = "https://localhost:9443"  # URL for registration bundles
 
 # =============================================================================
 # Provisioning Mode

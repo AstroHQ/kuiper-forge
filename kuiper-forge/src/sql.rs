@@ -196,3 +196,90 @@ pub const GET_PENDING_JOB_RETRY_COUNT: &str =
 #[cfg(feature = "postgres")]
 pub const GET_PENDING_JOB_RETRY_COUNT: &str =
     "SELECT retry_count FROM pending_webhook_jobs WHERE job_id = $1";
+
+// Admin users queries
+
+#[cfg(feature = "sqlite")]
+pub const INSERT_ADMIN_USER: &str = r#"
+    INSERT INTO admin_users (username, password_hash, totp_secret, created_at)
+    VALUES (?, ?, ?, ?)
+"#;
+
+#[cfg(feature = "postgres")]
+pub const INSERT_ADMIN_USER: &str = r#"
+    INSERT INTO admin_users (username, password_hash, totp_secret, created_at)
+    VALUES ($1, $2, $3, $4)
+"#;
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_ADMIN_USER: &str =
+    "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users WHERE username = ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_ADMIN_USER: &str =
+    "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users WHERE username = $1";
+
+pub const SELECT_ALL_ADMIN_USERS: &str =
+    "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users ORDER BY username";
+
+#[cfg(feature = "sqlite")]
+pub const UPDATE_ADMIN_USER_LAST_LOGIN: &str =
+    "UPDATE admin_users SET last_login = ? WHERE username = ?";
+
+#[cfg(feature = "postgres")]
+pub const UPDATE_ADMIN_USER_LAST_LOGIN: &str =
+    "UPDATE admin_users SET last_login = $1 WHERE username = $2";
+
+#[cfg(feature = "sqlite")]
+pub const UPDATE_ADMIN_USER_PASSWORD: &str =
+    "UPDATE admin_users SET password_hash = ? WHERE username = ?";
+
+#[cfg(feature = "postgres")]
+pub const UPDATE_ADMIN_USER_PASSWORD: &str =
+    "UPDATE admin_users SET password_hash = $1 WHERE username = $2";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_ADMIN_USER: &str = "DELETE FROM admin_users WHERE username = ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_ADMIN_USER: &str = "DELETE FROM admin_users WHERE username = $1";
+
+// Admin sessions queries
+
+#[cfg(feature = "sqlite")]
+pub const INSERT_ADMIN_SESSION: &str = r#"
+    INSERT INTO admin_sessions (session_id, username, created_at, expires_at, ip_address, user_agent)
+    VALUES (?, ?, ?, ?, ?, ?)
+"#;
+
+#[cfg(feature = "postgres")]
+pub const INSERT_ADMIN_SESSION: &str = r#"
+    INSERT INTO admin_sessions (session_id, username, created_at, expires_at, ip_address, user_agent)
+    VALUES ($1, $2, $3, $4, $5, $6)
+"#;
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_ADMIN_SESSION: &str =
+    "SELECT session_id, username, created_at, expires_at, ip_address, user_agent FROM admin_sessions WHERE session_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_ADMIN_SESSION: &str =
+    "SELECT session_id, username, created_at, expires_at, ip_address, user_agent FROM admin_sessions WHERE session_id = $1";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_ADMIN_SESSION: &str = "DELETE FROM admin_sessions WHERE session_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_ADMIN_SESSION: &str = "DELETE FROM admin_sessions WHERE session_id = $1";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_EXPIRED_ADMIN_SESSIONS: &str = "DELETE FROM admin_sessions WHERE expires_at < ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_EXPIRED_ADMIN_SESSIONS: &str = "DELETE FROM admin_sessions WHERE expires_at < $1";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_ADMIN_SESSIONS_BY_USER: &str = "DELETE FROM admin_sessions WHERE username = ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_ADMIN_SESSIONS_BY_USER: &str = "DELETE FROM admin_sessions WHERE username = $1";

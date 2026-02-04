@@ -36,6 +36,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tower::Service;
 use tracing::{debug, error, info, warn};
 
+use crate::admin::AdminState;
 use crate::agent_registry::{AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::{TlsConfig, WebhookConfig};
@@ -676,8 +677,9 @@ pub struct ServerConfig {
 /// but not required at the TLS layer. The agent service enforces the requirement.
 ///
 /// If `webhook_config` is provided, also serves HTTP webhook endpoint on the same port.
+/// If `admin_state` is provided, serves admin UI at /admin.
 /// Traffic is routed based on content-type: `application/grpc` goes to gRPC services,
-/// everything else goes to the HTTP webhook handler.
+/// everything else goes to the HTTP handler.
 pub async fn run_server(
     config: ServerConfig,
     server_trust: ServerTrust,
@@ -687,9 +689,10 @@ pub async fn run_server(
     runner_state: Option<Arc<RunnerStateStore>>,
     pending_job_store: Option<Arc<PendingJobStore>>,
     webhook_config: Option<(WebhookConfig, WebhookNotifier)>,
+    admin_state: Option<Arc<AdminState>>,
 ) -> Result<()> {
-    // If no webhook config, use the simple gRPC-only path
-    if webhook_config.is_none() {
+    // If no webhook config and no admin state, use the simple gRPC-only path
+    if webhook_config.is_none() && admin_state.is_none() {
         return run_grpc_only_server(
             config,
             server_trust,
@@ -701,8 +704,27 @@ pub async fn run_server(
         .await;
     }
 
-    let (wh_config, wh_notifier) = webhook_config.unwrap();
-    let pending_job_store = pending_job_store.expect("pending_job_store required in webhook mode");
+    // Build HTTP router based on what's enabled
+    let (http_router, wh_path_for_log, pending_job_store_for_grpc) =
+        match (webhook_config, admin_state.clone()) {
+            (Some((wh_config, wh_notifier)), admin) => {
+                // Webhook mode (with optional admin)
+                let pjs = pending_job_store.expect("pending_job_store required in webhook mode");
+                let webhook_state = Arc::new(WebhookState {
+                    config: wh_config.clone(),
+                    notifier: wh_notifier,
+                    pending_job_store: pjs.clone(),
+                });
+                let router = webhook::http_router(webhook_state, admin);
+                (router, Some(wh_config.path), Some(pjs))
+            }
+            (None, Some(admin)) => {
+                // Admin-only mode (no webhook)
+                let router = webhook::admin_only_router(admin);
+                (router, None, pending_job_store)
+            }
+            (None, None) => unreachable!(), // Already handled above
+        };
 
     // Load TLS credentials
     let server_cert = std::fs::read_to_string(&config.tls.server_cert)
@@ -742,7 +764,7 @@ pub async fn run_server(
         .with_single_cert(certs, key)
         .context("Failed to configure TLS")?;
 
-    // Set ALPN protocols - h2 required for gRPC, http/1.1 for webhook
+    // Set ALPN protocols - h2 required for gRPC, http/1.1 for HTTP
     tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
@@ -755,26 +777,40 @@ pub async fn run_server(
         agent_registry,
         fleet_notifier,
         runner_state,
-        Some(pending_job_store.clone()),
+        pending_job_store_for_grpc,
     );
 
     // Build gRPC service using tonic Routes
     let grpc_service = Routes::new(RegistrationServiceServer::new(registration_service))
         .add_service(AgentServiceServer::new(agent_service));
 
-    // Build webhook HTTP router
-    let webhook_state = Arc::new(WebhookState {
-        config: wh_config.clone(),
-        notifier: wh_notifier,
-        pending_job_store,
-    });
-    let http_router = webhook::webhook_router(webhook_state);
-
-    info!(
-        addr = %config.listen_addr,
-        webhook_path = %wh_config.path,
-        "Starting server with gRPC + HTTP webhook endpoint (optional mTLS)"
-    );
+    // Log startup info
+    let admin_enabled = admin_state.is_some();
+    match (&wh_path_for_log, admin_enabled) {
+        (Some(wh_path), true) => {
+            info!(
+                addr = %config.listen_addr,
+                webhook_path = %wh_path,
+                admin_ui = "/admin",
+                "Starting server with gRPC + HTTP webhook + Admin UI (optional mTLS)"
+            );
+        }
+        (Some(wh_path), false) => {
+            info!(
+                addr = %config.listen_addr,
+                webhook_path = %wh_path,
+                "Starting server with gRPC + HTTP webhook (optional mTLS)"
+            );
+        }
+        (None, true) => {
+            info!(
+                addr = %config.listen_addr,
+                admin_ui = "/admin",
+                "Starting server with gRPC + Admin UI (optional mTLS)"
+            );
+        }
+        (None, false) => unreachable!(), // Already handled by gRPC-only path
+    }
 
     // Bind TCP listener
     let listener = TcpListener::bind(config.listen_addr)
