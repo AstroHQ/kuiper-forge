@@ -105,14 +105,14 @@ pub const CHECK_AGENT_VALID: &str =
 
 #[cfg(feature = "sqlite")]
 pub const INSERT_RUNNER: &str = r#"
-    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#;
 
 #[cfg(feature = "postgres")]
 pub const INSERT_RUNNER: &str = r#"
-    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 "#;
 
 #[cfg(feature = "sqlite")]
@@ -122,19 +122,19 @@ pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = 
 pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = ?";
+pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE runner_name = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE runner_name = $1";
+pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE runner_name = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = ?";
+pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE agent_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners WHERE agent_id = $1";
+pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE agent_id = $1";
 
 pub const SELECT_ALL_RUNNERS: &str =
-    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id FROM active_runners";
+    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners";
 
 #[cfg(feature = "sqlite")]
 pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = ?";
@@ -142,12 +142,10 @@ pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE jo
 #[cfg(feature = "postgres")]
 pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = $1";
 
-// Bulk delete for agent disconnect cleanup (not yet used, but available)
-#[allow(dead_code)]
+// Bulk delete for agent disconnect cleanup
 #[cfg(feature = "sqlite")]
 pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agent_id = ?";
 
-#[allow(dead_code)]
 #[cfg(feature = "postgres")]
 pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agent_id = $1";
 
@@ -155,15 +153,15 @@ pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agen
 
 #[cfg(feature = "sqlite")]
 pub const INSERT_PENDING_JOB: &str = r#"
-    INSERT INTO pending_webhook_jobs (job_id, job_labels, agent_labels, runner_scope, runner_group, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO pending_webhook_jobs (job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, repository, job_name, workflow_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(job_id) DO NOTHING
 "#;
 
 #[cfg(feature = "postgres")]
 pub const INSERT_PENDING_JOB: &str = r#"
-    INSERT INTO pending_webhook_jobs (job_id, job_labels, agent_labels, runner_scope, runner_group, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO pending_webhook_jobs (job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, repository, job_name, workflow_name)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     ON CONFLICT(job_id) DO NOTHING
 "#;
 
@@ -174,12 +172,12 @@ pub const DELETE_PENDING_JOB: &str = "DELETE FROM pending_webhook_jobs WHERE job
 pub const DELETE_PENDING_JOB: &str = "DELETE FROM pending_webhook_jobs WHERE job_id = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count FROM pending_webhook_jobs WHERE job_id = ?";
+pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count, repository, job_name, workflow_name FROM pending_webhook_jobs WHERE job_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count FROM pending_webhook_jobs WHERE job_id = $1";
+pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count, repository, job_name, workflow_name FROM pending_webhook_jobs WHERE job_id = $1";
 
-pub const SELECT_ALL_PENDING_JOBS: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count FROM pending_webhook_jobs ORDER BY created_at ASC";
+pub const SELECT_ALL_PENDING_JOBS: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count, repository, job_name, workflow_name FROM pending_webhook_jobs ORDER BY created_at ASC";
 
 #[cfg(feature = "sqlite")]
 pub const INCREMENT_PENDING_JOB_RETRY: &str =

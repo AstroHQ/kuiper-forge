@@ -33,28 +33,28 @@ const WORKFLOW_JOB_EVENT: &str = "workflow_job";
 pub struct WorkflowJobEvent {
     pub action: String,
     pub workflow_job: WorkflowJob,
-    #[allow(dead_code)]
     pub repository: Repository,
-    #[allow(dead_code)]
     #[serde(default)]
     pub organization: Option<Organization>,
+    /// Workflow name (from top-level of webhook event)
+    #[serde(default)]
+    pub workflow_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct WorkflowJob {
     pub id: u64,
-    #[allow(dead_code)]
+    /// Job name from the workflow file
     pub name: String,
     pub labels: Vec<String>,
-    #[allow(dead_code)]
+    #[serde(default)]
     pub runner_id: Option<u64>,
-    #[allow(dead_code)]
+    #[serde(default)]
     pub runner_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Repository {
-    #[allow(dead_code)]
     pub full_name: String,
     #[allow(dead_code)]
     pub owner: RepositoryOwner,
@@ -90,6 +90,12 @@ pub struct WebhookRunnerRequest {
     pub runner_group: Option<String>,
     /// GitHub job ID (for logging/deduplication)
     pub job_id: u64,
+    /// Repository full name (owner/repo) for GitHub API status checks
+    pub repository: Option<String>,
+    /// Job name from the workflow file
+    pub job_name: Option<String>,
+    /// Workflow name
+    pub workflow_name: Option<String>,
 }
 
 /// Event types sent from webhook handler to fleet manager.
@@ -333,6 +339,9 @@ async fn handle_webhook(
                 runner_scope,
                 runner_group,
                 job_id: event.workflow_job.id,
+                repository: Some(event.repository.full_name),
+                job_name: Some(event.workflow_job.name),
+                workflow_name: event.workflow_name,
             };
 
             // Persist to database - this ensures we don't lose the job

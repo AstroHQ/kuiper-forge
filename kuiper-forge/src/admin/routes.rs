@@ -345,6 +345,10 @@ async fn agent_detail(
             runner_name: name,
             vm_name: r.vm_name,
             created_at: r.created_at,
+            job_id: r.job_id,
+            job_name: r.job_name,
+            repository: r.repository,
+            workflow_name: r.workflow_name,
         })
         .collect();
 

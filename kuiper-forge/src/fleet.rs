@@ -284,11 +284,19 @@ impl FleetManager {
         let check_interval = Duration::from_secs(30);
         let mut ticker = tokio::time::interval(check_interval);
 
+        // GitHub verification interval - check if pending jobs are still queued on GitHub
+        let github_verify_interval = Duration::from_secs(900); // 15 minutes
+        let mut github_ticker = tokio::time::interval(github_verify_interval);
+
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
                     // Periodic check for pending jobs (in case notifications were lost)
                     self.process_pending_jobs().await;
+                }
+                _ = github_ticker.tick() => {
+                    // Verify pending jobs are still queued on GitHub
+                    self.verify_pending_jobs_with_github().await;
                 }
                 Some(()) = self.notify_rx.recv() => {
                     // Agent connected - check if we can assign pending jobs
@@ -332,6 +340,87 @@ impl FleetManager {
 
                 // Job completed means an agent may be free - try pending jobs
                 self.process_pending_jobs().await;
+            }
+        }
+    }
+
+    /// Verify pending jobs are still queued on GitHub.
+    ///
+    /// Jobs may have been cancelled, picked up by another runner, or expired.
+    /// This method queries GitHub for each pending job's status and removes
+    /// any that are no longer queued.
+    async fn verify_pending_jobs_with_github(&self) {
+        let pending = match self.pending_job_store.get_all_pending_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                warn!("Failed to get pending jobs for GitHub verification: {}", e);
+                return;
+            }
+        };
+
+        if pending.is_empty() {
+            debug!("No pending jobs to verify with GitHub");
+            return;
+        }
+
+        info!(
+            "Verifying {} pending job(s) are still queued on GitHub",
+            pending.len()
+        );
+
+        // Age threshold for jobs without repository info (can't check GitHub status)
+        let max_age_without_repo = chrono::Duration::hours(24);
+        let now = chrono::Utc::now();
+
+        for (job_id, info) in pending {
+            // Jobs without repository info can't be checked on GitHub
+            // Remove them if they're older than the threshold
+            let Some(ref repo) = info.repository else {
+                let age = now - info.created_at;
+                let age_hours = age.num_hours();
+                if age > max_age_without_repo {
+                    warn!(
+                        "Pending job {} has no repository info and is {}h old - removing as stale",
+                        job_id, age_hours
+                    );
+                    self.pending_job_store.remove_job(job_id).await;
+                } else {
+                    debug!(
+                        "Skipping job {} - no repository info for GitHub status check ({}h old)",
+                        job_id, age_hours
+                    );
+                }
+                continue;
+            };
+
+            match self.token_provider.get_job_status(repo, job_id).await {
+                Ok(Some(status)) if status == "queued" || status == "waiting" => {
+                    // Job is still pending on GitHub - keep it
+                    debug!("Job {} is still {} on GitHub", job_id, status);
+                }
+                Ok(Some(status)) => {
+                    // Job has progressed or completed - remove from our queue
+                    info!(
+                        "Pending job {} has status '{}' on GitHub - removing from queue",
+                        job_id, status
+                    );
+                    self.pending_job_store.remove_job(job_id).await;
+                }
+                Ok(None) => {
+                    // Job not found (404) - probably deleted or expired
+                    info!(
+                        "Pending job {} not found on GitHub (404) - removing from queue",
+                        job_id
+                    );
+                    self.pending_job_store.remove_job(job_id).await;
+                }
+                Err(e) => {
+                    // API error - log but don't remove (could be transient)
+                    warn!(
+                        "Failed to check status for job {} on GitHub: {} - keeping in queue",
+                        job_id, e
+                    );
+                }
             }
         }
     }
@@ -401,6 +490,9 @@ impl FleetManager {
                 agent_labels: job.labels.clone(), // Use job labels for agent matching
                 runner_scope: job.runner_scope,
                 runner_group: None,
+                repository: None, // Not available from GitHub list_queued_jobs
+                job_name: None,   // Not available from GitHub list_queued_jobs
+                workflow_name: None, // Not available from GitHub list_queued_jobs
             };
 
             if self.pending_job_store.add_job(&request).await {
@@ -473,6 +565,9 @@ impl FleetManager {
                     &job_info.runner_scope,
                     job_info.runner_group.as_deref(),
                     job_id,
+                    job_info.job_name.as_deref(),
+                    job_info.repository.as_deref(),
+                    job_info.workflow_name.as_deref(),
                 )
                 .await
             {
@@ -528,6 +623,9 @@ impl FleetManager {
         runner_scope: &RunnerScope,
         _runner_group: Option<&str>,
         job_id: u64,
+        job_name: Option<&str>,
+        repository: Option<&str>,
+        workflow_name: Option<&str>,
     ) -> anyhow::Result<()> {
         // Find an available agent with matching labels
         let agent_id = self
@@ -572,6 +670,9 @@ impl FleetManager {
                 runner_name.clone(), // vm_name is same as runner_name
                 runner_scope.clone(),
                 Some(job_id),
+                job_name.map(String::from),
+                repository.map(String::from),
+                workflow_name.map(String::from),
             )
             .await;
 
@@ -1236,7 +1337,10 @@ impl FleetManager {
                     agent_id.clone(),
                     runner_name.clone(), // vm_name is same as runner_name
                     runner_scope.clone(),
-                    None,
+                    None, // job_id
+                    None, // job_name
+                    None, // repository
+                    None, // workflow_name
                 )
                 .await;
 

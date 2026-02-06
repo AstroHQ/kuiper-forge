@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -344,18 +344,18 @@ async fn serve(
 
     // Initialize token provider and fleet manager
     // In dry-run mode, use mock tokens instead of GitHub API
-    let (fleet_manager, fleet_notifier, webhook_notifier) = if dry_run {
+    let (token_provider, fleet_manager, fleet_notifier, webhook_notifier) = if dry_run {
         warn!("DRY-RUN MODE: Using mock token provider (fake GitHub registration tokens)");
         let token_provider: Arc<dyn github::RunnerTokenProvider> =
             Arc::new(github::MockTokenProvider);
         let (fm, notifier, wh_notifier) = fleet::FleetManager::new(
             config.clone(),
-            token_provider,
+            token_provider.clone(),
             agent_registry.clone(),
             runner_state.clone(),
             pending_job_store.clone(),
         );
-        (Some(fm), Some(notifier), wh_notifier)
+        (token_provider, Some(fm), Some(notifier), wh_notifier)
     } else {
         let private_key = config.github.private_key_content()?;
         let github_client = github::GitHubClient::from_key(config.github.app_id, private_key)?;
@@ -370,12 +370,12 @@ async fn serve(
 
         let (fm, notifier, wh_notifier) = fleet::FleetManager::new(
             config.clone(),
-            token_provider,
+            token_provider.clone(),
             agent_registry.clone(),
             runner_state.clone(),
             pending_job_store.clone(),
         );
-        (Some(fm), Some(notifier), wh_notifier)
+        (token_provider, Some(fm), Some(notifier), wh_notifier)
     };
 
     info!("CI Runner Coordinator starting...");
@@ -412,6 +412,8 @@ async fn serve(
 
     // Spawn stale agent cleanup task
     let cleanup_registry = agent_registry.clone();
+    let cleanup_runner_state = runner_state.clone();
+    let cleanup_token_provider = token_provider.clone();
     tokio::spawn(async move {
         let cleanup_interval = std::time::Duration::from_secs(60);
         let stale_timeout = std::time::Duration::from_secs(120); // 2 minutes without heartbeat
@@ -422,6 +424,104 @@ async fn serve(
             let removed = cleanup_registry.remove_stale(stale_timeout).await;
             if !removed.is_empty() {
                 warn!("Removed {} stale agents: {:?}", removed.len(), removed);
+
+                // Clean up runner records for each stale agent
+                for agent_id in &removed {
+                    let runners = cleanup_runner_state.remove_runners_for_agent(agent_id).await;
+                    for (runner_name, runner_info) in runners {
+                        // Remove from GitHub in background (non-blocking)
+                        let tp = cleanup_token_provider.clone();
+                        let scope = runner_info.runner_scope.clone();
+                        let name = runner_name.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = tp.remove_runner(&scope, &name).await {
+                                warn!(
+                                    "Failed to remove runner '{}' from GitHub for stale agent: {}",
+                                    name, e
+                                );
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    // Spawn one-time startup cleanup for orphaned runners
+    // These are runners persisted from a previous run whose agents never reconnected
+    let startup_cleanup_registry = agent_registry.clone();
+    let startup_cleanup_runner_state = runner_state.clone();
+    let startup_cleanup_token_provider = token_provider.clone();
+    tokio::spawn(async move {
+        // Wait for agents to have a chance to connect
+        let grace_period = std::time::Duration::from_secs(180); // 3 minutes
+        info!(
+            "Will check for orphaned runners in {} seconds",
+            grace_period.as_secs()
+        );
+        tokio::time::sleep(grace_period).await;
+
+        // Get all persisted runners
+        let all_runners = match startup_cleanup_runner_state.get_all_runners().await {
+            Ok(runners) => runners,
+            Err(e) => {
+                error!("Failed to get runners for startup cleanup: {}", e);
+                return;
+            }
+        };
+
+        if all_runners.is_empty() {
+            debug!("No persisted runners to check for orphan cleanup");
+            return;
+        }
+
+        // Get currently connected agents
+        let connected_agents: std::collections::HashSet<String> = startup_cleanup_registry
+            .list_all()
+            .await
+            .into_iter()
+            .map(|a| a.agent_id)
+            .collect();
+
+        // Find runners whose agents aren't connected
+        let mut orphaned_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (_, runner_info) in &all_runners {
+            if !connected_agents.contains(&runner_info.agent_id) {
+                orphaned_agents.insert(runner_info.agent_id.clone());
+            }
+        }
+
+        if orphaned_agents.is_empty() {
+            debug!("All persisted runners have connected agents");
+            return;
+        }
+
+        warn!(
+            "Found {} orphaned runner(s) from {} agent(s) that never reconnected - cleaning up",
+            all_runners
+                .iter()
+                .filter(|(_, r)| orphaned_agents.contains(&r.agent_id))
+                .count(),
+            orphaned_agents.len()
+        );
+
+        // Clean up runners for each orphaned agent
+        for agent_id in orphaned_agents {
+            let runners = startup_cleanup_runner_state
+                .remove_runners_for_agent(&agent_id)
+                .await;
+            for (runner_name, runner_info) in runners {
+                let tp = startup_cleanup_token_provider.clone();
+                let scope = runner_info.runner_scope.clone();
+                let name = runner_name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = tp.remove_runner(&scope, &name).await {
+                        warn!(
+                            "Failed to remove orphaned runner '{}' from GitHub: {}",
+                            name, e
+                        );
+                    }
+                });
             }
         }
     });

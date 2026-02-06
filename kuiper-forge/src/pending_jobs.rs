@@ -37,6 +37,15 @@ pub struct PendingJobInfo {
     /// Number of failed runner attempts
     #[serde(default)]
     pub retry_count: i32,
+    /// Repository full name (owner/repo) for GitHub API status checks
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// Job name from the workflow file
+    #[serde(default)]
+    pub job_name: Option<String>,
+    /// Workflow name
+    #[serde(default)]
+    pub workflow_name: Option<String>,
 }
 
 /// Persistent store for pending webhook jobs.
@@ -112,6 +121,9 @@ impl PendingJobStore {
             .bind(&scope_json)
             .bind(&request.runner_group)
             .bind(&created_at_str)
+            .bind(&request.repository)
+            .bind(&request.job_name)
+            .bind(&request.workflow_name)
             .execute(&self.pool)
             .await;
 
@@ -234,6 +246,9 @@ impl PendingJobStore {
                     runner_scope: info.runner_scope,
                     runner_group: info.runner_group,
                     job_id,
+                    repository: info.repository,
+                    job_name: info.job_name,
+                    workflow_name: info.workflow_name,
                 })
                 .collect(),
             Err(e) => {
@@ -252,6 +267,9 @@ impl PendingJobStore {
         let runner_group: Option<String> = row.try_get("runner_group").ok()?;
         let created_at_str: String = row.try_get("created_at").ok()?;
         let retry_count: i32 = row.try_get("retry_count").unwrap_or(0);
+        let repository: Option<String> = row.try_get("repository").ok().flatten();
+        let job_name: Option<String> = row.try_get("job_name").ok().flatten();
+        let workflow_name: Option<String> = row.try_get("workflow_name").ok().flatten();
 
         let job_labels: Vec<String> = match serde_json::from_str(&job_labels_json) {
             Ok(l) => l,
@@ -300,6 +318,9 @@ impl PendingJobStore {
                 runner_group,
                 created_at,
                 retry_count,
+                repository,
+                job_name,
+                workflow_name,
             },
         ))
     }
