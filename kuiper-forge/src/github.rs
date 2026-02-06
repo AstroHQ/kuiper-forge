@@ -28,6 +28,8 @@ pub struct QueuedJob {
     pub labels: Vec<String>,
     /// The scope (org or repo) where this job was queued
     pub runner_scope: RunnerScope,
+    /// Repository full name (owner/repo)
+    pub repository: Option<String>,
 }
 
 /// Trait for obtaining runner registration tokens and managing runners.
@@ -863,6 +865,7 @@ impl GitHubClient {
                             job_id: job.id,
                             labels: job.labels,
                             runner_scope: scope,
+                            repository: Some(repo.full_name.clone()),
                         });
                     }
                 }

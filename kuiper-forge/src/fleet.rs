@@ -490,9 +490,9 @@ impl FleetManager {
                 agent_labels: job.labels.clone(), // Use job labels for agent matching
                 runner_scope: job.runner_scope,
                 runner_group: None,
-                repository: None, // Not available from GitHub list_queued_jobs
-                job_name: None,   // Not available from GitHub list_queued_jobs
-                workflow_name: None, // Not available from GitHub list_queued_jobs
+                repository: job.repository,
+                job_name: None,       // Not available from GitHub list_queued_jobs
+                workflow_name: None,  // Not available from GitHub list_queued_jobs
             };
 
             if self.pending_job_store.add_job(&request).await {
