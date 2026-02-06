@@ -63,4 +63,8 @@ pub struct RunnerSummary {
     pub runner_name: String,
     pub vm_name: String,
     pub created_at: DateTime<Utc>,
+    pub job_id: Option<u64>,
+    pub job_name: Option<String>,
+    pub repository: Option<String>,
+    pub workflow_name: Option<String>,
 }

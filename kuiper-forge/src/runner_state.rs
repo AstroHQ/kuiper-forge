@@ -28,6 +28,15 @@ pub struct RunnerInfo {
     /// GitHub job ID (webhook mode only, for deduplication cleanup on failure)
     #[serde(default)]
     pub job_id: Option<u64>,
+    /// Job name from the workflow file
+    #[serde(default)]
+    pub job_name: Option<String>,
+    /// Repository full name (owner/repo)
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// Workflow name
+    #[serde(default)]
+    pub workflow_name: Option<String>,
 }
 
 /// Persistent store for active runner state.
@@ -74,6 +83,9 @@ impl RunnerStateStore {
         vm_name: String,
         runner_scope: RunnerScope,
         job_id: Option<u64>,
+        job_name: Option<String>,
+        repository: Option<String>,
+        workflow_name: Option<String>,
     ) {
         let created_at = Utc::now();
         let scope_json = match serde_json::to_string(&runner_scope) {
@@ -93,14 +105,17 @@ impl RunnerStateStore {
             .bind(&scope_json)
             .bind(&created_at_str)
             .bind(job_id_i64)
+            .bind(&job_name)
+            .bind(&repository)
+            .bind(&workflow_name)
             .execute(&self.pool)
             .await;
 
         match result {
             Ok(_) => {
                 debug!(
-                    "Added runner {} to database (job_id={:?})",
-                    runner_name, job_id
+                    "Added runner {} to database (job_id={:?}, repo={:?})",
+                    runner_name, job_id, repository
                 );
             }
             Err(e) => {
@@ -198,6 +213,43 @@ impl RunnerStateStore {
         matches!(result, Ok(Some(_)))
     }
 
+    /// Remove all runners for an agent and return them for cleanup.
+    ///
+    /// Used when an agent disconnects to clean up orphaned runner records.
+    /// Returns the removed runners so the caller can clean them up from GitHub.
+    pub async fn remove_runners_for_agent(&self, agent_id: &str) -> Vec<(String, RunnerInfo)> {
+        // First get the runners so we can return them
+        let runners = self.get_runners_for_agent(agent_id).await;
+
+        if runners.is_empty() {
+            return runners;
+        }
+
+        // Delete all runners for this agent
+        let result = sqlx::query(sql::DELETE_RUNNERS_BY_AGENT)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await;
+
+        match result {
+            Ok(r) => {
+                info!(
+                    "Removed {} runner(s) for stale agent '{}' from database",
+                    r.rows_affected(),
+                    agent_id
+                );
+            }
+            Err(e) => {
+                error!(
+                    "Failed to remove runners for agent '{}' from database: {}",
+                    agent_id, e
+                );
+            }
+        }
+
+        runners
+    }
+
     /// Reconcile persisted runners for an agent against the current VM list.
     ///
     /// Returns runners whose VMs are missing from the agent's reported list.
@@ -232,6 +284,9 @@ impl RunnerStateStore {
         let scope_json: String = row.try_get("runner_scope").ok()?;
         let created_at_str: String = row.try_get("created_at").ok()?;
         let job_id: Option<i64> = row.try_get("job_id").ok()?;
+        let job_name: Option<String> = row.try_get("job_name").ok().flatten();
+        let repository: Option<String> = row.try_get("repository").ok().flatten();
+        let workflow_name: Option<String> = row.try_get("workflow_name").ok().flatten();
 
         let runner_scope: RunnerScope = match serde_json::from_str(&scope_json) {
             Ok(s) => s,
@@ -260,6 +315,9 @@ impl RunnerStateStore {
                 runner_scope,
                 created_at,
                 job_id: job_id.map(|id| id as u64),
+                job_name,
+                repository,
+                workflow_name,
             },
         ))
     }

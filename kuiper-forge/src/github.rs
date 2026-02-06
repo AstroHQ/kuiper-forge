@@ -28,6 +28,8 @@ pub struct QueuedJob {
     pub labels: Vec<String>,
     /// The scope (org or repo) where this job was queued
     pub runner_scope: RunnerScope,
+    /// Repository full name (owner/repo)
+    pub repository: Option<String>,
 }
 
 /// Trait for obtaining runner registration tokens and managing runners.
@@ -47,6 +49,11 @@ pub trait RunnerTokenProvider: Send + Sync {
     /// List all queued workflow jobs across all installations.
     /// This is used on startup to recover jobs that may have been missed.
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>>;
+
+    /// Get the status of a specific workflow job.
+    /// Returns the job status ("queued", "in_progress", "completed", etc.)
+    /// or None if the job is not found (404).
+    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>>;
 }
 
 /// Mock token provider for dry-run/testing mode.
@@ -77,6 +84,14 @@ impl RunnerTokenProvider for MockTokenProvider {
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
         info!("DRY-RUN: list_queued_jobs returns empty (no GitHub API access)");
         Ok(Vec::new())
+    }
+
+    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>> {
+        info!(
+            "DRY-RUN: get_job_status for job {} in {} returns None",
+            job_id, repo
+        );
+        Ok(None)
     }
 }
 
@@ -586,6 +601,61 @@ impl GitHubClient {
         }
     }
 
+    /// Get the status of a specific workflow job.
+    ///
+    /// Returns the job status ("queued", "in_progress", "completed", etc.)
+    /// or None if the job is not found (404).
+    pub async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>> {
+        // Parse repo to get owner for installation lookup
+        let parts: Vec<&str> = repo.split('/').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!("Invalid repository format: expected 'owner/repo'"));
+        }
+        let owner = parts[0];
+
+        // Get installation ID for this repo owner
+        let installation_id = self.get_installation_id(owner).await?;
+        let access_token = self.get_access_token(installation_id).await?;
+
+        let url = format!("{GITHUB_API_URL}/repos/{repo}/actions/jobs/{job_id}");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("Failed to get job status")?;
+
+        // 404 means job not found
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "GitHub API error getting job status ({status}): {body}"
+            ));
+        }
+
+        // Parse the response to get the status field
+        #[derive(Deserialize)]
+        struct JobResponse {
+            status: String,
+        }
+
+        let job_response: JobResponse = response
+            .json()
+            .await
+            .context("Failed to parse job status response")?;
+
+        Ok(Some(job_response.status))
+    }
+
     /// List all queued workflow jobs across all installations.
     ///
     /// Queries each repository for active workflow runs, then checks jobs.
@@ -795,6 +865,7 @@ impl GitHubClient {
                             job_id: job.id,
                             labels: job.labels,
                             runner_scope: scope,
+                            repository: Some(repo.full_name.clone()),
                         });
                     }
                 }
@@ -820,6 +891,11 @@ impl RunnerTokenProvider for GitHubClient {
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
         // Delegate to the inherent method
         GitHubClient::list_queued_jobs(self).await
+    }
+
+    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>> {
+        // Delegate to the inherent method
+        GitHubClient::get_job_status(self, repo, job_id).await
     }
 }
 

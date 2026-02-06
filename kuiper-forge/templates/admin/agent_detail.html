@@ -77,7 +77,8 @@
             <thead>
                 <tr>
                     <th>Runner Name</th>
-                    <th>VM Name</th>
+                    <th>Repository</th>
+                    <th>Workflow / Job</th>
                     <th>Created</th>
                 </tr>
             </thead>
@@ -85,7 +86,29 @@
                 {% for runner in runners %}
                 <tr>
                     <td>{{ runner.runner_name }}</td>
-                    <td>{{ runner.vm_name }}</td>
+                    <td>
+                        {% match runner.repository %}
+                            {% when Some with (repo) %}
+                                <a href="https://github.com/{{ repo }}" target="_blank" style="color: #58a6ff;">{{ repo }}</a>
+                            {% when None %}
+                                <span style="color: #666;">-</span>
+                        {% endmatch %}
+                    </td>
+                    <td>
+                        {% match runner.workflow_name %}
+                            {% when Some with (workflow) %}
+                                {{ workflow }}
+                            {% when None %}
+                        {% endmatch %}
+                        {% match runner.job_name %}
+                            {% when Some with (job) %}
+                                / {{ job }}
+                            {% when None %}
+                        {% endmatch %}
+                        {% if runner.workflow_name.is_none() && runner.job_name.is_none() %}
+                            <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
                     <td>{{ runner.created_at }}</td>
                 </tr>
                 {% endfor %}
