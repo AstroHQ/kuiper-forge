@@ -538,7 +538,7 @@ async fn handle_agent_message(
     msg: AgentMessage,
     runner_state: Option<&Arc<RunnerStateStore>>,
     fleet_notifier: Option<&FleetNotifier>,
-    pending_job_store: Option<&Arc<PendingJobStore>>,
+    _pending_job_store: Option<&Arc<PendingJobStore>>,
 ) {
     match msg.payload {
         Some(AgentPayload::Status(status)) => {
@@ -559,39 +559,42 @@ async fn handle_agent_message(
                 let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
                 let missing = rs.reconcile_agent_vms(agent_id, &vm_names).await;
                 if !missing.is_empty() {
-                    let mut deferred = 0usize;
-                    let has_pending_store = pending_job_store.is_some();
-
                     for (runner_name, runner_info) in &missing {
-                        if has_pending_store {
-                            if let Some(job_id) = runner_info.job_id {
-                                deferred += 1;
-                                debug!(
-                                    agent_id = %agent_id,
-                                    runner_name = %runner_name,
-                                    job_id = %job_id,
-                                    "Runner VM missing - deferring cleanup until runner event"
-                                );
-                                continue;
-                            }
-                        }
-
+                        // Always clean up missing runners immediately.
+                        // Previously, runners with job_ids were deferred waiting for a
+                        // RunnerEvent, but if the agent disconnected when the VM was
+                        // destroyed, that event is lost and the runner stays orphaned
+                        // forever, blocking the pending job from being retried.
                         rs.remove_runner(runner_name).await;
-                        debug!(
-                            agent_id = %agent_id,
-                            runner_name = %runner_name,
-                            "Removed runner from state during reconciliation"
-                        );
+                        registry.release_slot(agent_id).await;
+
+                        if let Some(job_id) = runner_info.job_id {
+                            info!(
+                                agent_id = %agent_id,
+                                runner_name = %runner_name,
+                                job_id = %job_id,
+                                "Runner VM missing - cleaned up runner, job will be retried"
+                            );
+                        } else {
+                            debug!(
+                                agent_id = %agent_id,
+                                runner_name = %runner_name,
+                                "Removed runner from state during reconciliation"
+                            );
+                        }
                     }
 
                     info!(
                         agent_id = %agent_id,
                         missing_count = missing.len(),
-                        deferred_count = deferred,
-                        "Reconciled runner state - {} runner(s) missing ({} deferred)",
+                        "Reconciled runner state - {} runner(s) missing, all cleaned up",
                         missing.len(),
-                        deferred
                     );
+
+                    // Trigger pending job processing since slots were freed
+                    if let Some(notifier) = fleet_notifier {
+                        notifier.notify().await;
+                    }
                 }
             }
         }
