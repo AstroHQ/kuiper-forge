@@ -1203,14 +1203,11 @@ impl FleetManager {
         let agents = self.agent_registry.list_all().await;
         let mut total = 0u32;
         for agent in &agents {
-            // Check if agent matches the pool's labels
-            let matches = labels.iter().all(|l| {
-                agent
-                    .labels
-                    .iter()
-                    .any(|al| al.eq_ignore_ascii_case(l))
-            });
-            if matches {
+            // Exact match: normalize agent labels the same way get_pool_definitions() does
+            let mut normalized: Vec<String> =
+                agent.labels.iter().map(|l| l.to_lowercase()).collect();
+            normalized.sort();
+            if normalized == labels {
                 total += self
                     .runner_state
                     .count_runners_for_agent(&agent.agent_id)
