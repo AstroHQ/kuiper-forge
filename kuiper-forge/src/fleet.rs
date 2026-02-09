@@ -6,10 +6,9 @@
 //! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
 //! - Recovering runners when agents reconnect after coordinator restart
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -57,7 +56,9 @@ impl FleetNotifier {
     /// Called when an agent connects to check if runners need to be created.
     pub async fn notify(&self) {
         // Use try_send to avoid blocking - if channel is full, reconciliation is already pending
-        let _ = self.notify_tx.try_send(());
+        if self.notify_tx.try_send(()).is_err() {
+            debug!("Fleet notify channel full - reconciliation already pending");
+        }
     }
 
     /// Notify with recovery info when an agent has existing VMs.
@@ -65,27 +66,40 @@ impl FleetNotifier {
     /// Called when an agent connects with VMs that may match persisted runners.
     /// The fleet manager will spawn watchers for matching runners.
     pub async fn notify_with_recovery(&self, agent_id: String, vm_names: Vec<String>) {
-        let _ = self
+        if self
             .recovery_tx
-            .try_send(AgentRecoveryInfo { agent_id, vm_names });
+            .try_send(AgentRecoveryInfo {
+                agent_id: agent_id.clone(),
+                vm_names,
+            })
+            .is_err()
+        {
+            warn!(
+                agent_id = %agent_id,
+                "Fleet recovery channel full - recovery info dropped"
+            );
+        }
         // Also trigger a reconcile
         let _ = self.notify_tx.try_send(());
     }
 
     /// Notify with a runner lifecycle event from an agent.
     pub async fn notify_runner_event(&self, agent_id: String, event: RunnerEvent) {
-        let _ = self
+        if self
             .runner_event_tx
-            .try_send(AgentRunnerEvent { agent_id, event });
+            .try_send(AgentRunnerEvent {
+                agent_id: agent_id.clone(),
+                event,
+            })
+            .is_err()
+        {
+            warn!(
+                agent_id = %agent_id,
+                "Fleet runner event channel full - event dropped, may delay cleanup"
+            );
+        }
         let _ = self.notify_tx.try_send(());
     }
-}
-
-/// Tracks active runners per configuration.
-#[derive(Debug, Default)]
-struct RunnerPool {
-    /// Pending runners (waiting for creation to complete)
-    pending_runners: HashMap<usize, u32>,
 }
 
 /// Fleet manager that maintains runner pools.
@@ -96,8 +110,6 @@ pub struct FleetManager {
     token_provider: Arc<dyn RunnerTokenProvider>,
     /// Agent registry for sending commands
     agent_registry: Arc<AgentRegistry>,
-    /// Runner pool state
-    pool: Arc<RwLock<RunnerPool>>,
     /// Persistent runner state for crash recovery
     runner_state: Arc<RunnerStateStore>,
     /// Persistent pending jobs store (webhook mode only)
@@ -124,9 +136,9 @@ impl FleetManager {
         runner_state: Arc<RunnerStateStore>,
         pending_job_store: Arc<PendingJobStore>,
     ) -> (Self, FleetNotifier, Option<WebhookNotifier>) {
-        let (notify_tx, notify_rx) = mpsc::channel(16);
-        let (recovery_tx, recovery_rx) = mpsc::channel(16);
-        let (runner_event_tx, runner_event_rx) = mpsc::channel(32);
+        let (notify_tx, notify_rx) = mpsc::channel(64);
+        let (recovery_tx, recovery_rx) = mpsc::channel(64);
+        let (runner_event_tx, runner_event_rx) = mpsc::channel(128);
 
         // Create webhook channel only in webhook mode
         let (webhook_rx, webhook_notifier) = match config.provisioning.mode {
@@ -141,7 +153,6 @@ impl FleetManager {
             config,
             token_provider,
             agent_registry,
-            pool: Arc::new(RwLock::new(RunnerPool::default())),
             runner_state,
             pending_job_store,
             notify_rx,
@@ -1172,10 +1183,9 @@ impl FleetManager {
             agent_count
         );
 
-        for (idx, pool_def) in pool_defs.iter().enumerate() {
+        for pool_def in &pool_defs {
             if let Err(e) = self
                 .reconcile_pool(
-                    idx,
                     pool_def,
                     &self.config.runner_scope,
                     self.config.runner_group.as_ref(),
@@ -1187,38 +1197,57 @@ impl FleetManager {
         }
     }
 
+    /// Count current runners (pending + active) for a pool by checking
+    /// the runner_state DB for all agents matching the pool's labels.
+    async fn count_runners_for_pool(&self, labels: &[String]) -> u32 {
+        let agents = self.agent_registry.list_all().await;
+        let mut total = 0u32;
+        for agent in &agents {
+            // Exact match: normalize agent labels the same way get_pool_definitions() does
+            let mut normalized: Vec<String> =
+                agent.labels.iter().map(|l| l.to_lowercase()).collect();
+            normalized.sort();
+            if normalized == labels {
+                total += self
+                    .runner_state
+                    .count_runners_for_agent(&agent.agent_id)
+                    .await as u32;
+            }
+        }
+        total
+    }
+
     /// Reconcile a single runner pool.
     ///
     /// Creates runners up to the target count for this pool, using agents that
     /// match the required labels.
     async fn reconcile_pool(
         &self,
-        config_idx: usize,
         pool_def: &PoolDefinition,
         runner_scope: &RunnerScope,
         _runner_group: Option<&String>,
     ) -> anyhow::Result<()> {
-        let pending = {
-            let pool = self.pool.read().await;
-            *pool.pending_runners.get(&config_idx).unwrap_or(&0)
-        };
+        // Count current runners from the database (source of truth).
+        // This replaces the old in-memory pending_runners counter which could
+        // diverge from reality when runners completed without decrementing.
+        let current = self.count_runners_for_pool(&pool_def.labels).await;
 
         let target = pool_def.target_count;
 
         info!(
-            "Pool {:?}: checking - pending={}, target={}",
-            pool_def.labels, pending, target
+            "Pool {:?}: checking - current={}, target={}",
+            pool_def.labels, current, target
         );
 
-        if pending >= target {
+        if current >= target {
             info!(
-                "Pool {:?}: {}/{} pending (target met, nothing to do)",
-                pool_def.labels, pending, target
+                "Pool {:?}: {}/{} runners (target met, nothing to do)",
+                pool_def.labels, current, target
             );
             return Ok(());
         }
 
-        let needed = target - pending;
+        let needed = target - current;
 
         // Check available capacity before trying to create runners
         let capacity = self
@@ -1261,8 +1290,8 @@ impl FleetManager {
         let to_create = std::cmp::min(needed as usize, capacity) as u32;
 
         info!(
-            "Pool {:?}: {}/{} pending, need {} more, capacity for {}, will try to create {}",
-            pool_def.labels, pending, target, needed, capacity, to_create
+            "Pool {:?}: {}/{} runners, need {} more, capacity for {}, will try to create {}",
+            pool_def.labels, current, target, needed, capacity, to_create
         );
 
         // Try to create runners up to the available capacity
@@ -1324,12 +1353,6 @@ impl FleetManager {
             let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
             let command_id = Uuid::new_v4().to_string();
 
-            // Mark as pending
-            {
-                let mut pool = self.pool.write().await;
-                *pool.pending_runners.entry(config_idx).or_insert(0) += 1;
-            }
-
             // Save runner state for crash recovery (no job_id in fixed capacity mode)
             self.runner_state
                 .add_runner(
@@ -1363,8 +1386,6 @@ impl FleetManager {
             );
 
             // Clone for async task
-            let pool = self.pool.clone();
-            let config_idx_copy = config_idx;
             let agent_registry = self.agent_registry.clone();
             let agent_id_clone = agent_id.clone();
             let token_provider = self.token_provider.clone();
@@ -1392,13 +1413,6 @@ impl FleetManager {
                                     "CreateRunner rejected by agent {} for {}: {}",
                                     agent_id_clone, runner_name_clone, ack.error
                                 );
-                                {
-                                    let mut pool = pool.write().await;
-                                    if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy)
-                                    {
-                                        *p = p.saturating_sub(1);
-                                    }
-                                }
                                 agent_registry.release_slot(&agent_id_clone).await;
                                 if let Err(e) = token_provider
                                     .remove_runner(&runner_scope, &runner_name_clone)
@@ -1413,12 +1427,6 @@ impl FleetManager {
                             }
                         }
                         Some(AgentPayload::Result(result)) => {
-                            {
-                                let mut pool = pool.write().await;
-                                if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
-                                    *p = p.saturating_sub(1);
-                                }
-                            }
                             agent_registry.release_slot(&agent_id_clone).await;
                             if result.success {
                                 info!("Runner {} completed successfully", runner_name_clone);
@@ -1441,12 +1449,6 @@ impl FleetManager {
                                 "Unexpected CreateRunner response from agent {} for {}: {:?}",
                                 agent_id_clone, runner_name_clone, other
                             );
-                            {
-                                let mut pool = pool.write().await;
-                                if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
-                                    *p = p.saturating_sub(1);
-                                }
-                            }
                             agent_registry.release_slot(&agent_id_clone).await;
                             if let Err(e) = token_provider
                                 .remove_runner(&runner_scope, &runner_name_clone)
@@ -1462,12 +1464,6 @@ impl FleetManager {
                     },
                     Err(e) => {
                         error!("CreateRunner command failed: {}", e);
-                        {
-                            let mut pool = pool.write().await;
-                            if let Some(p) = pool.pending_runners.get_mut(&config_idx_copy) {
-                                *p = p.saturating_sub(1);
-                            }
-                        }
                         agent_registry.release_slot(&agent_id_clone).await;
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)

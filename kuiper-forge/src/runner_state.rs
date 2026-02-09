@@ -147,6 +147,25 @@ impl RunnerStateStore {
         }
     }
 
+    /// Count runners for a specific agent.
+    pub async fn count_runners_for_agent(&self, agent_id: &str) -> usize {
+        let result = sqlx::query(sql::COUNT_RUNNERS_BY_AGENT)
+            .bind(agent_id)
+            .fetch_one(&self.pool)
+            .await;
+
+        match result {
+            Ok(row) => {
+                let count: i64 = row.try_get("count").unwrap_or(0);
+                count as usize
+            }
+            Err(e) => {
+                error!("Failed to count runners for agent {}: {}", agent_id, e);
+                0
+            }
+        }
+    }
+
     /// Get all runners for a specific agent.
     pub async fn get_runners_for_agent(&self, agent_id: &str) -> Vec<(String, RunnerInfo)> {
         let result = sqlx::query(sql::SELECT_RUNNERS_BY_AGENT)

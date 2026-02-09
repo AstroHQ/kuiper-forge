@@ -142,6 +142,13 @@ pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE jo
 #[cfg(feature = "postgres")]
 pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = $1";
 
+// Count runners for a specific agent
+#[cfg(feature = "sqlite")]
+pub const COUNT_RUNNERS_BY_AGENT: &str = "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const COUNT_RUNNERS_BY_AGENT: &str = "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = $1";
+
 // Bulk delete for agent disconnect cleanup
 #[cfg(feature = "sqlite")]
 pub const DELETE_RUNNERS_BY_AGENT: &str = "DELETE FROM active_runners WHERE agent_id = ?";
