@@ -538,7 +538,7 @@ async fn handle_agent_message(
     msg: AgentMessage,
     runner_state: Option<&Arc<RunnerStateStore>>,
     fleet_notifier: Option<&FleetNotifier>,
-    _pending_job_store: Option<&Arc<PendingJobStore>>,
+    pending_job_store: Option<&Arc<PendingJobStore>>,
 ) {
     match msg.payload {
         Some(AgentPayload::Status(status)) => {
@@ -569,11 +569,17 @@ async fn handle_agent_message(
                         registry.release_slot(agent_id).await;
 
                         if let Some(job_id) = runner_info.job_id {
+                            // Remove the pending job so process_pending_jobs doesn't
+                            // create a duplicate runner for a job whose VM is gone.
+                            // If GitHub re-queues the job, we'll get a new webhook.
+                            if let Some(pjs) = pending_job_store {
+                                pjs.remove_job(job_id).await;
+                            }
                             info!(
                                 agent_id = %agent_id,
                                 runner_name = %runner_name,
                                 job_id = %job_id,
-                                "Runner VM missing - cleaned up runner, job will be retried"
+                                "Runner VM missing - cleaned up runner and pending job"
                             );
                         } else {
                             debug!(
