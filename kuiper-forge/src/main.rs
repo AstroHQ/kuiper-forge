@@ -922,7 +922,7 @@ async fn handle_admin_command(
             }
 
             admin_store.create_user(&username, &password).await?;
-            println!("Admin user '{}' created successfully.", username);
+            println!("Admin user '{username}' created successfully.");
             Ok(())
         }
 
@@ -952,7 +952,7 @@ async fn handle_admin_command(
         AdminCommands::ResetPassword { username } => {
             // Check if user exists
             if admin_store.get_user(&username).await?.is_none() {
-                return Err(anyhow!("User '{}' not found", username));
+                return Err(anyhow!("User '{username}' not found"));
             }
 
             // Prompt for new password
@@ -973,7 +973,7 @@ async fn handle_admin_command(
             }
 
             admin_store.update_password(&username, &password).await?;
-            println!("Password for '{}' updated successfully.", username);
+            println!("Password for '{username}' updated successfully.");
             Ok(())
         }
     }

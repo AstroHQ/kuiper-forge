@@ -35,16 +35,13 @@ pub struct RegistrationBundle {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ServerTrustMode {
+    #[default]
     Ca,
     Chain,
 }
 
-impl Default for ServerTrustMode {
-    fn default() -> Self {
-        ServerTrustMode::Ca
-    }
-}
 
 impl RegistrationBundle {
     /// Check if a string looks like a registration bundle.

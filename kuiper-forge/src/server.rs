@@ -159,10 +159,10 @@ async fn parse_proxy_protocol(
                     "Parsed PROXY protocol v1 header"
                 );
 
-                return Ok(real_addr);
+                Ok(real_addr)
             }
             HeaderResult::V1(Err(e)) => {
-                anyhow::bail!("Invalid PROXY protocol v1 header: {:?}", e);
+                anyhow::bail!("Invalid PROXY protocol v1 header: {e:?}");
             }
             HeaderResult::V2(_) => {
                 // Should not happen since first byte wasn't 0x0D
@@ -685,6 +685,7 @@ pub struct ServerConfig {
 /// If `admin_state` is provided, serves admin UI at /admin.
 /// Traffic is routed based on content-type: `application/grpc` goes to gRPC services,
 /// everything else goes to the HTTP handler.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     config: ServerConfig,
     server_trust: ServerTrust,

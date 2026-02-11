@@ -76,6 +76,7 @@ impl RunnerStateStore {
     }
 
     /// Add a runner to the state.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_runner(
         &self,
         runner_name: String,

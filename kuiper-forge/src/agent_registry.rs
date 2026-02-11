@@ -84,6 +84,7 @@ pub struct ConnectedAgent {
 
 impl ConnectedAgent {
     /// Create a new connected agent
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_id: String,
         agent_type: AgentType,
@@ -208,6 +209,7 @@ impl AgentRegistry {
     }
 
     /// Register a new agent connection
+    #[allow(clippy::too_many_arguments)]
     pub async fn register(
         &self,
         agent_id: String,

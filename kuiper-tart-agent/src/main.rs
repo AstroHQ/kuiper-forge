@@ -395,7 +395,7 @@ async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::
 
     // 1. Check binary is in PATH
     print!("Checking binary location... ");
-    let binary_path = install::find_binary_in_path().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let binary_path = install::find_binary_in_path().map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("found at {}", binary_path.display());
 
     // 2. Check config exists
@@ -444,7 +444,7 @@ async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::
     // 9. Load service
     if !no_load {
         print!("Loading service... ");
-        install::load_service().map_err(|e| anyhow::anyhow!("{}", e))?;
+        install::load_service().map_err(|e| anyhow::anyhow!("{e}"))?;
         println!("done");
 
         // Brief delay then check status

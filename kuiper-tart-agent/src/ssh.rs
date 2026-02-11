@@ -599,8 +599,7 @@ pub async fn start_runner_gui_and_wait(
     // Upload the runner wrapper script to the VM
     let script_path = "~/start-runner.sh";
     let upload_cmd = format!(
-        "cat > {} << 'RUNNER_SCRIPT_EOF'\n{}\nRUNNER_SCRIPT_EOF\nchmod +x {}",
-        script_path, GUI_RUNNER_SCRIPT, script_path
+        "cat > {script_path} << 'RUNNER_SCRIPT_EOF'\n{GUI_RUNNER_SCRIPT}\nRUNNER_SCRIPT_EOF\nchmod +x {script_path}"
     );
     ssh_exec(ip, config, &upload_cmd)
         .await
@@ -611,7 +610,7 @@ pub async fn start_runner_gui_and_wait(
     let _ = ssh_exec(ip, config, "rm -f ~/runner-exit-status").await;
 
     // Launch via Terminal.app for GUI context
-    let launch_cmd = format!("open -a Terminal {}", script_path);
+    let launch_cmd = format!("open -a Terminal {script_path}");
     ssh_exec(ip, config, &launch_cmd)
         .await
         .map_err(|e| Error::Ssh(format!("Failed to launch runner in Terminal: {e}")))?;
@@ -722,7 +721,7 @@ async fn poll_and_stream_log(
 
     // Read new content using tail with byte offset
     let bytes_to_read = current_size - last_log_size;
-    let tail_cmd = format!("tail -c {} ~/runner.log 2>/dev/null", bytes_to_read);
+    let tail_cmd = format!("tail -c {bytes_to_read} ~/runner.log 2>/dev/null");
 
     if let Ok(new_content) = ssh_exec(ip, config, &tail_cmd).await
         && !new_content.is_empty()

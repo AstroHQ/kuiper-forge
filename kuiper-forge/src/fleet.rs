@@ -628,6 +628,7 @@ impl FleetManager {
     ///
     /// Unlike fixed-capacity reconciliation, this doesn't track pending counts
     /// since there's no target to maintain.
+    #[allow(clippy::too_many_arguments)]
     async fn create_runner_on_demand(
         &self,
         labels: &[String],
@@ -851,7 +852,7 @@ impl FleetManager {
                     handle_command_failure(
                         &pending_job_store,
                         job_id,
-                        &format!("command error: {}", e),
+                        &format!("command error: {e}"),
                     )
                     .await;
                 }

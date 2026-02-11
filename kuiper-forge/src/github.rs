@@ -691,8 +691,7 @@ impl GitHubClient {
             let mut page = 1;
             loop {
                 let repos_url = format!(
-                    "{GITHUB_API_URL}/installation/repositories?per_page=100&page={}",
-                    page
+                    "{GITHUB_API_URL}/installation/repositories?per_page=100&page={page}"
                 );
                 let repos_response = self
                     .http_client

@@ -53,7 +53,7 @@ impl AdminAuthStore {
         let argon2 = Argon2::default();
         let hash = argon2
             .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| anyhow!("Failed to hash password: {}", e))?;
+            .map_err(|e| anyhow!("Failed to hash password: {e}"))?;
         Ok(hash.to_string())
     }
 
@@ -161,7 +161,7 @@ impl AdminAuthStore {
             .context("Failed to update password")?;
 
         if result.rows_affected() == 0 {
-            return Err(anyhow!("User not found: {}", username));
+            return Err(anyhow!("User not found: {username}"));
         }
 
         Ok(())
@@ -184,7 +184,7 @@ impl AdminAuthStore {
             .context("Failed to delete admin user")?;
 
         if result.rows_affected() == 0 {
-            return Err(anyhow!("User not found: {}", username));
+            return Err(anyhow!("User not found: {username}"));
         }
 
         Ok(())

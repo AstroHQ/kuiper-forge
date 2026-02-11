@@ -112,8 +112,7 @@ async fn login_submit(
 
     // Set session cookie
     let cookie = format!(
-        "{}={}; Path=/admin; HttpOnly; SameSite=Strict",
-        SESSION_COOKIE, session_id
+        "{SESSION_COOKIE}={session_id}; Path=/admin; HttpOnly; SameSite=Strict"
     );
 
     Response::builder()
@@ -127,16 +126,14 @@ async fn login_submit(
 /// Logout handler.
 async fn logout(State(state): State<Arc<AdminState>>, jar: CookieJar) -> Response {
     // Delete session from database
-    if let Some(session) = check_auth(&state, &jar).await {
-        if let Err(e) = state.auth_store.delete_session(&session.session_id).await {
+    if let Some(session) = check_auth(&state, &jar).await
+        && let Err(e) = state.auth_store.delete_session(&session.session_id).await {
             error!("Failed to delete session: {}", e);
         }
-    }
 
     // Clear cookie by setting it to expire in the past
     let cookie = format!(
-        "{}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0",
-        SESSION_COOKIE
+        "{SESSION_COOKIE}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0"
     );
 
     Response::builder()
