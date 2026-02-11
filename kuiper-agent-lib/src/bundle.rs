@@ -42,7 +42,6 @@ pub enum ServerTrustMode {
     Chain,
 }
 
-
 impl RegistrationBundle {
     /// Check if a string looks like a registration bundle.
     pub fn is_bundle(input: &str) -> bool {

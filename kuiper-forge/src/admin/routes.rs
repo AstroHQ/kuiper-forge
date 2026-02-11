@@ -111,9 +111,7 @@ async fn login_submit(
     };
 
     // Set session cookie
-    let cookie = format!(
-        "{SESSION_COOKIE}={session_id}; Path=/admin; HttpOnly; SameSite=Strict"
-    );
+    let cookie = format!("{SESSION_COOKIE}={session_id}; Path=/admin; HttpOnly; SameSite=Strict");
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -127,14 +125,13 @@ async fn login_submit(
 async fn logout(State(state): State<Arc<AdminState>>, jar: CookieJar) -> Response {
     // Delete session from database
     if let Some(session) = check_auth(&state, &jar).await
-        && let Err(e) = state.auth_store.delete_session(&session.session_id).await {
-            error!("Failed to delete session: {}", e);
-        }
+        && let Err(e) = state.auth_store.delete_session(&session.session_id).await
+    {
+        error!("Failed to delete session: {}", e);
+    }
 
     // Clear cookie by setting it to expire in the past
-    let cookie = format!(
-        "{SESSION_COOKIE}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0"
-    );
+    let cookie = format!("{SESSION_COOKIE}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0");
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)

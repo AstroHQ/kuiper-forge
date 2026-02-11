@@ -378,10 +378,7 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
 
 /// Build a PROXY protocol v1 header for TCP4
 fn build_proxy_v1_header(src_addr: &str, src_port: u16, dst_addr: &str, dst_port: u16) -> Vec<u8> {
-    format!(
-        "PROXY TCP4 {src_addr} {dst_addr} {src_port} {dst_port}\r\n"
-    )
-    .into_bytes()
+    format!("PROXY TCP4 {src_addr} {dst_addr} {src_port} {dst_port}\r\n").into_bytes()
 }
 
 /// Build a PROXY protocol v2 header for TCP4
