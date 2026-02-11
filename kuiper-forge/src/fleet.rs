@@ -441,7 +441,7 @@ impl FleetManager {
     /// This is called on startup to catch jobs that were queued while the
     /// coordinator was down or if webhooks were lost.
     async fn recover_queued_jobs_from_github(&self) {
-        use crate::webhook::{has_required_labels, WebhookRunnerRequest};
+        use crate::webhook::{WebhookRunnerRequest, has_required_labels};
 
         // Get required_labels from webhook config
         let required_labels = match &self.config.provisioning.webhook {
@@ -469,7 +469,10 @@ impl FleetManager {
         }
 
         let total_jobs = queued_jobs.len();
-        info!("Found {} queued job(s) in GitHub - checking against filters", total_jobs);
+        info!(
+            "Found {} queued job(s) in GitHub - checking against filters",
+            total_jobs
+        );
 
         let mut added_count = 0;
         for job in queued_jobs {
@@ -502,8 +505,8 @@ impl FleetManager {
                 runner_scope: job.runner_scope,
                 runner_group: None,
                 repository: job.repository,
-                job_name: None,       // Not available from GitHub list_queued_jobs
-                workflow_name: None,  // Not available from GitHub list_queued_jobs
+                job_name: None,      // Not available from GitHub list_queued_jobs
+                workflow_name: None, // Not available from GitHub list_queued_jobs
             };
 
             if self.pending_job_store.add_job(&request).await {
@@ -516,7 +519,10 @@ impl FleetManager {
         }
 
         if added_count > 0 {
-            info!("Recovered {} job(s) from GitHub API - processing", added_count);
+            info!(
+                "Recovered {} job(s) from GitHub API - processing",
+                added_count
+            );
             self.process_pending_jobs().await;
         } else {
             info!(
@@ -544,10 +550,7 @@ impl FleetManager {
             return;
         }
 
-        info!(
-            "Processing {} pending job(s)",
-            pending_jobs.len()
-        );
+        info!("Processing {} pending job(s)", pending_jobs.len());
 
         for (job_id, job_info) in pending_jobs {
             // Check retry count - abandon jobs that have failed too many times
@@ -611,10 +614,7 @@ impl FleetManager {
                             } else {
                                 warn!(
                                     "Job {} failed to create runner (attempt {}/{}): {}",
-                                    job_id,
-                                    new_count,
-                                    MAX_RETRIES,
-                                    e
+                                    job_id, new_count, MAX_RETRIES, e
                                 );
                             }
                         }
@@ -848,8 +848,12 @@ impl FleetManager {
                         );
                     }
                     runner_state.remove_runner(&runner_name_clone).await;
-                    handle_command_failure(&pending_job_store, job_id, &format!("command error: {}", e))
-                        .await;
+                    handle_command_failure(
+                        &pending_job_store,
+                        job_id,
+                        &format!("command error: {}", e),
+                    )
+                    .await;
                 }
             }
         });

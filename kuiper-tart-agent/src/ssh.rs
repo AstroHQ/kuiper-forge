@@ -602,9 +602,9 @@ pub async fn start_runner_gui_and_wait(
         "cat > {} << 'RUNNER_SCRIPT_EOF'\n{}\nRUNNER_SCRIPT_EOF\nchmod +x {}",
         script_path, GUI_RUNNER_SCRIPT, script_path
     );
-    ssh_exec(ip, config, &upload_cmd).await.map_err(|e| {
-        Error::Ssh(format!("Failed to upload runner script: {e}"))
-    })?;
+    ssh_exec(ip, config, &upload_cmd)
+        .await
+        .map_err(|e| Error::Ssh(format!("Failed to upload runner script: {e}")))?;
     debug!("Uploaded runner script to {}", script_path);
 
     // Clean up any previous signal file
@@ -612,9 +612,9 @@ pub async fn start_runner_gui_and_wait(
 
     // Launch via Terminal.app for GUI context
     let launch_cmd = format!("open -a Terminal {}", script_path);
-    ssh_exec(ip, config, &launch_cmd).await.map_err(|e| {
-        Error::Ssh(format!("Failed to launch runner in Terminal: {e}"))
-    })?;
+    ssh_exec(ip, config, &launch_cmd)
+        .await
+        .map_err(|e| Error::Ssh(format!("Failed to launch runner in Terminal: {e}")))?;
     info!("Runner launched in Terminal.app GUI context on {}", ip);
 
     // Open local log file for writing
@@ -652,7 +652,8 @@ pub async fn start_runner_gui_and_wait(
         last_log_size = poll_and_stream_log(ip, config, &mut log_file, last_log_size).await?;
 
         // Check if runner completed by looking for exit status file
-        if let Ok(exit_content) = ssh_exec(ip, config, "cat ~/runner-exit-status 2>/dev/null").await {
+        if let Ok(exit_content) = ssh_exec(ip, config, "cat ~/runner-exit-status 2>/dev/null").await
+        {
             let exit_content = exit_content.trim();
             if !exit_content.is_empty() {
                 // Runner completed - parse exit code
@@ -680,7 +681,10 @@ pub async fn start_runner_gui_and_wait(
                     info!("Runner (GUI mode) completed successfully on {}", ip);
                     return Ok(());
                 } else {
-                    error!("Runner (GUI mode) failed on {} with exit code {}", ip, exit_code);
+                    error!(
+                        "Runner (GUI mode) failed on {} with exit code {}",
+                        ip, exit_code
+                    );
                     return Err(Error::Ssh(format!(
                         "Runner failed (exit code: {}). See log: {}",
                         exit_code,

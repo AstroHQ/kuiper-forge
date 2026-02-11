@@ -133,8 +133,7 @@ pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name
 #[cfg(feature = "postgres")]
 pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE agent_id = $1";
 
-pub const SELECT_ALL_RUNNERS: &str =
-    "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners";
+pub const SELECT_ALL_RUNNERS: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners";
 
 #[cfg(feature = "sqlite")]
 pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = ?";
@@ -144,10 +143,12 @@ pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE jo
 
 // Count runners for a specific agent
 #[cfg(feature = "sqlite")]
-pub const COUNT_RUNNERS_BY_AGENT: &str = "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = ?";
+pub const COUNT_RUNNERS_BY_AGENT: &str =
+    "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const COUNT_RUNNERS_BY_AGENT: &str = "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = $1";
+pub const COUNT_RUNNERS_BY_AGENT: &str =
+    "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = $1";
 
 // Bulk delete for agent disconnect cleanup
 #[cfg(feature = "sqlite")]
@@ -187,12 +188,10 @@ pub const SELECT_PENDING_JOB: &str = "SELECT job_id, job_labels, agent_labels, r
 pub const SELECT_ALL_PENDING_JOBS: &str = "SELECT job_id, job_labels, agent_labels, runner_scope, runner_group, created_at, retry_count, repository, job_name, workflow_name FROM pending_webhook_jobs ORDER BY created_at ASC";
 
 #[cfg(feature = "sqlite")]
-pub const INCREMENT_PENDING_JOB_RETRY: &str =
-    "UPDATE pending_webhook_jobs SET retry_count = retry_count + 1 WHERE job_id = ? RETURNING retry_count";
+pub const INCREMENT_PENDING_JOB_RETRY: &str = "UPDATE pending_webhook_jobs SET retry_count = retry_count + 1 WHERE job_id = ? RETURNING retry_count";
 
 #[cfg(feature = "postgres")]
-pub const INCREMENT_PENDING_JOB_RETRY: &str =
-    "UPDATE pending_webhook_jobs SET retry_count = retry_count + 1 WHERE job_id = $1 RETURNING retry_count";
+pub const INCREMENT_PENDING_JOB_RETRY: &str = "UPDATE pending_webhook_jobs SET retry_count = retry_count + 1 WHERE job_id = $1 RETURNING retry_count";
 
 #[cfg(feature = "sqlite")]
 pub const GET_PENDING_JOB_RETRY_COUNT: &str =
@@ -217,15 +216,12 @@ pub const INSERT_ADMIN_USER: &str = r#"
 "#;
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_ADMIN_USER: &str =
-    "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users WHERE username = ?";
+pub const SELECT_ADMIN_USER: &str = "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users WHERE username = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_ADMIN_USER: &str =
-    "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users WHERE username = $1";
+pub const SELECT_ADMIN_USER: &str = "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users WHERE username = $1";
 
-pub const SELECT_ALL_ADMIN_USERS: &str =
-    "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users ORDER BY username";
+pub const SELECT_ALL_ADMIN_USERS: &str = "SELECT username, password_hash, totp_secret, created_at, last_login FROM admin_users ORDER BY username";
 
 #[cfg(feature = "sqlite")]
 pub const UPDATE_ADMIN_USER_LAST_LOGIN: &str =
@@ -264,12 +260,10 @@ pub const INSERT_ADMIN_SESSION: &str = r#"
 "#;
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_ADMIN_SESSION: &str =
-    "SELECT session_id, username, created_at, expires_at, ip_address, user_agent FROM admin_sessions WHERE session_id = ?";
+pub const SELECT_ADMIN_SESSION: &str = "SELECT session_id, username, created_at, expires_at, ip_address, user_agent FROM admin_sessions WHERE session_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_ADMIN_SESSION: &str =
-    "SELECT session_id, username, created_at, expires_at, ip_address, user_agent FROM admin_sessions WHERE session_id = $1";
+pub const SELECT_ADMIN_SESSION: &str = "SELECT session_id, username, created_at, expires_at, ip_address, user_agent FROM admin_sessions WHERE session_id = $1";
 
 #[cfg(feature = "sqlite")]
 pub const DELETE_ADMIN_SESSION: &str = "DELETE FROM admin_sessions WHERE session_id = ?";

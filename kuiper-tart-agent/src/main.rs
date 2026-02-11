@@ -216,7 +216,12 @@ async fn main() -> anyhow::Result<()> {
         "Label sets: {:?} (base: {:?}, image_mappings: {:?})",
         label_sets,
         config.agent.labels,
-        config.tart.image_mappings.iter().map(|m| &m.labels).collect::<Vec<_>>()
+        config
+            .tart
+            .image_mappings
+            .iter()
+            .map(|m| &m.labels)
+            .collect::<Vec<_>>()
     );
 
     // Initialize VM manager with SSH config from file
@@ -313,9 +318,9 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         coordinator_hostname: hostname.clone(),
         registration_token: Some(bundle.token),
         agent_type: "tart".to_string(),
-        labels: vec![],       // Empty for registration - user will set in config
-        label_sets: vec![],   // Empty for registration - derived from image_mappings
-        max_vms: 2,           // Default - user will set in config
+        labels: vec![],     // Empty for registration - user will set in config
+        label_sets: vec![], // Empty for registration - derived from image_mappings
+        max_vms: 2,         // Default - user will set in config
     };
 
     // 5. Connect and register
@@ -390,8 +395,7 @@ async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::
 
     // 1. Check binary is in PATH
     print!("Checking binary location... ");
-    let binary_path = install::find_binary_in_path()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let binary_path = install::find_binary_in_path().map_err(|e| anyhow::anyhow!("{}", e))?;
     println!("found at {}", binary_path.display());
 
     // 2. Check config exists
@@ -440,8 +444,7 @@ async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::
     // 9. Load service
     if !no_load {
         print!("Loading service... ");
-        install::load_service()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        install::load_service().map_err(|e| anyhow::anyhow!("{}", e))?;
         println!("done");
 
         // Brief delay then check status
@@ -449,7 +452,10 @@ async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::
         if install::is_service_running() {
             println!("\n\u{2713} Service is running.");
         } else {
-            println!("\nWarning: Service may not have started. Check logs at {}", log_dir.display());
+            println!(
+                "\nWarning: Service may not have started. Check logs at {}",
+                log_dir.display()
+            );
         }
     } else {
         println!("\nPlist generated but not loaded (--no-load specified).");
@@ -457,7 +463,10 @@ async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::
 
     println!("\nInstallation complete!");
     println!("\nUseful commands:");
-    println!("  View logs:    tail -f {}/launchd-stdout.log", log_dir.display());
+    println!(
+        "  View logs:    tail -f {}/launchd-stdout.log",
+        log_dir.display()
+    );
     println!("  Stop:         launchctl unload {}", plist_path.display());
     println!("  Start:        launchctl load {}", plist_path.display());
     println!("  Uninstall:    kuiper-tart-agent uninstall");
@@ -470,7 +479,10 @@ async fn cmd_uninstall(purge: bool, config_path: &Path) -> anyhow::Result<()> {
     let plist_path = install::plist_path();
 
     if !plist_path.exists() {
-        println!("Service not installed (no plist at {}).", plist_path.display());
+        println!(
+            "Service not installed (no plist at {}).",
+            plist_path.display()
+        );
         if !purge {
             return Ok(());
         }
@@ -992,9 +1004,7 @@ impl TartAgent {
             .agent_config
             .label_sets
             .iter()
-            .map(|ls| LabelSet {
-                labels: ls.clone(),
-            })
+            .map(|ls| LabelSet { labels: ls.clone() })
             .collect();
 
         AgentStatus {

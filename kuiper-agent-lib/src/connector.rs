@@ -208,7 +208,7 @@ fn build_tls_config(
         _ => {
             return Err(Error::Certificate(format!(
                 "Invalid server trust mode: {trust_mode}"
-            )))
+            )));
         }
     }
 

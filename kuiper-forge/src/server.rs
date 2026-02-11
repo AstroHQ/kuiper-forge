@@ -57,9 +57,9 @@ async fn parse_proxy_protocol(
     stream: &mut TcpStream,
     fallback_addr: SocketAddr,
 ) -> Result<SocketAddr> {
+    use ppp::HeaderResult;
     use ppp::v1::Addresses as V1Addr;
     use ppp::v2::Addresses as V2Addr;
-    use ppp::HeaderResult;
     use tokio::io::AsyncReadExt;
 
     // PROXY protocol headers are at most 107 bytes (v1) or 232 bytes (v2)
@@ -90,12 +90,8 @@ async fn parse_proxy_protocol(
 
             if let HeaderResult::V2(Ok(header)) = result {
                 let real_addr = match header.addresses {
-                    V2Addr::IPv4(addr) => {
-                        SocketAddr::from((addr.source_address, addr.source_port))
-                    }
-                    V2Addr::IPv6(addr) => {
-                        SocketAddr::from((addr.source_address, addr.source_port))
-                    }
+                    V2Addr::IPv4(addr) => SocketAddr::from((addr.source_address, addr.source_port)),
+                    V2Addr::IPv6(addr) => SocketAddr::from((addr.source_address, addr.source_port)),
                     V2Addr::Unix(_) | V2Addr::Unspecified => fallback_addr,
                 };
 

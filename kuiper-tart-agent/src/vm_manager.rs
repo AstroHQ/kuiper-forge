@@ -10,7 +10,7 @@ use std::time::Duration;
 use kuiper_agent_proto::VmInfo;
 use tokio::process::Command;
 use tokio::sync::RwLock;
-use tokio::time::{timeout, Instant};
+use tokio::time::{Instant, timeout};
 
 /// Timeout for tart CLI commands (clone, stop, delete, ip).
 /// This prevents the agent from hanging indefinitely if tart gets stuck.
@@ -280,7 +280,10 @@ impl VmManager {
                 .ok_or_else(|| Error::VmNotFound(vm_id.to_string()))?
         };
 
-        info!("Starting runner in GUI mode and waiting for completion on VM {}", vm_id);
+        info!(
+            "Starting runner in GUI mode and waiting for completion on VM {}",
+            vm_id
+        );
 
         // Create log file path for this runner with date
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");

@@ -213,7 +213,10 @@ pub fn http_router(
         // Handle both /admin and /admin/ by redirecting to dashboard
         router = router
             .route("/admin", get(|| async { Redirect::to("/admin/dashboard") }))
-            .route("/admin/", get(|| async { Redirect::to("/admin/dashboard") }))
+            .route(
+                "/admin/",
+                get(|| async { Redirect::to("/admin/dashboard") }),
+            )
             .nest("/admin", crate::admin::admin_router(admin_state));
     }
 
@@ -229,7 +232,10 @@ pub fn admin_only_router(admin_state: Arc<crate::admin::AdminState>) -> Router {
 
     Router::new()
         .route("/admin", get(|| async { Redirect::to("/admin/dashboard") }))
-        .route("/admin/", get(|| async { Redirect::to("/admin/dashboard") }))
+        .route(
+            "/admin/",
+            get(|| async { Redirect::to("/admin/dashboard") }),
+        )
         .nest("/admin", crate::admin::admin_router(admin_state))
 }
 
@@ -283,9 +289,7 @@ async fn handle_webhook(
             if !has_required_labels(&event.workflow_job.labels, &state.config.required_labels) {
                 info!(
                     "Job {} missing required labels {:?} (has {:?}) - ignoring",
-                    event.workflow_job.id,
-                    state.config.required_labels,
-                    event.workflow_job.labels
+                    event.workflow_job.id, state.config.required_labels, event.workflow_job.labels
                 );
                 return StatusCode::OK;
             }
@@ -314,7 +318,10 @@ async fn handle_webhook(
                 // Match against configured mappings
                 match match_labels(&event.workflow_job.labels, &state.config.label_mappings) {
                     Some(mapping) => {
-                        let scope = mapping.runner_scope.clone().unwrap_or_else(default_runner_scope);
+                        let scope = mapping
+                            .runner_scope
+                            .clone()
+                            .unwrap_or_else(default_runner_scope);
                         info!(
                             "Matched job {} to runner scope {:?} (mapping labels: {:?})",
                             event.workflow_job.id, scope, mapping.labels

@@ -812,7 +812,7 @@ mod tests {
                 AgentType::Tart,
                 "mac-mini-1".to_string(),
                 2,
-                0, // active_vms
+                0,                                                    // active_vms
                 vec!["self-hosted".to_string(), "macos".to_string()], // base labels
                 vec![
                     vec![
