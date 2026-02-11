@@ -84,6 +84,7 @@ pub struct ConnectedAgent {
 
 impl ConnectedAgent {
     /// Create a new connected agent
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_id: String,
         agent_type: AgentType,
@@ -208,6 +209,7 @@ impl AgentRegistry {
     }
 
     /// Register a new agent connection
+    #[allow(clippy::too_many_arguments)]
     pub async fn register(
         &self,
         agent_id: String,
@@ -812,7 +814,7 @@ mod tests {
                 AgentType::Tart,
                 "mac-mini-1".to_string(),
                 2,
-                0, // active_vms
+                0,                                                    // active_vms
                 vec!["self-hosted".to_string(), "macos".to_string()], // base labels
                 vec![
                     vec![

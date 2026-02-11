@@ -599,22 +599,21 @@ pub async fn start_runner_gui_and_wait(
     // Upload the runner wrapper script to the VM
     let script_path = "~/start-runner.sh";
     let upload_cmd = format!(
-        "cat > {} << 'RUNNER_SCRIPT_EOF'\n{}\nRUNNER_SCRIPT_EOF\nchmod +x {}",
-        script_path, GUI_RUNNER_SCRIPT, script_path
+        "cat > {script_path} << 'RUNNER_SCRIPT_EOF'\n{GUI_RUNNER_SCRIPT}\nRUNNER_SCRIPT_EOF\nchmod +x {script_path}"
     );
-    ssh_exec(ip, config, &upload_cmd).await.map_err(|e| {
-        Error::Ssh(format!("Failed to upload runner script: {e}"))
-    })?;
+    ssh_exec(ip, config, &upload_cmd)
+        .await
+        .map_err(|e| Error::Ssh(format!("Failed to upload runner script: {e}")))?;
     debug!("Uploaded runner script to {}", script_path);
 
     // Clean up any previous signal file
     let _ = ssh_exec(ip, config, "rm -f ~/runner-exit-status").await;
 
     // Launch via Terminal.app for GUI context
-    let launch_cmd = format!("open -a Terminal {}", script_path);
-    ssh_exec(ip, config, &launch_cmd).await.map_err(|e| {
-        Error::Ssh(format!("Failed to launch runner in Terminal: {e}"))
-    })?;
+    let launch_cmd = format!("open -a Terminal {script_path}");
+    ssh_exec(ip, config, &launch_cmd)
+        .await
+        .map_err(|e| Error::Ssh(format!("Failed to launch runner in Terminal: {e}")))?;
     info!("Runner launched in Terminal.app GUI context on {}", ip);
 
     // Open local log file for writing
@@ -652,7 +651,8 @@ pub async fn start_runner_gui_and_wait(
         last_log_size = poll_and_stream_log(ip, config, &mut log_file, last_log_size).await?;
 
         // Check if runner completed by looking for exit status file
-        if let Ok(exit_content) = ssh_exec(ip, config, "cat ~/runner-exit-status 2>/dev/null").await {
+        if let Ok(exit_content) = ssh_exec(ip, config, "cat ~/runner-exit-status 2>/dev/null").await
+        {
             let exit_content = exit_content.trim();
             if !exit_content.is_empty() {
                 // Runner completed - parse exit code
@@ -680,7 +680,10 @@ pub async fn start_runner_gui_and_wait(
                     info!("Runner (GUI mode) completed successfully on {}", ip);
                     return Ok(());
                 } else {
-                    error!("Runner (GUI mode) failed on {} with exit code {}", ip, exit_code);
+                    error!(
+                        "Runner (GUI mode) failed on {} with exit code {}",
+                        ip, exit_code
+                    );
                     return Err(Error::Ssh(format!(
                         "Runner failed (exit code: {}). See log: {}",
                         exit_code,
@@ -718,7 +721,7 @@ async fn poll_and_stream_log(
 
     // Read new content using tail with byte offset
     let bytes_to_read = current_size - last_log_size;
-    let tail_cmd = format!("tail -c {} ~/runner.log 2>/dev/null", bytes_to_read);
+    let tail_cmd = format!("tail -c {bytes_to_read} ~/runner.log 2>/dev/null");
 
     if let Ok(new_content) = ssh_exec(ip, config, &tail_cmd).await
         && !new_content.is_empty()

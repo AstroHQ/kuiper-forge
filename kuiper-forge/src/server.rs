@@ -57,9 +57,9 @@ async fn parse_proxy_protocol(
     stream: &mut TcpStream,
     fallback_addr: SocketAddr,
 ) -> Result<SocketAddr> {
+    use ppp::HeaderResult;
     use ppp::v1::Addresses as V1Addr;
     use ppp::v2::Addresses as V2Addr;
-    use ppp::HeaderResult;
     use tokio::io::AsyncReadExt;
 
     // PROXY protocol headers are at most 107 bytes (v1) or 232 bytes (v2)
@@ -90,12 +90,8 @@ async fn parse_proxy_protocol(
 
             if let HeaderResult::V2(Ok(header)) = result {
                 let real_addr = match header.addresses {
-                    V2Addr::IPv4(addr) => {
-                        SocketAddr::from((addr.source_address, addr.source_port))
-                    }
-                    V2Addr::IPv6(addr) => {
-                        SocketAddr::from((addr.source_address, addr.source_port))
-                    }
+                    V2Addr::IPv4(addr) => SocketAddr::from((addr.source_address, addr.source_port)),
+                    V2Addr::IPv6(addr) => SocketAddr::from((addr.source_address, addr.source_port)),
                     V2Addr::Unix(_) | V2Addr::Unspecified => fallback_addr,
                 };
 
@@ -163,10 +159,10 @@ async fn parse_proxy_protocol(
                     "Parsed PROXY protocol v1 header"
                 );
 
-                return Ok(real_addr);
+                Ok(real_addr)
             }
             HeaderResult::V1(Err(e)) => {
-                anyhow::bail!("Invalid PROXY protocol v1 header: {:?}", e);
+                anyhow::bail!("Invalid PROXY protocol v1 header: {e:?}");
             }
             HeaderResult::V2(_) => {
                 // Should not happen since first byte wasn't 0x0D
@@ -689,6 +685,7 @@ pub struct ServerConfig {
 /// If `admin_state` is provided, serves admin UI at /admin.
 /// Traffic is routed based on content-type: `application/grpc` goes to gRPC services,
 /// everything else goes to the HTTP handler.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     config: ServerConfig,
     server_trust: ServerTrust,

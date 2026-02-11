@@ -18,7 +18,6 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 use kuiper_forge::admin::{AdminAuthStore, AdminState};
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
-use kuiper_forge::tls::build_server_trust;
 use kuiper_forge::config::{self, Config, ProvisioningMode};
 use kuiper_forge::db::Database;
 use kuiper_forge::fleet;
@@ -27,6 +26,7 @@ use kuiper_forge::management::{self, ManagementClient};
 use kuiper_forge::pending_jobs;
 use kuiper_forge::runner_state;
 use kuiper_forge::server::{ServerConfig, run_server};
+use kuiper_forge::tls::build_server_trust;
 
 /// CI Runner Coordinator - Manages ephemeral GitHub Actions runners
 #[derive(Parser)]
@@ -427,7 +427,9 @@ async fn serve(
 
                 // Clean up runner records for each stale agent
                 for agent_id in &removed {
-                    let runners = cleanup_runner_state.remove_runners_for_agent(agent_id).await;
+                    let runners = cleanup_runner_state
+                        .remove_runners_for_agent(agent_id)
+                        .await;
                     for (runner_name, runner_info) in runners {
                         // Remove from GitHub in background (non-blocking)
                         let tp = cleanup_token_provider.clone();
@@ -484,7 +486,8 @@ async fn serve(
             .collect();
 
         // Find runners whose agents aren't connected
-        let mut orphaned_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut orphaned_agents: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for (_, runner_info) in &all_runners {
             if !connected_agents.contains(&runner_info.agent_id) {
                 orphaned_agents.insert(runner_info.agent_id.clone());
@@ -885,7 +888,11 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
 }
 
 /// Handle admin subcommands
-async fn handle_admin_command(command: AdminCommands, config_path: &Path, data_dir: &Path) -> Result<()> {
+async fn handle_admin_command(
+    command: AdminCommands,
+    config_path: &Path,
+    data_dir: &Path,
+) -> Result<()> {
     use std::io::{self, Write};
 
     // Load config to get database settings
@@ -915,7 +922,7 @@ async fn handle_admin_command(command: AdminCommands, config_path: &Path, data_d
             }
 
             admin_store.create_user(&username, &password).await?;
-            println!("Admin user '{}' created successfully.", username);
+            println!("Admin user '{username}' created successfully.");
             Ok(())
         }
 
@@ -945,7 +952,7 @@ async fn handle_admin_command(command: AdminCommands, config_path: &Path, data_d
         AdminCommands::ResetPassword { username } => {
             // Check if user exists
             if admin_store.get_user(&username).await?.is_none() {
-                return Err(anyhow!("User '{}' not found", username));
+                return Err(anyhow!("User '{username}' not found"));
             }
 
             // Prompt for new password
@@ -966,7 +973,7 @@ async fn handle_admin_command(command: AdminCommands, config_path: &Path, data_d
             }
 
             admin_store.update_password(&username, &password).await?;
-            println!("Password for '{}' updated successfully.", username);
+            println!("Password for '{username}' updated successfully.");
             Ok(())
         }
     }

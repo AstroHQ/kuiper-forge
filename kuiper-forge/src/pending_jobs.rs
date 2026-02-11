@@ -185,10 +185,7 @@ impl PendingJobStore {
                 None
             }
             Err(e) => {
-                error!(
-                    "Failed to increment retry count for job {}: {}",
-                    job_id, e
-                );
+                error!("Failed to increment retry count for job {}: {}", job_id, e);
                 None
             }
         }

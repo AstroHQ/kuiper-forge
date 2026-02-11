@@ -14,24 +14,25 @@ pub struct ServerTrust {
 }
 
 pub fn build_server_trust(tls: &TlsConfig) -> Result<ServerTrust> {
-    let server_ca_pem = match tls.server_trust_mode {
-        ServerTrustMode::Ca => {
-            let ca_path = tls.server_ca_cert.as_ref().unwrap_or(&tls.ca_cert);
-            Some(read_pem(ca_path).with_context(|| {
-                format!("Failed to read server CA cert: {}", ca_path.display())
-            })?)
-        }
-        ServerTrustMode::Chain => {
-            if tls.server_use_native_roots {
-                None
-            } else {
+    let server_ca_pem =
+        match tls.server_trust_mode {
+            ServerTrustMode::Ca => {
                 let ca_path = tls.server_ca_cert.as_ref().unwrap_or(&tls.ca_cert);
                 Some(read_pem(ca_path).with_context(|| {
                     format!("Failed to read server CA cert: {}", ca_path.display())
                 })?)
             }
-        }
-    };
+            ServerTrustMode::Chain => {
+                if tls.server_use_native_roots {
+                    None
+                } else {
+                    let ca_path = tls.server_ca_cert.as_ref().unwrap_or(&tls.ca_cert);
+                    Some(read_pem(ca_path).with_context(|| {
+                        format!("Failed to read server CA cert: {}", ca_path.display())
+                    })?)
+                }
+            }
+        };
 
     Ok(ServerTrust {
         server_ca_pem,

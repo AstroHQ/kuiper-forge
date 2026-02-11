@@ -50,8 +50,8 @@ impl TestFixture {
     async fn new_with_proxy_protocol(webhook_mode: bool, proxy_protocol: bool) -> Self {
         use kuiper_forge::auth::{AuthManager, AuthStore, generate_server_cert, init_ca};
         use kuiper_forge::config::{DatabaseConfig, TlsConfig, WebhookConfig};
-        use kuiper_forge::tls::build_server_trust;
         use kuiper_forge::db::Database;
+        use kuiper_forge::tls::build_server_trust;
 
         let temp_dir = TempDir::new().unwrap();
         let ca_cert_path = temp_dir.path().join("ca.crt");
@@ -378,15 +378,16 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
 
 /// Build a PROXY protocol v1 header for TCP4
 fn build_proxy_v1_header(src_addr: &str, src_port: u16, dst_addr: &str, dst_port: u16) -> Vec<u8> {
-    format!(
-        "PROXY TCP4 {} {} {} {}\r\n",
-        src_addr, dst_addr, src_port, dst_port
-    )
-    .into_bytes()
+    format!("PROXY TCP4 {src_addr} {dst_addr} {src_port} {dst_port}\r\n").into_bytes()
 }
 
 /// Build a PROXY protocol v2 header for TCP4
-fn build_proxy_v2_header(src_addr: [u8; 4], src_port: u16, dst_addr: [u8; 4], dst_port: u16) -> Vec<u8> {
+fn build_proxy_v2_header(
+    src_addr: [u8; 4],
+    src_port: u16,
+    dst_addr: [u8; 4],
+    dst_port: u16,
+) -> Vec<u8> {
     // PROXY protocol v2 header format:
     // - 12 byte signature: \x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A
     // - 1 byte: version (2) << 4 | command (1 = PROXY)
@@ -396,7 +397,9 @@ fn build_proxy_v2_header(src_addr: [u8; 4], src_port: u16, dst_addr: [u8; 4], ds
     let mut header = Vec::with_capacity(28);
 
     // Signature (12 bytes)
-    header.extend_from_slice(&[0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A]);
+    header.extend_from_slice(&[
+        0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+    ]);
 
     // Version and command: (2 << 4) | 1 = 0x21
     header.push(0x21);
@@ -447,7 +450,7 @@ async fn test_grpc_with_proxy_protocol_v1() {
     let (h2_sender, h2_conn) = h2::client::handshake(tls_stream).await.unwrap();
     tokio::spawn(async move {
         if let Err(e) = h2_conn.await {
-            eprintln!("HTTP/2 connection error: {}", e);
+            eprintln!("HTTP/2 connection error: {e}");
         }
     });
 
@@ -509,7 +512,7 @@ async fn test_grpc_with_proxy_protocol_v2() {
     let (h2_sender, h2_conn) = h2::client::handshake(tls_stream).await.unwrap();
     tokio::spawn(async move {
         if let Err(e) = h2_conn.await {
-            eprintln!("HTTP/2 connection error: {}", e);
+            eprintln!("HTTP/2 connection error: {e}");
         }
     });
 
@@ -587,7 +590,7 @@ async fn test_webhook_mode_with_proxy_protocol_v1() {
     let (h2_sender, h2_conn) = h2::client::handshake(tls_stream).await.unwrap();
     tokio::spawn(async move {
         if let Err(e) = h2_conn.await {
-            eprintln!("HTTP/2 connection error: {}", e);
+            eprintln!("HTTP/2 connection error: {e}");
         }
     });
 

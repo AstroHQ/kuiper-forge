@@ -8,16 +8,16 @@ use crate::admin::templates::{
     AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, LoginTemplate,
     RunnerSummary, TokenSummary,
 };
-use chrono::Duration;
 use askama::Template;
 use axum::{
     Form, Router,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use axum_extra::extract::CookieJar;
+use chrono::Duration;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -44,17 +44,19 @@ async fn check_auth(state: &AdminState, jar: &CookieJar) -> Option<AdminSession>
 }
 
 /// Login page handler.
-async fn login_page(
-    State(state): State<Arc<AdminState>>,
-    jar: CookieJar,
-) -> Response {
+async fn login_page(State(state): State<Arc<AdminState>>, jar: CookieJar) -> Response {
     // If already logged in, redirect to dashboard
     if check_auth(&state, &jar).await.is_some() {
         return Redirect::to("/admin/dashboard").into_response();
     }
 
     let template = LoginTemplate { error: None };
-    Html(template.render().unwrap_or_else(|e| format!("Template error: {e}"))).into_response()
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {e}")),
+    )
+    .into_response()
 }
 
 /// Login form data.
@@ -87,24 +89,29 @@ async fn login_submit(
             let template = LoginTemplate {
                 error: Some("Invalid username or password".to_string()),
             };
-            return Html(template.render().unwrap_or_else(|e| format!("Template error: {e}")))
-                .into_response();
+            return Html(
+                template
+                    .render()
+                    .unwrap_or_else(|e| format!("Template error: {e}")),
+            )
+            .into_response();
         }
         Err(e) => {
             error!("Login error: {}", e);
             let template = LoginTemplate {
                 error: Some("An error occurred. Please try again.".to_string()),
             };
-            return Html(template.render().unwrap_or_else(|e| format!("Template error: {e}")))
-                .into_response();
+            return Html(
+                template
+                    .render()
+                    .unwrap_or_else(|e| format!("Template error: {e}")),
+            )
+            .into_response();
         }
     };
 
     // Set session cookie
-    let cookie = format!(
-        "{}={}; Path=/admin; HttpOnly; SameSite=Strict",
-        SESSION_COOKIE, session_id
-    );
+    let cookie = format!("{SESSION_COOKIE}={session_id}; Path=/admin; HttpOnly; SameSite=Strict");
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -115,22 +122,16 @@ async fn login_submit(
 }
 
 /// Logout handler.
-async fn logout(
-    State(state): State<Arc<AdminState>>,
-    jar: CookieJar,
-) -> Response {
+async fn logout(State(state): State<Arc<AdminState>>, jar: CookieJar) -> Response {
     // Delete session from database
-    if let Some(session) = check_auth(&state, &jar).await {
-        if let Err(e) = state.auth_store.delete_session(&session.session_id).await {
-            error!("Failed to delete session: {}", e);
-        }
+    if let Some(session) = check_auth(&state, &jar).await
+        && let Err(e) = state.auth_store.delete_session(&session.session_id).await
+    {
+        error!("Failed to delete session: {}", e);
     }
 
     // Clear cookie by setting it to expire in the past
-    let cookie = format!(
-        "{}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0",
-        SESSION_COOKIE
-    );
+    let cookie = format!("{SESSION_COOKIE}=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0");
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -141,10 +142,7 @@ async fn logout(
 }
 
 /// Dashboard handler.
-async fn dashboard(
-    State(state): State<Arc<AdminState>>,
-    jar: CookieJar,
-) -> Response {
+async fn dashboard(State(state): State<Arc<AdminState>>, jar: CookieJar) -> Response {
     render_dashboard(&state, &jar, None).await
 }
 
@@ -186,12 +184,19 @@ async fn render_dashboard(
         .into_iter()
         .map(|a| a.agent_id)
         .collect();
-    let runners = state.runner_state.get_all_runners().await.unwrap_or_default();
+    let runners = state
+        .runner_state
+        .get_all_runners()
+        .await
+        .unwrap_or_default();
 
     let agents: Vec<AgentSummary> = registered
         .into_iter()
         .map(|a| {
-            let active_vms = runners.iter().filter(|(_, r)| r.agent_id == a.agent_id).count();
+            let active_vms = runners
+                .iter()
+                .filter(|(_, r)| r.agent_id == a.agent_id)
+                .count();
             AgentSummary {
                 agent_id: a.agent_id.clone(),
                 hostname: a.hostname,
@@ -230,14 +235,16 @@ async fn render_dashboard(
         new_token,
     };
 
-    Html(template.render().unwrap_or_else(|e| format!("Template error: {e}"))).into_response()
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {e}")),
+    )
+    .into_response()
 }
 
 /// Create a new registration token.
-async fn token_create(
-    State(state): State<Arc<AdminState>>,
-    jar: CookieJar,
-) -> Response {
+async fn token_create(State(state): State<Arc<AdminState>>, jar: CookieJar) -> Response {
     let session = match check_auth(&state, &jar).await {
         Some(s) => s,
         None => return Redirect::to("/admin/login").into_response(),
@@ -266,11 +273,18 @@ async fn token_create(
 }
 
 /// Build a registration bundle from token and server trust info.
-fn build_registration_bundle(token: &str, server_trust: &crate::tls::ServerTrust, coordinator_url: &str) -> String {
+fn build_registration_bundle(
+    token: &str,
+    server_trust: &crate::tls::ServerTrust,
+    coordinator_url: &str,
+) -> String {
     use base64::Engine;
 
     let mut bundle_map = serde_json::Map::new();
-    bundle_map.insert("t".to_string(), serde_json::Value::String(token.to_string()));
+    bundle_map.insert(
+        "t".to_string(),
+        serde_json::Value::String(token.to_string()),
+    );
 
     if let Some(ref ca_pem) = server_trust.server_ca_pem {
         bundle_map.insert("ca".to_string(), serde_json::Value::String(ca_pem.clone()));
@@ -280,12 +294,18 @@ fn build_registration_bundle(token: &str, server_trust: &crate::tls::ServerTrust
         crate::config::ServerTrustMode::Ca => "ca",
         crate::config::ServerTrustMode::Chain => "chain",
     };
-    bundle_map.insert("m".to_string(), serde_json::Value::String(trust_mode.to_string()));
-    bundle_map.insert("u".to_string(), serde_json::Value::String(coordinator_url.to_string()));
+    bundle_map.insert(
+        "m".to_string(),
+        serde_json::Value::String(trust_mode.to_string()),
+    );
+    bundle_map.insert(
+        "u".to_string(),
+        serde_json::Value::String(coordinator_url.to_string()),
+    );
 
     let bundle_json = serde_json::Value::Object(bundle_map);
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(bundle_json.to_string().as_bytes());
+    let encoded =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bundle_json.to_string().as_bytes());
     format!("kfr1_{encoded}")
 }
 
@@ -337,7 +357,11 @@ async fn agent_detail(
         .map(|a| a.agent_id)
         .collect();
 
-    let all_runners = state.runner_state.get_all_runners().await.unwrap_or_default();
+    let all_runners = state
+        .runner_state
+        .get_all_runners()
+        .await
+        .unwrap_or_default();
     let runners: Vec<RunnerSummary> = all_runners
         .into_iter()
         .filter(|(_, r)| r.agent_id == agent_id)
@@ -370,7 +394,12 @@ async fn agent_detail(
         runners,
     };
 
-    Html(template.render().unwrap_or_else(|e| format!("Template error: {e}"))).into_response()
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {e}")),
+    )
+    .into_response()
 }
 
 /// Agent revoke handler.

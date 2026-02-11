@@ -191,9 +191,9 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         coordinator_hostname: hostname.clone(),
         registration_token: Some(bundle.token),
         agent_type: "proxmox".to_string(),
-        labels: vec![],      // Empty for registration - user will set in config
-        label_sets: vec![],  // Empty for registration - user will set in config
-        max_vms: 5,          // Default - user will set in config
+        labels: vec![],     // Empty for registration - user will set in config
+        label_sets: vec![], // Empty for registration - user will set in config
+        max_vms: 5,         // Default - user will set in config
     };
 
     // 5. Connect and register
