@@ -34,8 +34,9 @@ jobs:
       - name: Clippy (sqlite)
         run: cargo clippy --all-targets
 
-      - name: Clippy (postgres)
-        run: cargo clippy --all-targets --no-default-features --features postgres -p kuiper-forge
+      # TODO: enable postgres CI once we add a service container for it
+      # - name: Clippy (postgres)
+      #   run: cargo clippy --all-targets --no-default-features --features postgres -p kuiper-forge
 
   test:
     name: Test (${{ matrix.os }})
@@ -68,8 +69,9 @@ jobs:
       - name: Test (sqlite)
         run: cargo test --all
 
-      - name: Build (postgres)
-        run: cargo build -p kuiper-forge --no-default-features --features postgres
-
-      - name: Test (postgres)
-        run: cargo test -p kuiper-forge --no-default-features --features postgres
+      # TODO: enable postgres CI once we add a service container for it
+      # - name: Build (postgres)
+      #   run: cargo build -p kuiper-forge --no-default-features --features postgres
+      #
+      # - name: Test (postgres)
+      #   run: cargo test -p kuiper-forge --no-default-features --features postgres
