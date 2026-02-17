@@ -973,25 +973,26 @@ impl FleetManager {
                 );
             }
             RunnerEventType::Completed | RunnerEventType::Failed | RunnerEventType::Destroyed => {
-                // Always release slot and process pending jobs, even if runner is unknown.
-                // The runner may have been removed from state by reconciliation (when agent
-                // sends status update before runner event after VM destruction).
+                let runner_info = self.runner_state.get_runner(&runner_name).await;
+                let Some(runner_info) = runner_info else {
+                    // Runner already removed from state (e.g., by reconciliation).
+                    // Reconciliation already released the slot, so don't double-release.
+                    // Still try to process pending jobs in case this frees something.
+                    self.process_pending_jobs().await;
+                    debug!(
+                        agent_id = %event.agent_id,
+                        runner_name = %runner_name,
+                        "Runner event for runner already removed from state (reconciliation handled cleanup)"
+                    );
+                    return;
+                };
+
+                // Runner still in state - we're the first to handle cleanup.
+                // Release the reserved slot on the agent.
                 self.agent_registry.release_slot(&event.agent_id).await;
 
                 // Agent slot freed - try to process pending webhook jobs
                 self.process_pending_jobs().await;
-
-                let runner_info = self.runner_state.get_runner(&runner_name).await;
-                let Some(runner_info) = runner_info else {
-                    // Runner already removed from state (e.g., by reconciliation).
-                    // Slot released and pending jobs processed above.
-                    debug!(
-                        agent_id = %event.agent_id,
-                        runner_name = %runner_name,
-                        "Runner event for runner already removed from state"
-                    );
-                    return;
-                };
 
                 // Handle pending job state based on runner outcome
                 if let Some(job_id) = runner_info.job_id {

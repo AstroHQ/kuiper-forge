@@ -400,23 +400,49 @@ impl AgentRegistry {
         if let Some(agent) = self.get(agent_id).await {
             let mut agent = agent.write().await;
             let old_active = agent.active_vms;
+            let old_reserved = agent.reserved_slots;
             agent.active_vms = active_vms;
 
-            // Only reduce reserved_slots when active_vms increases (VM creation completed).
-            // Don't clear all reserved_slots on every status update - the status might arrive
-            // before the VM is created, which would cause us to over-schedule.
             if active_vms > old_active {
+                // VMs increased - some reserved slots materialized into active VMs.
                 let newly_active = active_vms - old_active;
                 agent.reserved_slots = agent.reserved_slots.saturating_sub(newly_active);
+            } else if active_vms < old_active {
+                // VMs decreased - runners completed/failed/were destroyed.
+                // If we still have reserved_slots, some may be stale (the VM they
+                // were reserved for never started, or started and already died).
+                // Clamp reserved_slots so we don't think we're more full than we are.
+                // The agent's reported active_vms is the source of truth for what's
+                // actually running; reserved_slots should only account for commands
+                // that are genuinely in-flight (sent but not yet reflected).
+                let total_accounted = active_vms + agent.reserved_slots;
+                if total_accounted > agent.max_vms {
+                    // reserved_slots claims more than physically possible - clamp
+                    agent.reserved_slots = agent.max_vms.saturating_sub(active_vms);
+                }
             }
+            // When active_vms == old_active, leave reserved_slots alone - commands
+            // may still be in-flight and haven't materialized yet.
 
             agent.touch();
-            debug!(
-                agent_id = %agent_id,
-                active_vms = active_vms,
-                reserved_slots = agent.reserved_slots,
-                "Agent status updated"
-            );
+
+            if agent.reserved_slots != old_reserved {
+                info!(
+                    agent_id = %agent_id,
+                    active_vms = active_vms,
+                    old_active = old_active,
+                    reserved_slots = agent.reserved_slots,
+                    old_reserved = old_reserved,
+                    "Agent status updated (reserved_slots adjusted)"
+                );
+            } else {
+                debug!(
+                    agent_id = %agent_id,
+                    active_vms = active_vms,
+                    reserved_slots = agent.reserved_slots,
+                    "Agent status updated"
+                );
+            }
         }
     }
 
@@ -459,6 +485,35 @@ impl AgentRegistry {
                 reserved_slots = agent.reserved_slots,
                 "Slot released"
             );
+        }
+    }
+
+    /// Reconcile reserved_slots against actual DB runner count.
+    ///
+    /// After reconciliation removes runners from the DB, the reserved_slots
+    /// counter may be higher than it should be. This method sets reserved_slots
+    /// to at most `max(0, db_runner_count - active_vms)`, ensuring we don't
+    /// ghost-reserve capacity that no runner will ever use.
+    pub async fn reconcile_reserved_slots(&self, agent_id: &str, db_runner_count: usize) {
+        if let Some(agent) = self.get(agent_id).await {
+            let mut agent = agent.write().await;
+            // db_runner_count includes runners that are active + ones that are
+            // in-flight (reserved).  active_vms is the agent's own count of
+            // running VMs.  The difference is the most reserved_slots we should
+            // claim.
+            let max_reserved = db_runner_count.saturating_sub(agent.active_vms);
+            if agent.reserved_slots > max_reserved {
+                let old = agent.reserved_slots;
+                agent.reserved_slots = max_reserved;
+                info!(
+                    agent_id = %agent_id,
+                    old_reserved = old,
+                    new_reserved = max_reserved,
+                    active_vms = agent.active_vms,
+                    db_runners = db_runner_count,
+                    "Reconciled reserved_slots down to match DB state"
+                );
+            }
         }
     }
 
@@ -798,6 +853,99 @@ mod tests {
         let registry = AgentRegistry::new();
         let pools = registry.get_pool_definitions().await;
         assert_eq!(pools.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_reserved_slots_clamped_when_vms_decrease() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                2,
+                1, // 1 active VM
+                vec!["macos".to_string()],
+                vec![],
+                tx,
+            )
+            .await;
+
+        // Reserve a slot (simulating coordinator sending CreateRunner)
+        assert!(registry.reserve_slot("agent_1").await);
+        // Now: 1 active + 1 reserved = 2 = max_vms, capacity = 0
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
+
+        // The existing VM finishes, active_vms drops to 0.
+        // But the reserved slot's VM never started (agent rejected it silently,
+        // or VM creation failed internally on agent side).
+        // active_vms went 1→0, reserved_slots=1, total=0+1=1 <= max_vms=2: no clamp.
+        // This is correct: the in-flight command may still produce a VM.
+        registry.update_status("agent_1", 0).await;
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 1);
+
+        // Now test a scenario where reserved_slots exceed physical possibility:
+        // Agent has max_vms=2, and we somehow reserved 2 slots, but now active_vms
+        // reports 2 (both came from external sources, not our reservations).
+        // total = 2 active + 2 reserved = 4 > max_vms, must clamp.
+        // First, reserve the remaining capacity
+        assert!(registry.reserve_slot("agent_1").await);
+        // reserved=2, active=0, capacity=0
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
+
+        // Agent reports 1 active VM (one of our reserved slots materialized)
+        registry.update_status("agent_1", 1).await;
+        // reserved=2-1=1, active=1, capacity=0
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
+
+        // Agent suddenly reports 2 active VMs (maybe another external runner started)
+        registry.update_status("agent_1", 2).await;
+        // reserved=1-1=0, active=2, capacity=0
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
+
+        // Now VMs drop: active goes from 2→0. reserved_slots=0.
+        // total = 0 + 0 = 0 <= max_vms=2. No clamping, capacity = 2.
+        registry.update_status("agent_1", 0).await;
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_reserved_slots() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                3,
+                1, // 1 active VM
+                vec!["macos".to_string()],
+                vec![],
+                tx,
+            )
+            .await;
+
+        // Reserve 2 slots
+        assert!(registry.reserve_slot("agent_1").await);
+        assert!(registry.reserve_slot("agent_1").await);
+        // active=1, reserved=2, capacity=0
+
+        // DB says there's only 1 runner for this agent (the other was cleaned up)
+        // max_reserved = max(0, 1 - 1) = 0 (1 db runner - 1 active VM = 0 in-flight)
+        registry.reconcile_reserved_slots("agent_1", 1).await;
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 2);
+
+        // Reserve again
+        assert!(registry.reserve_slot("agent_1").await);
+        // active=1, reserved=1, capacity=1
+
+        // DB has 2 runners (1 active + 1 in-flight) - reserved=1 is correct, no change
+        registry.reconcile_reserved_slots("agent_1", 2).await;
+        assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 1);
     }
 
     #[tokio::test]

@@ -598,6 +598,15 @@ async fn handle_agent_message(
                         notifier.notify().await;
                     }
                 }
+
+                // Reconcile reserved_slots against the DB runner count.
+                // This catches leaked reserved_slots even when no runners are
+                // missing (e.g., a CreateRunner was acked but the VM never
+                // appeared and the runner record was already cleaned up).
+                let db_runner_count = rs.count_runners_for_agent(agent_id).await;
+                registry
+                    .reconcile_reserved_slots(agent_id, db_runner_count)
+                    .await;
             }
         }
         Some(AgentPayload::Ack(ack)) => {
