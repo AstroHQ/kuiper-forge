@@ -308,6 +308,9 @@ impl FleetManager {
                 _ = github_ticker.tick() => {
                     // Verify pending jobs are still queued on GitHub
                     self.verify_pending_jobs_with_github().await;
+                    // Also poll for queued jobs we may not know about (missed webhooks,
+                    // jobs re-queued after runner cleanup, etc.)
+                    self.recover_queued_jobs_from_github().await;
                 }
                 Some(()) = self.notify_rx.recv() => {
                     // Agent connected - check if we can assign pending jobs
