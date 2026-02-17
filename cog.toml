@@ -1,5 +1,5 @@
 # Global settings
-tag_prefix = ""
+tag_prefix = "v"
 skip_ci = "[skip ci]"
 branch_whitelist = ["main"]
 from_latest_tag = true
@@ -7,9 +7,16 @@ ignore_merge_commits = true
 disable_bump_commit = true
 
 post_bump_hooks = [
-    "git add CHANGELOG.md",
+    "git add .",
     "git commit -m 'chore: bump version to {{version}}'",
-    # Re-tag release commit to ensure a signed tag
+    "git tag {{version_tag}} --force --sign --annotate --message='Release {{version}}'"
+]
+
+post_package_bump_hooks = [
+    "cargo generate-lockfile",
+    "git add .",
+    "git add ../Cargo.lock",
+    "git commit -m 'chore({{package}}): bump version to {{version}}'",
     "git tag {{version_tag}} --force --sign --annotate --message='Release {{version}}'"
 ]
 
