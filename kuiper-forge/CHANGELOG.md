@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.3.2 - 2026-02-19
+#### Bug Fixes
+- (**kuiper-forge,kuiper-tart-agent,kuiper-proxmox-agent**) queued jobs - (211e86f) - *jfro*
+
+- - -
+
 ## kuiper-forge-v0.3.1 - 2026-02-17
 #### Bug Fixes
 - (**kuiper-forge**) runner state mismatch with agent capacity. hopefully - (392784e) - *jfro*
