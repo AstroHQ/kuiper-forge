@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file. See [conven
 - - -
 ## kuiper-forge-v0.3.2 - 2026-02-19
 #### Bug Fixes
-- (**kuiper-forge,kuiper-tart-agent,kuiper-proxmox-agent**) queued jobs - (211e86f) - *jfro*
+- (**kuiper-forge,kuiper-tart-agent,kuiper-proxmox-agent**) queued jobs getting stuck due to failed VM start & lack of requeue - (211e86f) - *jfro*
 
 - - -
 
