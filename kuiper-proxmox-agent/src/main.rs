@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use vm_manager::VmManager;
@@ -482,6 +482,24 @@ impl ProxmoxAgent {
                     "Received CreateRunner command: {} ({})",
                     cmd.command_id, cmd.vm_name
                 );
+
+                // Check capacity before acking - reject early if at max VMs
+                if !self.vm_manager.has_capacity().await {
+                    let max = self.config.vm.concurrent_vms;
+                    warn!(
+                        "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
+                        cmd.vm_name, max, max
+                    );
+                    send_command_ack(
+                        tx,
+                        cmd.command_id,
+                        false,
+                        format!("Capacity exceeded: max {} VMs", max),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
                 send_command_ack(tx, cmd.command_id.clone(), true, String::new()).await?;
                 self.handle_create_runner(cmd, tx.clone()).await;
             }

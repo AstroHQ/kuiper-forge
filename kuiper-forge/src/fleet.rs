@@ -122,6 +122,8 @@ pub struct FleetManager {
     runner_event_rx: mpsc::Receiver<AgentRunnerEvent>,
     /// Channel for receiving webhook events (webhook mode only)
     webhook_rx: Option<mpsc::Receiver<WebhookEvent>>,
+    /// Sender for self-notification (e.g., from spawned tasks that need to trigger reprocessing)
+    notify_tx: mpsc::Sender<()>,
 }
 
 impl FleetManager {
@@ -159,6 +161,7 @@ impl FleetManager {
             recovery_rx,
             runner_event_rx,
             webhook_rx,
+            notify_tx: notify_tx.clone(),
         };
 
         let notifier = FleetNotifier {
@@ -295,22 +298,26 @@ impl FleetManager {
         let check_interval = Duration::from_secs(30);
         let mut ticker = tokio::time::interval(check_interval);
 
-        // GitHub verification interval - check if pending jobs are still queued on GitHub
+        // GitHub verification interval - check if pending jobs are still queued on GitHub.
+        // Tracked as an elapsed-time check on the 30s ticker rather than a separate
+        // select! branch, because select! can starve lower-priority branches when
+        // higher-priority ones (notifications, events) have constant traffic.
         let github_verify_interval = Duration::from_secs(900); // 15 minutes
-        let mut github_ticker = tokio::time::interval(github_verify_interval);
+        let mut last_github_check = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
                     // Periodic check for pending jobs (in case notifications were lost)
                     self.process_pending_jobs().await;
-                }
-                _ = github_ticker.tick() => {
-                    // Verify pending jobs are still queued on GitHub
-                    self.verify_pending_jobs_with_github().await;
-                    // Also poll for queued jobs we may not know about (missed webhooks,
-                    // jobs re-queued after runner cleanup, etc.)
-                    self.recover_queued_jobs_from_github().await;
+
+                    // Piggyback GitHub verification on the 30s ticker to avoid
+                    // select! starvation (guaranteed to run within 30s of being due)
+                    if last_github_check.elapsed() >= github_verify_interval {
+                        last_github_check = tokio::time::Instant::now();
+                        self.verify_pending_jobs_with_github().await;
+                        self.recover_queued_jobs_from_github().await;
+                    }
                 }
                 Some(()) = self.notify_rx.recv() => {
                     // Agent connected - check if we can assign pending jobs
@@ -717,6 +724,7 @@ impl FleetManager {
         let runner_name_clone = runner_name.clone();
         let runner_state = self.runner_state.clone();
         let agent_id_clone = agent_id.clone();
+        let notify_tx = self.notify_tx.clone();
 
         // Helper to handle retry counting on command-level failures
         // (agent rejection, timeout, unexpected response)
@@ -777,12 +785,11 @@ impl FleetManager {
                                 );
                             }
                             runner_state.remove_runner(&runner_name_clone).await;
-                            handle_command_failure(
-                                &pending_job_store,
-                                job_id,
-                                &format!("agent rejection: {}", ack.error),
-                            )
-                            .await;
+                            // Don't count agent rejections (e.g. capacity exceeded) as
+                            // job failures — the job is fine, this agent just can't
+                            // take it right now. Notify the fleet to reprocess pending
+                            // jobs so another agent can pick it up.
+                            let _ = notify_tx.try_send(());
                         }
                     }
                     Some(AgentPayload::Result(result)) => {

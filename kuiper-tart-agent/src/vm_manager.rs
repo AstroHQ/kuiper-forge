@@ -119,7 +119,6 @@ impl VmManager {
     }
 
     /// Get maximum VM capacity.
-    #[cfg(test)]
     pub fn max_vms(&self) -> u32 {
         self.max_concurrent
     }

@@ -719,6 +719,23 @@ impl TartAgent {
                 let agent = Arc::clone(self);
                 let tx = tx.clone();
                 tokio::spawn(async move {
+                    // Check capacity before acking - reject early if at max VMs
+                    if agent.vm_manager.available_slots().await == 0 {
+                        let max = agent.vm_manager.max_vms();
+                        warn!(
+                            "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
+                            cmd.vm_name, max, max
+                        );
+                        send_command_ack(
+                            &tx,
+                            cmd.command_id,
+                            false,
+                            format!("Capacity exceeded: max {} VMs", max),
+                        )
+                        .await;
+                        return;
+                    }
+
                     send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await;
                     agent.handle_create_runner(cmd, &tx).await;
                 });
