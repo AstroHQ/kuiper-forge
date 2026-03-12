@@ -208,9 +208,10 @@ pub struct Config {
     /// and all runners are registered to this scope.
     pub runner_scope: RunnerScope,
 
-    /// Optional global runner group (GitHub enterprise feature).
+    /// Optional runner group ID for JIT config generation (default: 1).
     ///
-    /// If specified, all runners will be registered to this runner group.
+    /// GitHub's default runner group is always ID 1. Only set this if your
+    /// org uses custom runner groups.
     #[serde(default)]
     pub runner_group: Option<String>,
 }
@@ -456,6 +457,18 @@ impl RunnerScope {
             }
             RunnerScope::Repository { owner, repo } => {
                 format!("https://github.com/{owner}/{repo}")
+            }
+        }
+    }
+
+    /// Get the API path for generating a JIT runner config
+    pub fn jitconfig_path(&self) -> String {
+        match self {
+            RunnerScope::Organization { name } => {
+                format!("/orgs/{name}/actions/runners/generate-jitconfig")
+            }
+            RunnerScope::Repository { owner, repo } => {
+                format!("/repos/{owner}/{repo}/actions/runners/generate-jitconfig")
             }
         }
     }

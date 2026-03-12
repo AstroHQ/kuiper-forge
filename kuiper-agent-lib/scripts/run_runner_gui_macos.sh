@@ -11,7 +11,17 @@ echo "=== Runner started at $(date '+%Y-%m-%d %H:%M:%S') ===" > "$LOG_FILE"
 
 # Run the runner and capture output
 cd ~/actions-runner
-./run.sh >> "$LOG_FILE" 2>&1
+
+# Check for JIT config file (written by agent for JIT/webhook mode)
+JIT_CONFIG_FILE="$HOME/jit-config.txt"
+if [ -f "$JIT_CONFIG_FILE" ]; then
+    echo "Using JIT config (skipping config.sh)" >> "$LOG_FILE"
+    JIT_CONFIG=$(cat "$JIT_CONFIG_FILE")
+    rm -f "$JIT_CONFIG_FILE"
+    ./run.sh --jitconfig "$JIT_CONFIG" >> "$LOG_FILE" 2>&1
+else
+    ./run.sh >> "$LOG_FILE" 2>&1
+fi
 EXIT_CODE=$?
 
 # Record exit

@@ -589,6 +589,7 @@ pub async fn start_runner_gui_and_wait(
     ip: Ipv4Addr,
     config: &SshConfig,
     log_path: &Path,
+    jit_config: &str,
 ) -> Result<()> {
     info!(
         "Starting runner in GUI mode on {} (logging to {})",
@@ -605,6 +606,17 @@ pub async fn start_runner_gui_and_wait(
         .await
         .map_err(|e| Error::Ssh(format!("Failed to upload runner script: {e}")))?;
     debug!("Uploaded runner script to {}", script_path);
+
+    // If JIT config is provided, write it to a file on the VM.
+    // The GUI runner script checks for this file and passes --jitconfig to run.sh.
+    if !jit_config.is_empty() {
+        info!("Writing JIT config to VM {} (skipping config.sh)", ip);
+        let write_jit_cmd =
+            format!("cat > ~/jit-config.txt << 'JIT_CONFIG_EOF'\n{jit_config}\nJIT_CONFIG_EOF");
+        ssh_exec(ip, config, &write_jit_cmd)
+            .await
+            .map_err(|e| Error::Ssh(format!("Failed to write JIT config: {e}")))?;
+    }
 
     // Clean up any previous signal file
     let _ = ssh_exec(ip, config, "rm -f ~/runner-exit-status").await;

@@ -587,7 +587,11 @@ impl FleetManager {
                 .create_runner_on_demand(
                     &job_info.agent_labels,
                     &job_info.runner_scope,
-                    job_info.runner_group.as_deref(),
+                    job_info
+                        .runner_group
+                        .as_deref()
+                        .and_then(|g| g.parse::<u64>().ok())
+                        .unwrap_or(1),
                     job_id,
                     job_info.job_name.as_deref(),
                     job_info.repository.as_deref(),
@@ -643,7 +647,7 @@ impl FleetManager {
         &self,
         labels: &[String],
         runner_scope: &RunnerScope,
-        _runner_group: Option<&str>,
+        runner_group_id: u64,
         job_id: u64,
         job_name: Option<&str>,
         repository: Option<&str>,
@@ -666,23 +670,55 @@ impl FleetManager {
             anyhow::bail!("Failed to reserve slot on agent {agent_id} (might be at capacity)");
         }
 
-        // Get registration token from provider (GitHub API or mock)
-        let token = match self
+        // Verify the job is still queued before committing resources
+        if let Some(repo) = repository {
+            match self.token_provider.get_job_status(repo, job_id).await {
+                Ok(Some(status)) if status != "queued" => {
+                    info!(
+                        "Job {} is no longer queued (status: {}) — skipping runner creation",
+                        job_id, status
+                    );
+                    self.agent_registry.release_slot(&agent_id).await;
+                    self.pending_job_store.remove_job(job_id).await;
+                    return Ok(());
+                }
+                Ok(None) => {
+                    info!(
+                        "Job {} not found on GitHub — removing from pending queue",
+                        job_id
+                    );
+                    self.agent_registry.release_slot(&agent_id).await;
+                    self.pending_job_store.remove_job(job_id).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Don't block on status check failure — proceed with runner creation
+                    warn!(
+                        "Failed to check job {} status: {} — proceeding anyway",
+                        job_id, e
+                    );
+                }
+                _ => {} // Still queued, continue
+            }
+        }
+
+        // Generate runner name and command ID
+        let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
+        let command_id = Uuid::new_v4().to_string();
+
+        // Generate JIT config (webhook mode — runner is pre-assigned to this job)
+        let jit_config = match self
             .token_provider
-            .get_registration_token(runner_scope)
+            .generate_jitconfig(runner_scope, &runner_name, labels, runner_group_id)
             .await
         {
-            Ok(t) => t,
+            Ok(config) => config,
             Err(e) => {
                 // Release the reserved slot since we won't use it
                 self.agent_registry.release_slot(&agent_id).await;
                 return Err(e);
             }
         };
-
-        // Generate runner name and command ID
-        let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
-        let command_id = Uuid::new_v4().to_string();
 
         // Save runner state for crash recovery (include job_id for dedup cleanup on failure)
         self.runner_state
@@ -698,13 +734,14 @@ impl FleetManager {
             )
             .await;
 
-        // Build CreateRunner command
+        // Build CreateRunner command with JIT config
         let create_cmd = CreateRunnerCommand {
             command_id: command_id.clone(),
             vm_name: runner_name.clone(),
-            registration_token: token,
+            registration_token: String::new(), // Not needed for JIT
             labels: labels.to_vec(),
             runner_scope_url: runner_scope.to_url(),
+            jit_config,
         };
 
         let coordinator_msg = CoordinatorMessage {
@@ -1383,13 +1420,14 @@ impl FleetManager {
                 )
                 .await;
 
-            // Build CreateRunner command
+            // Build CreateRunner command (fixed capacity uses registration token, not JIT)
             let create_cmd = CreateRunnerCommand {
                 command_id: command_id.clone(),
                 vm_name: runner_name.clone(),
                 registration_token: token,
                 labels: pool_def.labels.clone(),
                 runner_scope_url: runner_scope.to_url(),
+                jit_config: String::new(),
             };
 
             let coordinator_msg = CoordinatorMessage {

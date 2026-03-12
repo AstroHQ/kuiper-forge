@@ -17,6 +17,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+/// Parameters for configuring a GitHub Actions runner on a VM.
+pub struct RunnerParams<'a> {
+    pub registration_token: &'a str,
+    pub labels: &'a [String],
+    pub runner_scope_url: &'a str,
+    pub runner_name: &'a str,
+    pub jit_config: &'a str,
+}
+
 /// Information about a running VM.
 #[derive(Debug, Clone)]
 pub struct VmInstance {
@@ -227,11 +236,15 @@ impl VmManager {
         &self,
         vmid: u32,
         ip: &str,
-        registration_token: &str,
-        labels: &[String],
-        runner_scope_url: &str,
-        runner_name: &str,
+        params: &RunnerParams<'_>,
     ) -> Result<(bool, bool)> {
+        let RunnerParams {
+            registration_token,
+            labels,
+            runner_scope_url,
+            runner_name,
+            jit_config,
+        } = params;
         // Update state
         if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
             vm.state = VmState::Configuring;
@@ -259,6 +272,33 @@ impl VmManager {
                 "bash/sh"
             }
         );
+
+        // Force time sync on Windows — cloned VMs often have stale clocks
+        // which causes JIT token validation to fail ("token is not valid until ...")
+        if is_windows {
+            info!("Syncing Windows clock on VM {}", vmid);
+            let sync_cmd = if shell_is_powershell {
+                "net start w32time; w32tm /resync /force"
+            } else {
+                "powershell -Command \"net start w32time; w32tm /resync /force\""
+            };
+            match session.execute(sync_cmd).await {
+                Ok(output) if output.exit_code == 0 => {
+                    debug!("Time sync output (VM {}): {}", vmid, output.stdout.trim());
+                }
+                Ok(output) => {
+                    warn!(
+                        "Time sync failed on VM {} (exit {}): {}",
+                        vmid,
+                        output.exit_code,
+                        output.stderr.trim()
+                    );
+                }
+                Err(e) => {
+                    warn!("Time sync command failed on VM {}: {}", vmid, e);
+                }
+            }
+        }
 
         // Build runner commands
         let runner_dir = if is_windows {
@@ -334,49 +374,163 @@ impl VmManager {
             debug!("GitHub Actions runner already installed on VM {}", vmid);
         }
 
-        // Configure runner
-        let config_cmd =
-            builder.config_command(runner_scope_url, registration_token, labels, runner_name);
+        // Choose between JIT path (skip config, run with --jitconfig) and legacy path (config + run)
+        let run_cmd = if !jit_config.is_empty() {
+            info!("Using JIT config on VM {} (skipping config.sh)", vmid);
 
-        info!("Running configuration command on VM {}", vmid);
-        let output = session.execute(&config_cmd).await?;
-        if output.exit_code != 0 {
-            error!(
-                "Runner configuration failed (exit {}): stdout={}, stderr={}",
-                output.exit_code, output.stdout, output.stderr
+            // Write JIT config to a file on the VM to avoid shell escaping/length issues
+            let write_cmd = builder.write_jit_config_command(jit_config);
+            info!(
+                "Writing JIT config file on VM {} ({} bytes)",
+                vmid,
+                jit_config.len()
             );
-            return Err(Error::runner(format!(
-                "Configuration failed with exit code {}:\nstdout: {}\nstderr: {}",
-                output.exit_code, output.stdout, output.stderr
-            )));
-        }
-        if !output.stdout.is_empty() {
-            info!("Config output: {}", output.stdout.trim());
-        }
+            let write_output = session.execute(&write_cmd).await?;
+            if write_output.exit_code != 0 {
+                return Err(Error::runner(format!(
+                    "Failed to write JIT config to VM: {}",
+                    write_output.stderr
+                )));
+            }
+            if !write_output.stdout.is_empty() {
+                info!(
+                    "JIT config write stdout (VM {}): {}",
+                    vmid,
+                    write_output.stdout.trim()
+                );
+            }
+            if !write_output.stderr.is_empty() {
+                warn!(
+                    "JIT config write stderr (VM {}): {}",
+                    vmid,
+                    write_output.stderr.trim()
+                );
+            }
 
-        // Update state
-        if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
-            vm.state = VmState::RunnerActive;
-        }
+            // Update state — no config step needed for JIT
+            if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
+                vm.state = VmState::RunnerActive;
+            }
 
-        // Run the runner directly and wait for it to complete
-        // This is simpler and more reliable than backgrounding + polling for ephemeral runners
+            builder.run_command_jit_from_file()
+        } else {
+            // Legacy path: config.sh + run.sh
+            let config_cmd =
+                builder.config_command(runner_scope_url, registration_token, labels, runner_name);
+
+            info!("Running configuration command on VM {}", vmid);
+            let output = session.execute(&config_cmd).await?;
+            if output.exit_code != 0 {
+                error!(
+                    "Runner configuration failed (exit {}): stdout={}, stderr={}",
+                    output.exit_code, output.stdout, output.stderr
+                );
+                return Err(Error::runner(format!(
+                    "Configuration failed with exit code {}:\nstdout: {}\nstderr: {}",
+                    output.exit_code, output.stdout, output.stderr
+                )));
+            }
+            if !output.stdout.is_empty() {
+                info!("Config output: {}", output.stdout.trim());
+            }
+
+            // Update state
+            if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
+                vm.state = VmState::RunnerActive;
+            }
+
+            builder.run_command_direct()
+        };
+
+        // Run the runner and wait for it to complete
         info!(
-            "Running ephemeral runner on VM {} (will block until job completes)",
+            "Running runner on VM {} (will block until job completes)",
             vmid
         );
-        let run_cmd = builder.run_command_direct();
+        let run_start = Instant::now();
         let output = session.execute(&run_cmd).await?;
+        let run_elapsed = run_start.elapsed();
 
         info!(
-            "Runner completed on VM {} with exit code {}",
-            vmid, output.exit_code
+            "Runner completed on VM {} with exit code {} in {:.1}s",
+            vmid,
+            output.exit_code,
+            run_elapsed.as_secs_f64()
         );
         if !output.stdout.is_empty() {
-            debug!("Runner stdout: {}", output.stdout);
+            info!("Runner stdout (VM {}): {}", vmid, output.stdout.trim());
         }
         if !output.stderr.is_empty() {
-            debug!("Runner stderr: {}", output.stderr);
+            info!("Runner stderr (VM {}): {}", vmid, output.stderr.trim());
+        }
+
+        // If the runner exited suspiciously fast, grab as much diagnostic info as possible
+        // before the VM is destroyed
+        if run_elapsed < Duration::from_secs(30) {
+            if !jit_config.is_empty() {
+                warn!(
+                    "JIT runner on VM {} exited in {:.1}s — runner was pre-assigned a job, \
+                     this likely means the runner binary failed to start",
+                    vmid,
+                    run_elapsed.as_secs_f64()
+                );
+            } else {
+                warn!(
+                    "Runner on VM {} exited in {:.1}s — may not have picked up a job",
+                    vmid,
+                    run_elapsed.as_secs_f64()
+                );
+            }
+
+            // Always log stdout/stderr at WARN level for fast exits (even if empty)
+            warn!(
+                "Early exit diagnostics (VM {}): exit_code={}, stdout_len={}, stderr_len={}, \
+                 stdout={:?}, stderr={:?}",
+                vmid,
+                output.exit_code,
+                output.stdout.len(),
+                output.stderr.len(),
+                output.stdout.chars().take(2000).collect::<String>(),
+                output.stderr.chars().take(2000).collect::<String>(),
+            );
+
+            // Try to grab runner diagnostic logs
+            let diag_cmd = builder.diag_log_command(100);
+            match session.execute(&diag_cmd).await {
+                Ok(diag) => {
+                    if diag.stdout.trim().is_empty() {
+                        warn!(
+                            "Runner _diag (VM {}): no diagnostic logs found \
+                             (runner may not have started at all)",
+                            vmid
+                        );
+                    } else {
+                        warn!("Runner _diag (VM {}): {}", vmid, diag.stdout.trim());
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Runner _diag (VM {}): failed to fetch diagnostic logs: {}",
+                        vmid, e
+                    );
+                }
+            }
+
+            // On Windows, also check if the runner binary exists and .NET is available
+            if is_windows {
+                let check_cmd = builder.check_installed_command();
+                if let Ok(check) = session.execute(&check_cmd).await {
+                    warn!(
+                        "Runner install check (VM {}): {}",
+                        vmid,
+                        if check.stdout.trim() == "installed" {
+                            "runner binary present"
+                        } else {
+                            "runner binary NOT FOUND"
+                        }
+                    );
+                }
+            }
         }
 
         if output.exit_code != 0 {
@@ -546,18 +700,14 @@ impl VmManager {
         &self,
         vm_name: &str,
         template_vmid: u32,
-        registration_token: &str,
-        labels: &[String],
-        runner_scope_url: &str,
+        params: &RunnerParams<'_>,
     ) -> Result<(u32, String)> {
         // 1. Create VM
         let vm = self.create_vm(vm_name, template_vmid).await?;
         let vmid = vm.vmid;
 
         // Ensure cleanup on failure
-        let result = self
-            .run_lifecycle_inner(vmid, vm_name, registration_token, labels, runner_scope_url)
-            .await;
+        let result = self.run_lifecycle_inner(vmid, vm_name, params).await;
 
         // Always cleanup on completion or failure
         if let Err(ref e) = result {
@@ -570,14 +720,41 @@ impl VmManager {
         result
     }
 
+    /// Debug lifecycle: on failure, skips VM destruction so you can SSH in.
+    /// On success, destroys the VM normally.
+    pub async fn run_lifecycle_debug(
+        &self,
+        vm_name: &str,
+        template_vmid: u32,
+        params: &RunnerParams<'_>,
+    ) -> Result<(u32, String)> {
+        let vm = self.create_vm(vm_name, template_vmid).await?;
+        let vmid = vm.vmid;
+
+        let result = self.run_lifecycle_inner(vmid, vm_name, params).await;
+
+        match &result {
+            Ok(_) => {
+                // Success — clean up normally
+                let _ = self.destroy_vm(vmid).await;
+            }
+            Err(e) => {
+                error!(
+                    "Lifecycle failed on VM {}: {} — VM left running for inspection",
+                    vmid, e
+                );
+            }
+        }
+
+        result
+    }
+
     /// Inner lifecycle logic (separated for cleanup handling).
     async fn run_lifecycle_inner(
         &self,
         vmid: u32,
-        vm_name: &str,
-        registration_token: &str,
-        labels: &[String],
-        runner_scope_url: &str,
+        _vm_name: &str,
+        params: &RunnerParams<'_>,
     ) -> Result<(u32, String)> {
         // 2. Start VM and wait for IP
         let ip = self.start_and_wait(vmid).await?;
@@ -586,16 +763,7 @@ impl VmManager {
         self.wait_for_ssh(&ip).await?;
 
         // 4. Configure and run the runner (blocks until job completes for ephemeral runners)
-        let _os_info = self
-            .configure_runner(
-                vmid,
-                &ip,
-                registration_token,
-                labels,
-                runner_scope_url,
-                vm_name,
-            )
-            .await?;
+        let _os_info = self.configure_runner(vmid, &ip, params).await?;
 
         // Runner has completed - VM will be cleaned up by caller
         Ok((vmid, ip))
