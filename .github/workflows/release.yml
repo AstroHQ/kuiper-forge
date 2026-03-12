@@ -73,7 +73,7 @@ jobs:
         include: ${{ fromJson(needs.setup.outputs.matrix) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
@@ -90,7 +90,7 @@ jobs:
 
       - name: Install cross
         if: ${{ matrix.cross }}
-        uses: taiki-e/install-action@cross
+        uses: taiki-e/install-action@v2
 
       - name: Build (cross)
         if: ${{ matrix.cross }}
@@ -128,7 +128,7 @@ jobs:
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ needs.setup.outputs.binary }}-${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
@@ -140,10 +140,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
