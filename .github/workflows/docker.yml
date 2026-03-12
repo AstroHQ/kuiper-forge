@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "kuiper-forge-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. kuiper-forge-v0.4.0)"
+        required: true
 
 permissions:
   contents: read
@@ -15,11 +20,12 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.platform }}
+    name: Build ${{ matrix.db_backend }} ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
+        db_backend: [sqlite, postgres]
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
@@ -28,11 +34,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Extract version from tag
         id: meta
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ inputs.tag || github.ref_name }}"
           VERSION="${TAG##*-v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
@@ -53,9 +61,10 @@ jobs:
           context: .
           file: docker/kuiper-forge/Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: DB_BACKEND=${{ matrix.db_backend }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.db_backend }}-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.db_backend }}-${{ matrix.platform }}
 
       - name: Export digest
         run: |
@@ -66,20 +75,23 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.runner }}
+          name: digest-${{ matrix.db_backend }}-${{ matrix.runner }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge & Push Manifest
+    name: Merge & Push Manifest (${{ matrix.db_backend }})
     needs: build
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        db_backend: [sqlite, postgres]
     steps:
       - name: Extract version from tag
         id: meta
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${{ inputs.tag || github.ref_name }}"
           VERSION="${TAG##*-v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
@@ -87,7 +99,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
-          pattern: digest-*
+          pattern: digest-${{ matrix.db_backend }}-*
           merge-multiple: true
 
       - name: Log in to GHCR
@@ -102,7 +114,12 @@ jobs:
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           VERSION="${{ steps.meta.outputs.version }}"
-          TAGS="-t ${IMAGE}:${VERSION} -t ${IMAGE}:latest"
+
+          if [[ "${{ matrix.db_backend }}" == "sqlite" ]]; then
+            TAGS="-t ${IMAGE}:${VERSION} -t ${IMAGE}:latest -t ${IMAGE}:${VERSION}-sqlite -t ${IMAGE}:sqlite"
+          else
+            TAGS="-t ${IMAGE}:${VERSION}-postgres -t ${IMAGE}:postgres"
+          fi
 
           docker buildx imagetools create ${TAGS} \
             $(printf "${IMAGE}@sha256:%s " *)
