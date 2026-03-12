@@ -514,9 +514,9 @@ impl RunnerConfigBuilder {
             self.wrap_powershell(&ps_cmd)
         } else {
             format!(
-                "tail -{} $(ls -t {}/_diag/*.log 2>/dev/null | head -1) 2>/dev/null || echo 'no diag logs'",
-                tail_lines,
+                "f=$(ls -t {}/_diag/*.log 2>/dev/null | head -1); if [ -n \"$f\" ]; then tail -{} \"$f\"; else echo 'no diag logs'; fi",
                 escape_posix_path(&self.runner_dir),
+                tail_lines,
             )
         }
     }
