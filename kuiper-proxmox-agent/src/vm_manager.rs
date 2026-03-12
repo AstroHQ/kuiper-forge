@@ -17,6 +17,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+/// Parameters for configuring a GitHub Actions runner on a VM.
+pub struct RunnerParams<'a> {
+    pub registration_token: &'a str,
+    pub labels: &'a [String],
+    pub runner_scope_url: &'a str,
+    pub runner_name: &'a str,
+    pub jit_config: &'a str,
+}
+
 /// Information about a running VM.
 #[derive(Debug, Clone)]
 pub struct VmInstance {
@@ -227,12 +236,15 @@ impl VmManager {
         &self,
         vmid: u32,
         ip: &str,
-        registration_token: &str,
-        labels: &[String],
-        runner_scope_url: &str,
-        runner_name: &str,
-        jit_config: &str,
+        params: &RunnerParams<'_>,
     ) -> Result<(bool, bool)> {
+        let RunnerParams {
+            registration_token,
+            labels,
+            runner_scope_url,
+            runner_name,
+            jit_config,
+        } = params;
         // Update state
         if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
             vm.state = VmState::Configuring;
@@ -277,7 +289,9 @@ impl VmManager {
                 Ok(output) => {
                     warn!(
                         "Time sync failed on VM {} (exit {}): {}",
-                        vmid, output.exit_code, output.stderr.trim()
+                        vmid,
+                        output.exit_code,
+                        output.stderr.trim()
                     );
                 }
                 Err(e) => {
@@ -366,7 +380,11 @@ impl VmManager {
 
             // Write JIT config to a file on the VM to avoid shell escaping/length issues
             let write_cmd = builder.write_jit_config_command(jit_config);
-            info!("Writing JIT config file on VM {} ({} bytes)", vmid, jit_config.len());
+            info!(
+                "Writing JIT config file on VM {} ({} bytes)",
+                vmid,
+                jit_config.len()
+            );
             let write_output = session.execute(&write_cmd).await?;
             if write_output.exit_code != 0 {
                 return Err(Error::runner(format!(
@@ -375,10 +393,18 @@ impl VmManager {
                 )));
             }
             if !write_output.stdout.is_empty() {
-                info!("JIT config write stdout (VM {}): {}", vmid, write_output.stdout.trim());
+                info!(
+                    "JIT config write stdout (VM {}): {}",
+                    vmid,
+                    write_output.stdout.trim()
+                );
             }
             if !write_output.stderr.is_empty() {
-                warn!("JIT config write stderr (VM {}): {}", vmid, write_output.stderr.trim());
+                warn!(
+                    "JIT config write stderr (VM {}): {}",
+                    vmid,
+                    write_output.stderr.trim()
+                );
             }
 
             // Update state — no config step needed for JIT
@@ -427,7 +453,9 @@ impl VmManager {
 
         info!(
             "Runner completed on VM {} with exit code {} in {:.1}s",
-            vmid, output.exit_code, run_elapsed.as_secs_f64()
+            vmid,
+            output.exit_code,
+            run_elapsed.as_secs_f64()
         );
         if !output.stdout.is_empty() {
             info!("Runner stdout (VM {}): {}", vmid, output.stdout.trim());
@@ -443,12 +471,14 @@ impl VmManager {
                 warn!(
                     "JIT runner on VM {} exited in {:.1}s — runner was pre-assigned a job, \
                      this likely means the runner binary failed to start",
-                    vmid, run_elapsed.as_secs_f64()
+                    vmid,
+                    run_elapsed.as_secs_f64()
                 );
             } else {
                 warn!(
                     "Runner on VM {} exited in {:.1}s — may not have picked up a job",
-                    vmid, run_elapsed.as_secs_f64()
+                    vmid,
+                    run_elapsed.as_secs_f64()
                 );
             }
 
@@ -670,19 +700,14 @@ impl VmManager {
         &self,
         vm_name: &str,
         template_vmid: u32,
-        registration_token: &str,
-        labels: &[String],
-        runner_scope_url: &str,
-        jit_config: &str,
+        params: &RunnerParams<'_>,
     ) -> Result<(u32, String)> {
         // 1. Create VM
         let vm = self.create_vm(vm_name, template_vmid).await?;
         let vmid = vm.vmid;
 
         // Ensure cleanup on failure
-        let result = self
-            .run_lifecycle_inner(vmid, vm_name, registration_token, labels, runner_scope_url, jit_config)
-            .await;
+        let result = self.run_lifecycle_inner(vmid, vm_name, params).await;
 
         // Always cleanup on completion or failure
         if let Err(ref e) = result {
@@ -695,30 +720,29 @@ impl VmManager {
         result
     }
 
-    /// Debug lifecycle: same as `run_complete_lifecycle` but skips VM destruction.
-    /// VMs are left running so you can SSH in and inspect state.
+    /// Debug lifecycle: on failure, skips VM destruction so you can SSH in.
+    /// On success, destroys the VM normally.
     pub async fn run_lifecycle_debug(
         &self,
         vm_name: &str,
         template_vmid: u32,
-        registration_token: &str,
-        labels: &[String],
-        runner_scope_url: &str,
-        jit_config: &str,
+        params: &RunnerParams<'_>,
     ) -> Result<(u32, String)> {
         let vm = self.create_vm(vm_name, template_vmid).await?;
         let vmid = vm.vmid;
 
-        let result = self
-            .run_lifecycle_inner(vmid, vm_name, registration_token, labels, runner_scope_url, jit_config)
-            .await;
+        let result = self.run_lifecycle_inner(vmid, vm_name, params).await;
 
         match &result {
-            Ok((_, ip)) => {
-                warn!("Debug mode: VM {} left running at IP {} — SSH in to inspect", vmid, ip);
+            Ok(_) => {
+                // Success — clean up normally
+                let _ = self.destroy_vm(vmid).await;
             }
             Err(e) => {
-                error!("Lifecycle failed on VM {}: {} — VM left running for inspection", vmid, e);
+                error!(
+                    "Lifecycle failed on VM {}: {} — VM left running for inspection",
+                    vmid, e
+                );
             }
         }
 
@@ -729,11 +753,8 @@ impl VmManager {
     async fn run_lifecycle_inner(
         &self,
         vmid: u32,
-        vm_name: &str,
-        registration_token: &str,
-        labels: &[String],
-        runner_scope_url: &str,
-        jit_config: &str,
+        _vm_name: &str,
+        params: &RunnerParams<'_>,
     ) -> Result<(u32, String)> {
         // 2. Start VM and wait for IP
         let ip = self.start_and_wait(vmid).await?;
@@ -742,17 +763,7 @@ impl VmManager {
         self.wait_for_ssh(&ip).await?;
 
         // 4. Configure and run the runner (blocks until job completes for ephemeral runners)
-        let _os_info = self
-            .configure_runner(
-                vmid,
-                &ip,
-                registration_token,
-                labels,
-                runner_scope_url,
-                vm_name,
-                jit_config,
-            )
-            .await?;
+        let _os_info = self.configure_runner(vmid, &ip, params).await?;
 
         // Runner has completed - VM will be cleaned up by caller
         Ok((vmid, ip))

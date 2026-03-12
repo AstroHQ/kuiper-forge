@@ -611,9 +611,8 @@ pub async fn start_runner_gui_and_wait(
     // The GUI runner script checks for this file and passes --jitconfig to run.sh.
     if !jit_config.is_empty() {
         info!("Writing JIT config to VM {} (skipping config.sh)", ip);
-        let write_jit_cmd = format!(
-            "cat > ~/jit-config.txt << 'JIT_CONFIG_EOF'\n{jit_config}\nJIT_CONFIG_EOF"
-        );
+        let write_jit_cmd =
+            format!("cat > ~/jit-config.txt << 'JIT_CONFIG_EOF'\n{jit_config}\nJIT_CONFIG_EOF");
         ssh_exec(ip, config, &write_jit_cmd)
             .await
             .map_err(|e| Error::Ssh(format!("Failed to write JIT config: {e}")))?;

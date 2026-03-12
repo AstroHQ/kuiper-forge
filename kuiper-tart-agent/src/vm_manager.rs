@@ -259,7 +259,10 @@ impl VmManager {
         if !jit_config.is_empty() {
             // JIT path: only install the runner, skip config.sh.
             // The JIT blob will be passed to run.sh in wait_for_runner_exit.
-            info!("JIT mode: ensuring runner is installed on VM {} (skipping config.sh)", vm_id);
+            info!(
+                "JIT mode: ensuring runner is installed on VM {} (skipping config.sh)",
+                vm_id
+            );
             ssh::ensure_runner_installed(ip, &self.ssh_config, &self.config.runner_version).await?;
         } else {
             // Legacy path: install + config.sh

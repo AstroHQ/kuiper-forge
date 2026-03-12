@@ -587,7 +587,11 @@ impl FleetManager {
                 .create_runner_on_demand(
                     &job_info.agent_labels,
                     &job_info.runner_scope,
-                    job_info.runner_group.as_deref(),
+                    job_info
+                        .runner_group
+                        .as_deref()
+                        .and_then(|g| g.parse::<u64>().ok())
+                        .unwrap_or(1),
                     job_id,
                     job_info.job_name.as_deref(),
                     job_info.repository.as_deref(),
@@ -643,7 +647,7 @@ impl FleetManager {
         &self,
         labels: &[String],
         runner_scope: &RunnerScope,
-        _runner_group: Option<&str>,
+        runner_group_id: u64,
         job_id: u64,
         job_name: Option<&str>,
         repository: Option<&str>,
@@ -679,14 +683,20 @@ impl FleetManager {
                     return Ok(());
                 }
                 Ok(None) => {
-                    info!("Job {} not found on GitHub — removing from pending queue", job_id);
+                    info!(
+                        "Job {} not found on GitHub — removing from pending queue",
+                        job_id
+                    );
                     self.agent_registry.release_slot(&agent_id).await;
                     self.pending_job_store.remove_job(job_id).await;
                     return Ok(());
                 }
                 Err(e) => {
                     // Don't block on status check failure — proceed with runner creation
-                    warn!("Failed to check job {} status: {} — proceeding anyway", job_id, e);
+                    warn!(
+                        "Failed to check job {} status: {} — proceeding anyway",
+                        job_id, e
+                    );
                 }
                 _ => {} // Still queued, continue
             }
@@ -699,7 +709,7 @@ impl FleetManager {
         // Generate JIT config (webhook mode — runner is pre-assigned to this job)
         let jit_config = match self
             .token_provider
-            .generate_jitconfig(runner_scope, &runner_name, labels, 1)
+            .generate_jitconfig(runner_scope, &runner_name, labels, runner_group_id)
             .await
         {
             Ok(config) => config,

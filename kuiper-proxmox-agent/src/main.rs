@@ -142,7 +142,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Create agent runner
     if args.debug_keep_vms {
-        warn!("Debug mode: VMs will NOT be deleted on failure, agent will exit on first runner failure");
+        warn!(
+            "Debug mode: VMs will NOT be deleted on failure, agent will exit on first runner failure"
+        );
     }
     let agent = ProxmoxAgent::new(config, vm_manager, cert_store, args.debug_keep_vms);
 
@@ -341,7 +343,12 @@ async fn send_runner_event(
 
 impl ProxmoxAgent {
     /// Create a new Proxmox agent.
-    fn new(config: Config, vm_manager: Arc<VmManager>, cert_store: AgentCertStore, debug_keep_vms: bool) -> Arc<Self> {
+    fn new(
+        config: Config,
+        vm_manager: Arc<VmManager>,
+        cert_store: AgentCertStore,
+        debug_keep_vms: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             config,
             vm_manager,
@@ -504,7 +511,7 @@ impl ProxmoxAgent {
                         tx,
                         cmd.command_id,
                         false,
-                        format!("Capacity exceeded: max {} VMs", max),
+                        format!("Capacity exceeded: max {max} VMs"),
                     )
                     .await?;
                     return Ok(());
@@ -587,27 +594,20 @@ impl ProxmoxAgent {
 
         // Spawn task to handle the runner lifecycle
         tokio::spawn(async move {
+            let params = vm_manager::RunnerParams {
+                registration_token: &cmd.registration_token,
+                labels: &cmd.labels,
+                runner_scope_url: &cmd.runner_scope_url,
+                runner_name: &cmd.vm_name,
+                jit_config: &cmd.jit_config,
+            };
             let result = if debug_keep_vms {
                 vm_manager
-                    .run_lifecycle_debug(
-                        &cmd.vm_name,
-                        template_vmid,
-                        &cmd.registration_token,
-                        &cmd.labels,
-                        &cmd.runner_scope_url,
-                        &cmd.jit_config,
-                    )
+                    .run_lifecycle_debug(&cmd.vm_name, template_vmid, &params)
                     .await
             } else {
                 vm_manager
-                    .run_complete_lifecycle(
-                        &cmd.vm_name,
-                        template_vmid,
-                        &cmd.registration_token,
-                        &cmd.labels,
-                        &cmd.runner_scope_url,
-                        &cmd.jit_config,
-                    )
+                    .run_complete_lifecycle(&cmd.vm_name, template_vmid, &params)
                     .await
             };
 

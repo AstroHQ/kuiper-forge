@@ -91,7 +91,10 @@ impl RunnerTokenProvider for MockTokenProvider {
         labels: &[String],
         _runner_group_id: u64,
     ) -> Result<String> {
-        let fake_jit = format!("dry-run-jitconfig-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let fake_jit = format!(
+            "dry-run-jitconfig-{}",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
         info!(
             "DRY-RUN: Generated fake JIT config for runner '{}' in {:?} with labels {:?}",
             runner_name, scope, labels

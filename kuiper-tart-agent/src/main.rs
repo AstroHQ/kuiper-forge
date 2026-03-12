@@ -730,7 +730,7 @@ impl TartAgent {
                             &tx,
                             cmd.command_id,
                             false,
-                            format!("Capacity exceeded: max {} VMs", max),
+                            format!("Capacity exceeded: max {max} VMs"),
                         )
                         .await;
                         return;
