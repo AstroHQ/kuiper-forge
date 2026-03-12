@@ -42,6 +42,17 @@ pub trait RunnerTokenProvider: Send + Sync {
     /// Get a registration token for the given runner scope.
     async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String>;
 
+    /// Generate a JIT (Just-In-Time) runner configuration.
+    /// Returns an encoded config blob that can be passed to `run.sh --jitconfig`.
+    /// The runner is pre-assigned to a specific job and auto-deregisters.
+    async fn generate_jitconfig(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+        labels: &[String],
+        runner_group_id: u64,
+    ) -> Result<String>;
+
     /// Remove a runner from GitHub by name.
     /// This is called when a runner VM is destroyed or agent disconnects.
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()>;
@@ -71,6 +82,21 @@ impl RunnerTokenProvider for MockTokenProvider {
             scope, fake_token
         );
         Ok(fake_token)
+    }
+
+    async fn generate_jitconfig(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+        labels: &[String],
+        _runner_group_id: u64,
+    ) -> Result<String> {
+        let fake_jit = format!("dry-run-jitconfig-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        info!(
+            "DRY-RUN: Generated fake JIT config for runner '{}' in {:?} with labels {:?}",
+            runner_name, scope, labels
+        );
+        Ok(fake_jit)
     }
 
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {
@@ -136,6 +162,22 @@ struct RegistrationTokenResponse {
     token: String,
     #[allow(dead_code)] // Present in API response but not used
     expires_at: String,
+}
+
+/// Response from JIT runner config generation endpoint
+#[derive(Debug, Deserialize)]
+struct JitConfigResponse {
+    #[allow(dead_code)]
+    runner: JitRunnerInfo,
+    encoded_jit_config: String,
+}
+
+/// Runner info returned in the JIT config response
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct JitRunnerInfo {
+    id: u64,
+    name: String,
 }
 
 /// Response from runners list endpoint
@@ -495,6 +537,60 @@ impl GitHubClient {
             .context("Failed to parse registration token response")?;
 
         Ok(token_response.token)
+    }
+
+    /// Generate a JIT (Just-In-Time) runner configuration for the given scope.
+    /// The runner is pre-assigned to a job and auto-deregisters on GitHub's side.
+    pub async fn generate_jitconfig(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+        labels: &[String],
+        runner_group_id: u64,
+    ) -> Result<String> {
+        let account = Self::scope_account(scope);
+        let installation_id = self.get_installation_id(account).await?;
+        let access_token = self.get_access_token(installation_id).await?;
+
+        let url = format!("{}{}", GITHUB_API_URL, scope.jitconfig_path());
+
+        let body = serde_json::json!({
+            "name": runner_name,
+            "runner_group_id": runner_group_id,
+            "labels": labels,
+            "work_folder": "_work",
+        });
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to generate JIT config")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "GitHub API error generating JIT config ({status}): {body}"
+            ));
+        }
+
+        let jit_response: JitConfigResponse = response
+            .json()
+            .await
+            .context("Failed to parse JIT config response")?;
+
+        info!(
+            "Generated JIT config for runner '{}' (GitHub runner ID: {})",
+            runner_name, jit_response.runner.id
+        );
+
+        Ok(jit_response.encoded_jit_config)
     }
 
     /// List all runners for the given scope
@@ -881,6 +977,16 @@ impl RunnerTokenProvider for GitHubClient {
         GitHubClient::get_registration_token(self, scope).await
     }
 
+    async fn generate_jitconfig(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+        labels: &[String],
+        runner_group_id: u64,
+    ) -> Result<String> {
+        GitHubClient::generate_jitconfig(self, scope, runner_name, labels, runner_group_id).await
+    }
+
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {
         // Delegate to the inherent method
         GitHubClient::remove_runner(self, scope, runner_name).await
@@ -918,6 +1024,26 @@ mod tests {
         assert_eq!(
             repo_scope.registration_token_path(),
             "/repos/owner/repo/actions/runners/registration-token"
+        );
+    }
+
+    #[test]
+    fn test_jitconfig_path() {
+        let org_scope = RunnerScope::Organization {
+            name: "my-org".to_string(),
+        };
+        assert_eq!(
+            org_scope.jitconfig_path(),
+            "/orgs/my-org/actions/runners/generate-jitconfig"
+        );
+
+        let repo_scope = RunnerScope::Repository {
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        assert_eq!(
+            repo_scope.jitconfig_path(),
+            "/repos/owner/repo/actions/runners/generate-jitconfig"
         );
     }
 

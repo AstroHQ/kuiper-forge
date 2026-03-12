@@ -460,6 +460,18 @@ impl RunnerScope {
         }
     }
 
+    /// Get the API path for generating a JIT runner config
+    pub fn jitconfig_path(&self) -> String {
+        match self {
+            RunnerScope::Organization { name } => {
+                format!("/orgs/{name}/actions/runners/generate-jitconfig")
+            }
+            RunnerScope::Repository { owner, repo } => {
+                format!("/repos/{owner}/{repo}/actions/runners/generate-jitconfig")
+            }
+        }
+    }
+
     /// Get the API path for getting registration token
     pub fn registration_token_path(&self) -> String {
         match self {

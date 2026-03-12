@@ -136,9 +136,10 @@ message CoordinatorMessage {
 message CreateRunnerCommand {
     string command_id = 1;
     string vm_name = 2;             // Runner/VM name (coordinator assigns for global numbering)
-    string registration_token = 3;  // GitHub runner registration token
+    string registration_token = 3;  // GitHub runner registration token (legacy, used in fixed-capacity mode)
     repeated string labels = 4;     // Labels for GitHub runner registration
     string runner_scope_url = 5;    // GitHub org/repo URL for runner registration
+    string jit_config = 6;          // JIT config blob (webhook mode): if set, skip config.sh and use run.sh --jitconfig
 }
 
 message DestroyRunnerCommand {

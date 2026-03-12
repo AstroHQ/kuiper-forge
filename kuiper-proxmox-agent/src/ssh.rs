@@ -453,6 +453,74 @@ impl RunnerConfigBuilder {
         }
     }
 
+    /// Build a command to write the JIT config blob to a file on the VM.
+    /// Uses a file to avoid shell escaping and command-line length issues.
+    pub fn write_jit_config_command(&self, jit_config: &str) -> String {
+        let jit_path = if self.is_windows {
+            format!("{}\\jit-config.txt", self.runner_dir)
+        } else {
+            format!("{}/jit-config.txt", self.runner_dir)
+        };
+
+        if self.is_windows {
+            let ps_cmd = format!(
+                "Set-Content -Path {} -Value {} -NoNewline",
+                escape_powershell(&jit_path),
+                escape_powershell(jit_config),
+            );
+            self.wrap_powershell(&ps_cmd)
+        } else {
+            format!(
+                "cat > {} << 'JIT_CONFIG_EOF'\n{}\nJIT_CONFIG_EOF",
+                escape_posix_path(&jit_path),
+                jit_config,
+            )
+        }
+    }
+
+    /// Build the runner command for JIT execution, reading the config from a file.
+    /// The JIT config must have been written to jit-config.txt first via `write_jit_config_command`.
+    pub fn run_command_jit_from_file(&self) -> String {
+        let jit_path = if self.is_windows {
+            format!("{}\\jit-config.txt", self.runner_dir)
+        } else {
+            format!("{}/jit-config.txt", self.runner_dir)
+        };
+
+        if self.is_windows {
+            let ps_cmd = format!(
+                "Set-Location {}; $jit = Get-Content {} -Raw; Remove-Item {}; .\\run.cmd --jitconfig $jit",
+                escape_powershell(&self.runner_dir),
+                escape_powershell(&jit_path),
+                escape_powershell(&jit_path),
+            );
+            self.wrap_powershell(&ps_cmd)
+        } else {
+            format!(
+                "bash -l -c 'cd {} && jit=$(cat jit-config.txt) && rm -f jit-config.txt && ./run.sh --jitconfig \"$jit\"'",
+                escape_posix_path(&self.runner_dir),
+            )
+        }
+    }
+
+    /// Build command to read the last N lines of the most recent runner diagnostic log.
+    pub fn diag_log_command(&self, tail_lines: u32) -> String {
+        if self.is_windows {
+            let ps_cmd = format!(
+                "Get-ChildItem {}\\_diag\\*.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | ForEach-Object {{ Get-Content $_.FullName -Tail {} }}",
+                escape_powershell(&self.runner_dir),
+                tail_lines,
+            );
+            self.wrap_powershell(&ps_cmd)
+        } else {
+            format!(
+                "tail -{} $(ls -t {}/_diag/*.log 2>/dev/null | head -1) 2>/dev/null || echo 'no diag logs'",
+                tail_lines,
+                escape_posix_path(&self.runner_dir),
+            )
+        }
+    }
+
     /// Build command to check if runner is installed.
     pub fn check_installed_command(&self) -> String {
         if self.is_windows {
@@ -647,5 +715,45 @@ mod tests {
 
         // PowerShell escapes single quotes by doubling them
         assert!(cmd.contains("'TOKEN''injection'"));
+    }
+
+    #[test]
+    fn test_linux_write_jit_config() {
+        let builder = RunnerConfigBuilder::linux("~/actions-runner");
+        let cmd = builder.write_jit_config_command("ENCODED_JIT_BLOB_123");
+        assert!(cmd.contains("jit-config.txt"));
+        assert!(cmd.contains("ENCODED_JIT_BLOB_123"));
+    }
+
+    #[test]
+    fn test_linux_run_command_jit_from_file() {
+        let builder = RunnerConfigBuilder::linux("~/actions-runner");
+        let cmd = builder.run_command_jit_from_file();
+        assert!(cmd.contains("./run.sh --jitconfig"));
+        assert!(cmd.contains("jit-config.txt"));
+        assert!(!cmd.contains("config.sh"));
+    }
+
+    #[test]
+    fn test_windows_write_jit_config() {
+        let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
+        let cmd = builder.write_jit_config_command("ENCODED_JIT_BLOB_123");
+        assert!(cmd.starts_with("powershell -EncodedCommand"));
+    }
+
+    #[test]
+    fn test_windows_run_command_jit_from_file() {
+        let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
+        let cmd = builder.run_command_jit_from_file();
+        assert!(cmd.starts_with("powershell -EncodedCommand"));
+    }
+
+    #[test]
+    fn test_windows_powershell_run_command_jit_from_file() {
+        let builder = RunnerConfigBuilder::windows_powershell(r"C:\actions-runner");
+        let cmd = builder.run_command_jit_from_file();
+        assert!(!cmd.starts_with("powershell"));
+        assert!(cmd.contains("run.cmd --jitconfig"));
+        assert!(cmd.contains("jit-config.txt"));
     }
 }

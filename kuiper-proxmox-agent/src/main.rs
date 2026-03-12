@@ -42,6 +42,11 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
+    /// Debug mode: skip VM deletion on runner failure and exit the agent,
+    /// leaving VMs running so you can SSH in and inspect.
+    #[arg(long)]
+    debug_keep_vms: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -136,7 +141,10 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_vm_manager = vm_manager.clone();
 
     // Create agent runner
-    let agent = ProxmoxAgent::new(config, vm_manager, cert_store);
+    if args.debug_keep_vms {
+        warn!("Debug mode: VMs will NOT be deleted on failure, agent will exit on first runner failure");
+    }
+    let agent = ProxmoxAgent::new(config, vm_manager, cert_store, args.debug_keep_vms);
 
     // Run the agent with graceful shutdown handling
     tokio::select! {
@@ -292,6 +300,7 @@ struct ProxmoxAgent {
     config: Config,
     vm_manager: Arc<VmManager>,
     cert_store: AgentCertStore,
+    debug_keep_vms: bool,
 }
 
 async fn send_command_ack(
@@ -332,11 +341,12 @@ async fn send_runner_event(
 
 impl ProxmoxAgent {
     /// Create a new Proxmox agent.
-    fn new(config: Config, vm_manager: Arc<VmManager>, cert_store: AgentCertStore) -> Arc<Self> {
+    fn new(config: Config, vm_manager: Arc<VmManager>, cert_store: AgentCertStore, debug_keep_vms: bool) -> Arc<Self> {
         Arc::new(Self {
             config,
             vm_manager,
             cert_store,
+            debug_keep_vms,
         })
     }
 
@@ -570,25 +580,41 @@ impl ProxmoxAgent {
         let vm_manager = self.vm_manager.clone();
         let runner_name = cmd.vm_name.clone();
         let agent = Arc::clone(self);
+        let debug_keep_vms = self.debug_keep_vms;
 
         // Select template based on job labels
         let template_vmid = self.select_template(&cmd.labels);
 
         // Spawn task to handle the runner lifecycle
         tokio::spawn(async move {
-            let result = vm_manager
-                .run_complete_lifecycle(
-                    &cmd.vm_name,
-                    template_vmid,
-                    &cmd.registration_token,
-                    &cmd.labels,
-                    &cmd.runner_scope_url,
-                )
-                .await;
+            let result = if debug_keep_vms {
+                vm_manager
+                    .run_lifecycle_debug(
+                        &cmd.vm_name,
+                        template_vmid,
+                        &cmd.registration_token,
+                        &cmd.labels,
+                        &cmd.runner_scope_url,
+                        &cmd.jit_config,
+                    )
+                    .await
+            } else {
+                vm_manager
+                    .run_complete_lifecycle(
+                        &cmd.vm_name,
+                        template_vmid,
+                        &cmd.registration_token,
+                        &cmd.labels,
+                        &cmd.runner_scope_url,
+                        &cmd.jit_config,
+                    )
+                    .await
+            };
 
             match result {
                 Ok((vmid, ip)) => {
                     info!("Runner {} completed successfully", runner_name);
+
                     // Send immediate status update so coordinator knows capacity is available
                     let status = agent.build_status().await;
                     let _ = tx
@@ -611,6 +637,12 @@ impl ProxmoxAgent {
                 }
                 Err(e) => {
                     error!("Runner {} failed: {}", runner_name, e);
+
+                    if debug_keep_vms {
+                        error!("Debug mode: VMs left running for inspection. Exiting agent.");
+                        std::process::exit(1);
+                    }
+
                     // Send immediate status update so coordinator knows capacity is available
                     let status = agent.build_status().await;
                     let _ = tx

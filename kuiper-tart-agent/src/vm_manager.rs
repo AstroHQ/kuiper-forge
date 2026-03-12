@@ -236,12 +236,16 @@ impl VmManager {
     }
 
     /// Configure the GitHub runner on a VM.
+    ///
+    /// If `jit_config` is non-empty, only installs the runner (config.sh is skipped —
+    /// the JIT blob is passed to run.sh in `wait_for_runner_exit`).
     pub async fn configure_runner(
         &self,
         vm_id: &str,
         registration_token: &str,
         labels: &[String],
         runner_scope_url: &str,
+        jit_config: &str,
     ) -> Result<()> {
         let ip = {
             let vms = self.active_vms.read().await;
@@ -252,16 +256,24 @@ impl VmManager {
 
         self.update_state(vm_id, VmStatus::ConfiguringRunner).await;
 
-        ssh::configure_runner(
-            ip,
-            &self.ssh_config,
-            registration_token,
-            labels,
-            runner_scope_url,
-            vm_id,
-            &self.config.runner_version,
-        )
-        .await?;
+        if !jit_config.is_empty() {
+            // JIT path: only install the runner, skip config.sh.
+            // The JIT blob will be passed to run.sh in wait_for_runner_exit.
+            info!("JIT mode: ensuring runner is installed on VM {} (skipping config.sh)", vm_id);
+            ssh::ensure_runner_installed(ip, &self.ssh_config, &self.config.runner_version).await?;
+        } else {
+            // Legacy path: install + config.sh
+            ssh::configure_runner(
+                ip,
+                &self.ssh_config,
+                registration_token,
+                labels,
+                runner_scope_url,
+                vm_id,
+                &self.config.runner_version,
+            )
+            .await?;
+        }
 
         self.update_state(vm_id, VmStatus::RunnerActive).await;
 
@@ -271,7 +283,8 @@ impl VmManager {
     /// Wait for the runner to complete its job.
     ///
     /// Uses Terminal.app GUI context for macOS services (code signing, keychain, notarization).
-    pub async fn wait_for_runner_exit(&self, vm_id: &str) -> Result<()> {
+    /// If `jit_config` is non-empty, it's written to the VM and passed to run.sh --jitconfig.
+    pub async fn wait_for_runner_exit(&self, vm_id: &str, jit_config: &str) -> Result<()> {
         let ip = {
             let vms = self.active_vms.read().await;
             vms.get(vm_id)
@@ -290,7 +303,7 @@ impl VmManager {
 
         // Start the runner in GUI context and wait for it to complete
         // GUI mode enables code signing, keychain access, and other macOS GUI services
-        ssh::start_runner_gui_and_wait(ip, &self.ssh_config, &log_file).await?;
+        ssh::start_runner_gui_and_wait(ip, &self.ssh_config, &log_file, jit_config).await?;
 
         info!(
             "Runner completed on VM {} (log: {})",

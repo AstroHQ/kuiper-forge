@@ -820,9 +820,9 @@ impl TartAgent {
         let vm_name = cmd.vm_name.clone();
 
         // Validate inputs early and warn about suspicious values
-        if cmd.registration_token.is_empty() {
+        if cmd.registration_token.is_empty() && cmd.jit_config.is_empty() {
             warn!(
-                "CreateRunner called with empty registration token - \
+                "CreateRunner called with empty registration token and no JIT config - \
                  runner configuration will fail. Is the coordinator in dry-run mode?"
             );
         }
@@ -879,6 +879,7 @@ impl TartAgent {
                     &cmd.registration_token,
                     &cmd.labels,
                     &cmd.runner_scope_url,
+                    &cmd.jit_config,
                 )
                 .await
                 .map_err(|e| {
@@ -905,7 +906,7 @@ impl TartAgent {
                 vm_name
             );
             self.vm_manager
-                .wait_for_runner_exit(&vm_id)
+                .wait_for_runner_exit(&vm_id, &cmd.jit_config)
                 .await
                 .map_err(|e| {
                     error!("[{}] Runner execution failed: {}", vm_name, e);
