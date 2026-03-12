@@ -572,8 +572,7 @@ pub async fn start_runner_and_wait(
 
 /// Wrapper script for running the GitHub Actions runner in GUI context.
 /// This script is uploaded to the VM and launched via Terminal.app.
-const GUI_RUNNER_SCRIPT: &str =
-    include_str!("../../kuiper-agent-lib/scripts/run_runner_gui_macos.sh");
+const GUI_RUNNER_SCRIPT: &str = kuiper_agent_lib::github_runner::GUI_RUNNER_SCRIPT_MACOS;
 
 /// Start the GitHub Actions runner in a GUI context using Terminal.app.
 ///

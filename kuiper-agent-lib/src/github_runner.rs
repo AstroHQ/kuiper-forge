@@ -132,6 +132,9 @@ pub fn download_url(version: &str, platform: Platform, arch: Arch) -> String {
 const INSTALL_SCRIPT_UNIX: &str = include_str!("../scripts/install_runner_unix.sh");
 const INSTALL_SCRIPT_WINDOWS: &str = include_str!("../scripts/install_runner_windows.ps1");
 
+/// Script for running the GitHub Actions runner in macOS GUI context via Terminal.app.
+pub const GUI_RUNNER_SCRIPT_MACOS: &str = include_str!("../scripts/run_runner_gui_macos.sh");
+
 /// Generate the install command for a GitHub Actions runner.
 ///
 /// Returns a shell command string ready to be executed via SSH.
