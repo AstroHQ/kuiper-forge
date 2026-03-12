@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.4.0 - 2026-03-12
+#### Bug Fixes
+- fix missing runner group passing along, and not destroying successful runs in debug - (1af0630) - *jfro*
+- fix JIT runners for webhook mode, ensure win VMs are time sync'd - (767c543) - *jfro*
+
+- - -
+
 ## kuiper-forge-v0.3.2 - 2026-02-19
 #### Bug Fixes
 - (**kuiper-forge,kuiper-tart-agent,kuiper-proxmox-agent**) queued jobs getting stuck due to failed VM start & lack of requeue - (211e86f) - *jfro*
