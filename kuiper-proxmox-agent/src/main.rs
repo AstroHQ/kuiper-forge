@@ -65,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let data_dir = Config::default_data_dir();
 
-    // Initialize logging with file output
-    init_logging(&data_dir)?;
+    // Initialize logging with file output (retention applied after config load)
+    init_logging(&data_dir, config::LoggingConfig::default().retention_days as usize)?;
 
     // Handle subcommands
     if let Some(command) = args.command {
@@ -758,7 +758,7 @@ impl ProxmoxAgent {
 }
 
 /// Initialize logging with file output and stdout.
-fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
+fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
@@ -767,6 +767,7 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
         .rotation(Rotation::DAILY)
         .filename_prefix("kuiper-proxmox-agent")
         .filename_suffix("log")
+        .max_log_files(retention_days)
         .build(&log_dir)?;
 
     // Non-blocking writer for the file

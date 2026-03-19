@@ -57,6 +57,10 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
+    /// Skip host environment checks (tart version, local images, DHCP)
+    #[arg(long)]
+    skip_host_checks: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -91,8 +95,8 @@ async fn main() -> anyhow::Result<()> {
     let config_path = args.config.clone().unwrap_or_else(Config::default_path);
     let data_dir = Config::default_data_dir();
 
-    // Initialize logging with file output
-    init_logging(&data_dir)?;
+    // Initialize logging with file output (retention applied after config load)
+    init_logging(&data_dir, config::LoggingConfig::default().retention_days as usize)?;
 
     // Handle subcommands
     if let Some(command) = args.command {
@@ -142,36 +146,40 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Run host environment checks
-    match host_checks::check_tart_version() {
-        Ok(version) => info!("Tart CLI version: {}", version),
-        Err(msg) => {
+    if args.skip_host_checks {
+        warn!("Skipping host environment checks (--skip-host-checks)");
+    } else {
+        match host_checks::check_tart_version() {
+            Ok(version) => info!("Tart CLI version: {}", version),
+            Err(msg) => {
+                error!("{}", msg);
+                std::process::exit(1);
+            }
+        }
+
+        // Check local images exist
+        let mut images_to_check: Vec<&str> = vec![&config.tart.base_image];
+        for mapping in &config.tart.image_mappings {
+            images_to_check.push(&mapping.image);
+        }
+        if let Err(msg) = host_checks::check_local_images(&images_to_check) {
             error!("{}", msg);
             std::process::exit(1);
         }
-    }
 
-    // Check local images exist
-    let mut images_to_check: Vec<&str> = vec![&config.tart.base_image];
-    for mapping in &config.tart.image_mappings {
-        images_to_check.push(&mapping.image);
-    }
-    if let Err(msg) = host_checks::check_local_images(&images_to_check) {
-        error!("{}", msg);
-        std::process::exit(1);
-    }
-
-    match config.host.dhcp_lease_check.as_str() {
-        "ignore" => {}
-        mode => {
-            if let Err(msg) = host_checks::check_dhcp_lease_time() {
-                let fix_cmd = host_checks::dhcp_lease_fix_command();
-                if mode == "error" {
-                    error!("{}", msg);
-                    error!("Fix with: {}", fix_cmd);
-                    std::process::exit(1);
-                } else {
-                    warn!("{}", msg);
-                    warn!("Fix with: {}", fix_cmd);
+        match config.host.dhcp_lease_check.as_str() {
+            "ignore" => {}
+            mode => {
+                if let Err(msg) = host_checks::check_dhcp_lease_time() {
+                    let fix_cmd = host_checks::dhcp_lease_fix_command();
+                    if mode == "error" {
+                        error!("{}", msg);
+                        error!("Fix with: {}", fix_cmd);
+                        std::process::exit(1);
+                    } else {
+                        warn!("{}", msg);
+                        warn!("Fix with: {}", fix_cmd);
+                    }
                 }
             }
         }
@@ -250,6 +258,8 @@ async fn main() -> anyhow::Result<()> {
     // Spawn cleanup task
     let cleanup_vm_manager = vm_manager.clone();
     let cleanup_config = config.cleanup.clone();
+    let log_retention_days = config.logging.retention_days;
+    let cleanup_log_dir = data_dir.join("logs");
     tokio::spawn(async move {
         let interval = Duration::from_secs(cleanup_config.cleanup_interval_mins as u64 * 60);
         let max_age = Duration::from_secs(cleanup_config.max_vm_age_hours as u64 * 3600);
@@ -259,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
             ticker.tick().await;
             info!("Running stale VM cleanup");
             cleanup_vm_manager.cleanup_stale_vms(max_age).await;
+            cleanup_old_logs(&cleanup_log_dir, log_retention_days);
         }
     });
 
@@ -369,6 +380,7 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         cleanup: config::CleanupConfig::default(),
         reconnect: config::ReconnectConfig::default(),
         host: config::HostConfig::default(),
+        logging: config::LoggingConfig::default(),
     };
 
     config.save(config_path)?;
@@ -1041,7 +1053,7 @@ impl TartAgent {
 }
 
 /// Initialize logging with file output and stdout.
-fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
+fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
@@ -1050,6 +1062,7 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
         .rotation(Rotation::DAILY)
         .filename_prefix("kuiper-tart-agent")
         .filename_suffix("log")
+        .max_log_files(retention_days)
         .build(&log_dir)?;
 
     // Non-blocking writer for the file
@@ -1078,6 +1091,45 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<()> {
 
     info!("Logging to: {}", log_dir.display());
     Ok(())
+}
+
+/// Remove runner log files older than the configured retention period.
+///
+/// Agent log files (kuiper-tart-agent.*.log) are handled by tracing-appender's
+/// max_log_files. This function cleans up runner-*.log files.
+fn cleanup_old_logs(log_dir: &Path, retention_days: u32) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(retention_days as u64 * 86400);
+
+    let entries = match std::fs::read_dir(log_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Failed to read log directory for cleanup: {e}");
+            return;
+        }
+    };
+
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("runner-") || !name.ends_with(".log") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if modified < cutoff {
+                if let Err(e) = std::fs::remove_file(entry.path()) {
+                    warn!("Failed to remove old log {}: {e}", entry.path().display());
+                } else {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        info!("Cleaned up {removed} runner log file(s) older than {retention_days} days");
+    }
 }
 
 /// Wait for a shutdown signal (SIGTERM or SIGINT/Ctrl-C).

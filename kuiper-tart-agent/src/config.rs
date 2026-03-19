@@ -25,6 +25,9 @@ pub struct Config {
     /// Host environment settings (optional)
     #[serde(default)]
     pub host: HostConfig,
+    /// Logging settings (optional)
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 /// Coordinator connection configuration.
@@ -179,6 +182,26 @@ impl Default for HostConfig {
     fn default() -> Self {
         Self {
             dhcp_lease_check: default_dhcp_lease_check(),
+        }
+    }
+}
+
+/// Logging configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoggingConfig {
+    /// Number of days to retain log files (agent and runner logs)
+    #[serde(default = "default_log_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_log_retention_days() -> u32 {
+    14
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_log_retention_days(),
         }
     }
 }
