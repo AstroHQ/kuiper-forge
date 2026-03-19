@@ -41,7 +41,7 @@ pub struct AgentSummary {
     pub agent_id: String,
     pub hostname: String,
     pub agent_type: String,
-    pub labels: Vec<String>,
+    pub label_sets: Vec<Vec<String>>,
     pub max_vms: u32,
     pub is_online: bool,
     pub active_vms: usize,

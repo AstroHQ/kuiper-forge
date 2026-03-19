@@ -609,7 +609,7 @@ impl FleetManager {
                     if err_msg.contains("No available agent") {
                         // No agent matches this job's labels - try other jobs
                         // (different jobs may have different label requirements)
-                        debug!(
+                        info!(
                             "No available agent for job {} with labels {:?} - trying next job",
                             job_id, job_info.agent_labels
                         );

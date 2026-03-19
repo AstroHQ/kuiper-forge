@@ -121,8 +121,12 @@
                     </td>
                     <td>{{ agent.active_vms }}/{{ agent.max_vms }}</td>
                     <td>
-                        {% for label in agent.labels %}
-                        <span class="badge badge-label">{{ label }}</span>
+                        {% for label_set in agent.label_sets %}
+                        <div style="margin-bottom: 2px;">
+                            {% for label in label_set %}
+                            <span class="badge badge-label">{{ label }}</span>
+                            {% endfor %}
+                        </div>
                         {% endfor %}
                     </td>
                     <td>

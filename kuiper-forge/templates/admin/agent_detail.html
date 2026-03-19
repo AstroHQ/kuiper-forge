@@ -56,10 +56,14 @@
             <div class="detail-label">Capacity</div>
             <div>{{ agent.active_vms }} / {{ agent.max_vms }} VMs</div>
 
-            <div class="detail-label">Labels</div>
+            <div class="detail-label">Label Sets</div>
             <div>
-                {% for label in agent.labels %}
-                <span class="badge badge-label">{{ label }}</span>
+                {% for label_set in agent.label_sets %}
+                <div style="margin-bottom: 4px;">
+                    {% for label in label_set %}
+                    <span class="badge badge-label">{{ label }}</span>
+                    {% endfor %}
+                </div>
                 {% endfor %}
             </div>
 

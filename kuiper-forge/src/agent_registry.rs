@@ -291,17 +291,26 @@ impl AgentRegistry {
     /// Find an agent with capacity matching the required labels
     pub async fn find_available_agent(&self, labels: &[String]) -> Option<String> {
         let agents = self.agents.read().await;
+        let mut reasons: Vec<String> = Vec::new();
         for (id, agent) in agents.iter() {
             let agent = agent.read().await;
             let has_cap = agent.has_capacity();
             let matches = agent.matches_labels(labels);
-            debug!(
-                "Checking agent {}: has_capacity={} (active={}, reserved={}, max={}), matches_labels={:?}={}",
-                id, has_cap, agent.active_vms, agent.reserved_slots, agent.max_vms, labels, matches
-            );
             if has_cap && matches {
                 return Some(id.clone());
             }
+            reasons.push(format!(
+                "{}: matches={}, capacity={} (active={}, reserved={}, max={})",
+                id, matches, has_cap, agent.active_vms, agent.reserved_slots, agent.max_vms
+            ));
+        }
+        if reasons.is_empty() {
+            warn!("No agents registered to handle labels {:?}", labels);
+        } else {
+            warn!(
+                "No agent available for labels {:?} — checked {} agent(s): [{}]",
+                labels, reasons.len(), reasons.join("; ")
+            );
         }
         None
     }
@@ -528,6 +537,7 @@ impl AgentRegistry {
                 agent_type: agent.agent_type,
                 hostname: agent.hostname.clone(),
                 labels: agent.labels.clone(),
+                label_sets: agent.label_sets.clone(),
                 max_vms: agent.max_vms,
                 active_vms: agent.active_vms,
                 last_seen_secs: agent.last_seen.elapsed().as_secs(),
@@ -607,6 +617,7 @@ pub struct AgentInfo {
     pub agent_type: AgentType,
     pub hostname: String,
     pub labels: Vec<String>,
+    pub label_sets: Vec<Vec<String>>,
     pub max_vms: usize,
     pub active_vms: usize,
     pub last_seen_secs: u64,

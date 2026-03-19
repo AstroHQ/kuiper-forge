@@ -19,7 +19,8 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use chrono::Duration;
 use serde::Deserialize;
-use std::collections::HashSet;
+use crate::agent_registry::AgentInfo;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::error;
 
@@ -177,12 +178,12 @@ async fn render_dashboard(
 
     // Get agents
     let registered = state.auth_manager.list_agents().await;
-    let connected_ids: HashSet<String> = state
+    let connected: HashMap<String, AgentInfo> = state
         .agent_registry
         .list_all()
         .await
         .into_iter()
-        .map(|a| a.agent_id)
+        .map(|a| (a.agent_id.clone(), a))
         .collect();
     let runners = state
         .runner_state
@@ -197,13 +198,17 @@ async fn render_dashboard(
                 .iter()
                 .filter(|(_, r)| r.agent_id == a.agent_id)
                 .count();
+            let label_sets = connected
+                .get(&a.agent_id)
+                .map(|c| c.label_sets.clone())
+                .unwrap_or_default();
             AgentSummary {
                 agent_id: a.agent_id.clone(),
                 hostname: a.hostname,
                 agent_type: a.agent_type,
-                labels: a.labels,
+                label_sets,
                 max_vms: a.max_vms,
-                is_online: connected_ids.contains(&a.agent_id),
+                is_online: connected.contains_key(&a.agent_id),
                 active_vms,
                 created_at: a.created_at,
                 revoked: a.revoked,
@@ -349,12 +354,12 @@ async fn agent_detail(
         }
     };
 
-    let connected_ids: HashSet<String> = state
+    let connected: HashMap<String, AgentInfo> = state
         .agent_registry
         .list_all()
         .await
         .into_iter()
-        .map(|a| a.agent_id)
+        .map(|a| (a.agent_id.clone(), a))
         .collect();
 
     let all_runners = state
@@ -376,13 +381,17 @@ async fn agent_detail(
         })
         .collect();
 
+    let label_sets = connected
+        .get(&agent.agent_id)
+        .map(|c| c.label_sets.clone())
+        .unwrap_or_default();
     let agent_summary = AgentSummary {
         agent_id: agent.agent_id.clone(),
         hostname: agent.hostname,
         agent_type: agent.agent_type,
-        labels: agent.labels,
+        label_sets,
         max_vms: agent.max_vms,
-        is_online: connected_ids.contains(&agent.agent_id),
+        is_online: connected.contains_key(&agent.agent_id),
         active_vms: runners.len(),
         created_at: agent.created_at,
         revoked: agent.revoked,
