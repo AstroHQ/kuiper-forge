@@ -309,7 +309,9 @@ impl AgentRegistry {
         } else {
             warn!(
                 "No agent available for labels {:?} — checked {} agent(s): [{}]",
-                labels, reasons.len(), reasons.join("; ")
+                labels,
+                reasons.len(),
+                reasons.join("; ")
             );
         }
         None

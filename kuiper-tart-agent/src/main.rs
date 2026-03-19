@@ -96,7 +96,10 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = Config::default_data_dir();
 
     // Initialize logging with file output (retention applied after config load)
-    init_logging(&data_dir, config::LoggingConfig::default().retention_days as usize)?;
+    init_logging(
+        &data_dir,
+        config::LoggingConfig::default().retention_days as usize,
+    )?;
 
     // Handle subcommands
     if let Some(command) = args.command {

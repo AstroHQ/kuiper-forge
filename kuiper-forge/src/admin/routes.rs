@@ -8,6 +8,7 @@ use crate::admin::templates::{
     AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, LoginTemplate,
     RunnerSummary, TokenSummary,
 };
+use crate::agent_registry::AgentInfo;
 use askama::Template;
 use axum::{
     Form, Router,
@@ -19,7 +20,6 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use chrono::Duration;
 use serde::Deserialize;
-use crate::agent_registry::AgentInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::error;
