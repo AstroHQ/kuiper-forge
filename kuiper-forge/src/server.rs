@@ -19,7 +19,7 @@ use hyper_util::server::conn::auto::Builder as HttpBuilder;
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentService, AgentServiceServer, CoordinatorMessage,
     CoordinatorPayload, Ping, RegisterRequest, RegisterResponse, RegistrationService,
-    RegistrationServiceServer,
+    RegistrationServiceServer, RunnerEvent, RunnerEventType,
 };
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -555,46 +555,38 @@ async fn handle_agent_message(
                 let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
                 let missing = rs.reconcile_agent_vms(agent_id, &vm_names).await;
                 if !missing.is_empty() {
-                    for (runner_name, runner_info) in &missing {
-                        // Always clean up missing runners immediately.
-                        // Previously, runners with job_ids were deferred waiting for a
-                        // RunnerEvent, but if the agent disconnected when the VM was
-                        // destroyed, that event is lost and the runner stays orphaned
-                        // forever, blocking the pending job from being retried.
-                        rs.remove_runner(runner_name).await;
-                        registry.release_slot(agent_id).await;
-
-                        if let Some(job_id) = runner_info.job_id {
-                            // Leave the pending job in the store so
-                            // process_pending_jobs can retry it on another agent.
-                            // The runner is gone (removed above) so
-                            // has_runner_for_job() will return false, allowing
-                            // a new runner to be created for this job.
-                            info!(
-                                agent_id = %agent_id,
-                                runner_name = %runner_name,
-                                job_id = %job_id,
-                                "Runner VM missing - cleaned up runner, job remains pending for retry"
-                            );
-                        } else {
-                            debug!(
-                                agent_id = %agent_id,
-                                runner_name = %runner_name,
-                                "Removed runner from state during reconciliation"
-                            );
-                        }
-                    }
-
                     info!(
                         agent_id = %agent_id,
                         missing_count = missing.len(),
-                        "Reconciled runner state - {} runner(s) missing, all cleaned up",
+                        "Reconciled runner state - {} runner(s) missing, routing through fleet for cleanup",
                         missing.len(),
                     );
 
-                    // Trigger pending job processing since slots were freed
                     if let Some(notifier) = fleet_notifier {
-                        notifier.notify().await;
+                        // Emit a synthetic Destroyed event for each missing runner.
+                        // The fleet manager's handle_runner_event will handle full
+                        // cleanup: remove from GitHub, remove from internal state,
+                        // release the agent slot, and increment the job retry counter.
+                        for (runner_name, _runner_info) in &missing {
+                            notifier
+                                .notify_runner_event(
+                                    agent_id.to_string(),
+                                    RunnerEvent {
+                                        runner_name: runner_name.clone(),
+                                        vm_id: runner_name.clone(),
+                                        event_type: RunnerEventType::Destroyed.into(),
+                                        error: "VM missing during reconciliation".to_string(),
+                                    },
+                                )
+                                .await;
+                        }
+                    } else {
+                        // No fleet notifier (e.g. not in webhook/fleet mode) —
+                        // fall back to local-only cleanup.
+                        for (runner_name, _runner_info) in &missing {
+                            rs.remove_runner(runner_name).await;
+                            registry.release_slot(agent_id).await;
+                        }
                     }
                 }
 
