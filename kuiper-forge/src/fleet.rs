@@ -502,8 +502,20 @@ impl FleetManager {
             }
 
             // Check if we already have a runner for this job
-            if self.runner_state.has_runner_for_job(job.job_id).await {
-                debug!("Job {} already has active runner - skipping", job.job_id);
+            let existing = self.runner_state.runners_for_job(job.job_id).await;
+            if !existing.is_empty() {
+                if existing.len() > 1 {
+                    error!(
+                        job_id = %job.job_id,
+                        runners = ?existing,
+                        "Multiple runners exist for the same job — state corruption"
+                    );
+                }
+                info!(
+                    job_id = %job.job_id,
+                    runners = ?existing,
+                    "Job already has active runner - skipping GitHub recovery"
+                );
                 continue;
             }
 
@@ -574,10 +586,19 @@ impl FleetManager {
             }
 
             // Skip if a runner already exists for this job (it's already being processed)
-            if self.runner_state.has_runner_for_job(job_id).await {
-                debug!(
-                    "Pending job {} already has active runner - skipping",
-                    job_id
+            let existing = self.runner_state.runners_for_job(job_id).await;
+            if !existing.is_empty() {
+                if existing.len() > 1 {
+                    error!(
+                        job_id = %job_id,
+                        runners = ?existing,
+                        "Multiple runners exist for the same job — state corruption"
+                    );
+                }
+                info!(
+                    job_id = %job_id,
+                    runners = ?existing,
+                    "Pending job already has active runner - skipping"
                 );
                 continue;
             }
@@ -601,7 +622,7 @@ impl FleetManager {
             {
                 Ok(()) => {
                     // Runner creation initiated - job stays in DB until runner completes/fails
-                    // The has_runner_for_job check will skip it on subsequent iterations
+                    // The runners_for_job check will skip it on subsequent iterations
                     info!("Created runner for pending job {}", job_id);
                 }
                 Err(e) => {

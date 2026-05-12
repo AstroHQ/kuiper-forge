@@ -136,10 +136,12 @@ pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name
 pub const SELECT_ALL_RUNNERS: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = ?";
+pub const SELECT_RUNNERS_BY_JOB_ID: &str =
+    "SELECT runner_name, agent_id FROM active_runners WHERE job_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNER_BY_JOB_ID: &str = "SELECT 1 FROM active_runners WHERE job_id = $1";
+pub const SELECT_RUNNERS_BY_JOB_ID: &str =
+    "SELECT runner_name, agent_id FROM active_runners WHERE job_id = $1";
 
 // Count runners for a specific agent
 #[cfg(feature = "sqlite")]

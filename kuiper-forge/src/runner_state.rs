@@ -220,17 +220,31 @@ impl RunnerStateStore {
         self.get_runner(runner_name).await.is_some()
     }
 
-    /// Check if a runner exists for a given job ID.
+    /// Return all runners associated with a given job ID.
     ///
-    /// Used for deduplication in webhook mode to prevent processing
-    /// the same job multiple times.
-    pub async fn has_runner_for_job(&self, job_id: u64) -> bool {
-        let result = sqlx::query(sql::SELECT_RUNNER_BY_JOB_ID)
+    /// In normal operation this returns 0 or 1 rows. Multiple rows indicate
+    /// a bug — two runner records pointing at the same job — and callers
+    /// should log and treat that as an anomaly.
+    pub async fn runners_for_job(&self, job_id: u64) -> Vec<(String, String)> {
+        let result = sqlx::query(sql::SELECT_RUNNERS_BY_JOB_ID)
             .bind(job_id as i64)
-            .fetch_optional(&self.pool)
+            .fetch_all(&self.pool)
             .await;
 
-        matches!(result, Ok(Some(_)))
+        match result {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    let runner_name: String = row.try_get("runner_name").ok()?;
+                    let agent_id: String = row.try_get("agent_id").ok()?;
+                    Some((runner_name, agent_id))
+                })
+                .collect(),
+            Err(e) => {
+                error!("Failed to query runners for job {}: {}", job_id, e);
+                Vec::new()
+            }
+        }
     }
 
     /// Remove all runners for an agent and return them for cleanup.
