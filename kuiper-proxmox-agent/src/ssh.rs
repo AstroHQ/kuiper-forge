@@ -290,11 +290,9 @@ impl SshSession {
                 Some(ChannelMsg::Data { data }) => {
                     stdout.extend_from_slice(&data);
                 }
-                Some(ChannelMsg::ExtendedData { data, ext }) => {
-                    if ext == 1 {
-                        // stderr
-                        stderr.extend_from_slice(&data);
-                    }
+                Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                    // stderr
+                    stderr.extend_from_slice(&data);
                 }
                 Some(ChannelMsg::ExitStatus { exit_status }) => {
                     exit_code = Some(exit_status);
