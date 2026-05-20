@@ -93,6 +93,17 @@ pub const REVOKE_AGENT: &str = "UPDATE registered_agents SET revoked = 1 WHERE a
 #[cfg(feature = "postgres")]
 pub const REVOKE_AGENT: &str = "UPDATE registered_agents SET revoked = 1 WHERE agent_id = $1";
 
+/// Targeted update for the fields an agent can change at runtime via AgentStatus
+/// (labels, max_vms). Critically does NOT touch `revoked`, so a concurrent
+/// `revoke_agent` between read-modify-write can't be silently undone.
+#[cfg(feature = "sqlite")]
+pub const UPDATE_AGENT_METADATA: &str =
+    "UPDATE registered_agents SET labels = ?, max_vms = ? WHERE agent_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const UPDATE_AGENT_METADATA: &str =
+    "UPDATE registered_agents SET labels = $1, max_vms = $2 WHERE agent_id = $3";
+
 #[cfg(feature = "sqlite")]
 pub const CHECK_AGENT_VALID: &str =
     "SELECT 1 FROM registered_agents WHERE agent_id = ? AND revoked = 0 AND expires_at > ?";

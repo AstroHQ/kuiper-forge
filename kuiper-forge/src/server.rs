@@ -415,7 +415,11 @@ impl AgentService for AgentServiceImpl {
         // the live status message is the truth, so the admin UI / CLI / DB query
         // surfaces should reflect it. The in-memory registry is handled by
         // agent_registry.register() below.
-        if let Some(mut stored) = self.auth_manager.get_agent(&agent_id).await {
+        //
+        // Uses a targeted UPDATE that only touches labels/max_vms, not a full
+        // upsert — that way a concurrent admin `revoke_agent` between our read
+        // and write can't be silently undone by this path.
+        if let Some(stored) = self.auth_manager.get_agent(&agent_id).await {
             let new_max = max_vms as u32;
             let labels_changed = stored.labels != labels;
             let max_changed = stored.max_vms != new_max;
@@ -427,9 +431,11 @@ impl AgentService for AgentServiceImpl {
                     labels_changed = labels_changed,
                     "Syncing persisted agent record from live status"
                 );
-                stored.max_vms = new_max;
-                stored.labels = labels.clone();
-                if let Err(e) = self.auth_manager.store_agent(stored).await {
+                if let Err(e) = self
+                    .auth_manager
+                    .update_agent_metadata(&agent_id, &labels, new_max)
+                    .await
+                {
                     warn!(error = %e, agent_id = %agent_id,
                           "Failed to persist updated agent record");
                 }

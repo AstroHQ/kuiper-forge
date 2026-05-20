@@ -186,6 +186,26 @@ impl AuthStore {
         }
     }
 
+    /// Update only the fields an agent reports via AgentStatus (labels and
+    /// max_vms). Leaves `revoked` and other admin-controlled columns untouched,
+    /// so a concurrent revoke between read and write can't be undone by this
+    /// path.
+    pub async fn update_agent_metadata(
+        &self,
+        agent_id: &str,
+        labels: &[String],
+        max_vms: u32,
+    ) -> Result<()> {
+        let labels_json = serde_json::to_string(labels)?;
+        sqlx::query(sql::UPDATE_AGENT_METADATA)
+            .bind(&labels_json)
+            .bind(max_vms as i64)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Store a registered agent
     pub async fn store_agent(&self, agent: RegisteredAgent) -> Result<()> {
         let labels_json = serde_json::to_string(&agent.labels)?;
@@ -482,11 +502,18 @@ impl AuthManager {
         self.store.get_agent(agent_id).await
     }
 
-    /// Persist (upsert) an agent record. Used to keep the stored record in sync
-    /// with the live state an agent reports on stream connect — bootstrap values
-    /// from initial registration are otherwise never updated.
-    pub async fn store_agent(&self, agent: RegisteredAgent) -> Result<()> {
-        self.store.store_agent(agent).await
+    /// Update only labels and max_vms on a stored agent record. Preserves the
+    /// `revoked` flag so an admin revocation that lands concurrently with this
+    /// update isn't clobbered.
+    pub async fn update_agent_metadata(
+        &self,
+        agent_id: &str,
+        labels: &[String],
+        max_vms: u32,
+    ) -> Result<()> {
+        self.store
+            .update_agent_metadata(agent_id, labels, max_vms)
+            .await
     }
 }
 
