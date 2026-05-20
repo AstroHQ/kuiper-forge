@@ -20,6 +20,11 @@ message RegisterRequest {
     string registration_token = 1;
     string hostname = 2;
     string agent_type = 3;  // "tart" or "proxmox"
+    // Vestigial. The coordinator no longer reads these; the agent's labels
+    // and max_vms travel in the first AgentStatus stream message and the
+    // coordinator syncs its persisted record from there. Kept on the wire
+    // for backward compatibility with older agents/coordinators — new code
+    // sends defaults (empty / 0), old code's values are ignored on receive.
     repeated string labels = 4;
     uint32 max_vms = 5;
 }

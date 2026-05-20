@@ -203,19 +203,18 @@ impl RegistrationService for RegistrationServiceImpl {
         info!(
             hostname = %req.hostname,
             agent_type = %req.agent_type,
-            labels = ?req.labels,
             "Agent registration request"
         );
 
-        // Exchange token for certificate
+        // Exchange token for certificate. labels/max_vms are no longer carried in
+        // RegisterRequest — they come from the first AgentStatus stream message
+        // and the coordinator syncs its persisted record from that live value.
         let cert = self
             .auth_manager
             .exchange_token_for_certificate(
                 &req.registration_token,
                 &req.hostname,
                 &req.agent_type,
-                req.labels,
-                req.max_vms,
             )
             .await
             .map_err(|e| {
@@ -411,6 +410,32 @@ impl AgentService for AgentServiceImpl {
             "Agent stream connected"
         );
 
+        // Keep the persisted agent record in sync with what the agent actually
+        // reports. The registration-time max_vms/labels are bootstrap placeholders;
+        // the live status message is the truth, so the admin UI / CLI / DB query
+        // surfaces should reflect it. The in-memory registry is handled by
+        // agent_registry.register() below.
+        if let Some(mut stored) = self.auth_manager.get_agent(&agent_id).await {
+            let new_max = max_vms as u32;
+            let labels_changed = stored.labels != labels;
+            let max_changed = stored.max_vms != new_max;
+            if labels_changed || max_changed {
+                info!(
+                    agent_id = %agent_id,
+                    old_max = stored.max_vms,
+                    new_max = new_max,
+                    labels_changed = labels_changed,
+                    "Syncing persisted agent record from live status"
+                );
+                stored.max_vms = new_max;
+                stored.labels = labels.clone();
+                if let Err(e) = self.auth_manager.store_agent(stored).await {
+                    warn!(error = %e, agent_id = %agent_id,
+                          "Failed to persist updated agent record");
+                }
+            }
+        }
+
         // Create channel for outbound messages
         let (outbound_tx, outbound_rx) = mpsc::channel::<Result<CoordinatorMessage, Status>>(32);
 
@@ -545,8 +570,21 @@ async fn handle_agent_message(
                 vm_count = status.vms.len(),
                 "Agent status update"
             );
+            // Pass every config-derived field so live agent config changes
+            // propagate to the coordinator without needing a full reconnect.
+            let label_sets: Vec<Vec<String>> = status
+                .label_sets
+                .iter()
+                .map(|ls| ls.labels.clone())
+                .collect();
             registry
-                .update_status(agent_id, status.active_vms as usize)
+                .update_status(
+                    agent_id,
+                    status.active_vms as usize,
+                    status.max_vms as usize,
+                    status.labels.clone(),
+                    label_sets,
+                )
                 .await;
 
             // Reconcile persisted runner state against the agent's current VM list

@@ -244,19 +244,26 @@ async fn main() -> anyhow::Result<()> {
     // Initialize certificate store
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
 
-    // Build agent connector config
+    // Connection-only config. The advertised labels, label_sets, and max_vms
+    // travel in the first AgentStatus stream message (built by TartAgent), not
+    // here — so the coordinator always sees the current values from config.
     let agent_config = AgentConfig {
         coordinator_url: config.coordinator.url.clone(),
         coordinator_hostname: config.coordinator.hostname.clone(),
         registration_token: None, // Already registered, using stored certificates
         agent_type: "tart".to_string(),
-        labels: base_labels,
-        label_sets,
-        max_vms: config.tart.max_concurrent_vms,
     };
 
-    // Create agent instance
-    let agent = TartAgent::new(agent_config, cert_store, vm_manager.clone(), config.clone());
+    // Create agent instance. Pass the agent-level metadata (labels, label_sets)
+    // through; max_vms is read from config.tart.max_concurrent_vms in build_status.
+    let agent = TartAgent::new(
+        agent_config,
+        cert_store,
+        vm_manager.clone(),
+        config.clone(),
+        base_labels,
+        label_sets,
+    );
 
     // Spawn cleanup task
     let cleanup_vm_manager = vm_manager.clone();
@@ -326,15 +333,13 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         .and_then(|u| u.host_str().map(String::from))
         .unwrap_or_else(|| "localhost".to_string());
 
-    // 4. Build agent config for registration
+    // 4. Build agent config for registration. labels/max_vms aren't here —
+    // they're sent in the first AgentStatus when the daemon connects.
     let agent_config = kuiper_agent_lib::AgentConfig {
         coordinator_url: bundle.coordinator_url.clone(),
         coordinator_hostname: hostname.clone(),
         registration_token: Some(bundle.token),
         agent_type: "tart".to_string(),
-        labels: vec![],     // Empty for registration - user will set in config
-        label_sets: vec![], // Empty for registration - derived from image_mappings
-        max_vms: 2,         // Default - user will set in config
     };
 
     // 5. Connect and register
@@ -547,6 +552,10 @@ struct TartAgent {
     cert_store: AgentCertStore,
     vm_manager: Arc<VmManager>,
     config: Config,
+    /// Base labels this agent advertises (flat list; sent in AgentStatus).
+    labels: Vec<String>,
+    /// Capability sets derived from image_mappings (sent in AgentStatus).
+    label_sets: Vec<Vec<String>>,
 }
 
 async fn send_command_ack(
@@ -597,12 +606,16 @@ impl TartAgent {
         cert_store: AgentCertStore,
         vm_manager: Arc<VmManager>,
         config: Config,
+        labels: Vec<String>,
+        label_sets: Vec<Vec<String>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             agent_config,
             cert_store,
             vm_manager,
             config,
+            labels,
+            label_sets,
         })
     }
 
@@ -1034,7 +1047,6 @@ impl TartAgent {
 
         // Convert Vec<Vec<String>> to Vec<LabelSet>
         let label_sets: Vec<LabelSet> = self
-            .agent_config
             .label_sets
             .iter()
             .map(|ls| LabelSet { labels: ls.clone() })
@@ -1048,8 +1060,8 @@ impl TartAgent {
             agent_id: self.cert_store.get_agent_id().unwrap_or_default(),
             hostname,
             agent_type: self.agent_config.agent_type.clone(),
-            labels: self.agent_config.labels.clone(),
-            max_vms: self.agent_config.max_vms,
+            labels: self.labels.clone(),
+            max_vms: self.config.tart.max_concurrent_vms,
             label_sets,
         }
     }

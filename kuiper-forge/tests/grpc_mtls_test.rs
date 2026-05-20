@@ -223,8 +223,8 @@ async fn test_grpc_tls_connection_grpc_only_mode() {
             registration_token: "invalid-token".to_string(),
             hostname: "test-host".to_string(),
             agent_type: "tart".to_string(),
-            labels: vec!["test".to_string()],
-            max_vms: 2,
+            labels: vec![],
+            max_vms: 0,
         })
         .await;
 
@@ -260,7 +260,7 @@ async fn test_agent_service_requires_mtls_grpc_only_mode() {
             agent_id: "test-agent".to_string(),
             hostname: "test-host".to_string(),
             agent_type: "tart".to_string(),
-            labels: vec!["test".to_string()],
+            labels: vec![],
             max_vms: 2,
             label_sets: vec![],
         })),
@@ -305,8 +305,8 @@ async fn test_grpc_tls_connection_webhook_mode() {
             registration_token: "invalid-token".to_string(),
             hostname: "test-host".to_string(),
             agent_type: "tart".to_string(),
-            labels: vec!["test".to_string()],
-            max_vms: 2,
+            labels: vec![],
+            max_vms: 0,
         })
         .await;
 
@@ -341,7 +341,7 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
             agent_id: "test-agent".to_string(),
             hostname: "test-host".to_string(),
             agent_type: "tart".to_string(),
-            labels: vec!["test".to_string()],
+            labels: vec![],
             max_vms: 2,
             label_sets: vec![],
         })),

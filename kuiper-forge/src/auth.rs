@@ -356,15 +356,21 @@ impl AuthManager {
         Ok(reg_token)
     }
 
-    /// Exchange registration token for client certificate
+    /// Exchange registration token for client certificate.
+    ///
+    /// The agent's labels and max_vms are not parameters: those come from the
+    /// first AgentStatus stream message after the agent connects, and the
+    /// persisted record is synced from there. The record created here starts
+    /// with empty labels and zero max_vms — placeholders that live for the
+    /// brief window until the agent first connects with its real config.
     pub async fn exchange_token_for_certificate(
         &self,
         token: &str,
         hostname: &str,
         agent_type: &str,
-        labels: Vec<String>,
-        max_vms: u32,
     ) -> Result<AgentCertificate> {
+        let labels: Vec<String> = Vec::new();
+        let max_vms: u32 = 0;
         // 1. Consume the token (single-use)
         let reg_token = self
             .store
@@ -474,6 +480,13 @@ impl AuthManager {
     #[allow(dead_code)]
     pub async fn get_agent(&self, agent_id: &str) -> Option<RegisteredAgent> {
         self.store.get_agent(agent_id).await
+    }
+
+    /// Persist (upsert) an agent record. Used to keep the stored record in sync
+    /// with the live state an agent reports on stream connect — bootstrap values
+    /// from initial registration are otherwise never updated.
+    pub async fn store_agent(&self, agent: RegisteredAgent) -> Result<()> {
+        self.store.store_agent(agent).await
     }
 }
 

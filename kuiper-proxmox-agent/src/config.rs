@@ -312,7 +312,7 @@ impl Config {
                 template_vmid: 9000,
                 storage: "local-lvm".to_string(),
                 linked_clone: true,
-                concurrent_vms: 5,
+                concurrent_vms: default_concurrent_vms(),
                 ip_timeout_secs: default_ip_timeout(),
                 clone_timeout_secs: default_clone_timeout(),
                 template_mappings: vec![],
