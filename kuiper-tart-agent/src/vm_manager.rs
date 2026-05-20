@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use kuiper_agent_proto::VmInfo;
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::time::{Instant, timeout};
 
 /// Timeout for tart CLI commands (clone, stop, delete, ip).
@@ -92,6 +92,10 @@ pub struct VmManager {
     active_vms: Arc<RwLock<HashMap<String, VmState>>>,
     /// Directory for runner log files
     log_dir: PathBuf,
+    /// Notifier fired whenever the active VM set changes (insert/remove).
+    /// Used by the agent's main loop to push immediate AgentStatus updates so
+    /// the coordinator's view doesn't lag the agent's true capacity.
+    state_changed: Arc<Notify>,
 }
 
 impl VmManager {
@@ -104,7 +108,14 @@ impl VmManager {
             max_concurrent,
             active_vms: Arc::new(RwLock::new(HashMap::new())),
             log_dir,
+            state_changed: Arc::new(Notify::new()),
         }
+    }
+
+    /// Get the notifier for active-VM-set changes. Each call to `notified()`
+    /// awaits the next insert/remove on `active_vms`.
+    pub fn state_changes(&self) -> Arc<Notify> {
+        self.state_changed.clone()
     }
 
     /// Get the number of active VMs.
@@ -162,6 +173,7 @@ impl VmManager {
             .write()
             .await
             .insert(vm_name.to_string(), vm_state);
+        self.state_changed.notify_one();
 
         // Clone the VM
         match self.tart_clone(template, vm_name).await {
@@ -171,6 +183,7 @@ impl VmManager {
             Err(e) => {
                 // Remove from tracking on failure
                 self.active_vms.write().await.remove(vm_name);
+                self.state_changed.notify_one();
                 return Err(e);
             }
         }
@@ -186,6 +199,7 @@ impl VmManager {
                 // Cleanup on failure
                 let _ = self.tart_delete(vm_name).await;
                 self.active_vms.write().await.remove(vm_name);
+                self.state_changed.notify_one();
                 return Err(e);
             }
         }
@@ -338,6 +352,7 @@ impl VmManager {
 
         // Remove from tracking
         self.active_vms.write().await.remove(vm_id);
+        self.state_changed.notify_one();
 
         Ok(())
     }

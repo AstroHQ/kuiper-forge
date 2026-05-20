@@ -683,6 +683,29 @@ impl TartAgent {
         // when VMs complete so it can clean up the associated runners from GitHub
         let status_tx = tx.clone();
         let status_agent = Arc::clone(self);
+        // Push a status update on every VM-set transition (insert/remove). This
+        // closes the gap between accepting a CreateRunner and the coordinator's
+        // next periodic status tick — without it, the coordinator's `active_vms`
+        // view lags by up to 30s and reserve_slot accounting can leak via
+        // release-on-reject and cause retry storms.
+        let transition_tx = tx.clone();
+        let transition_agent = Arc::clone(self);
+        let transition_notify = self.vm_manager.state_changes();
+        let transition_handle = tokio::spawn(async move {
+            loop {
+                transition_notify.notified().await;
+                let status = transition_agent.build_status().await;
+                if transition_tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let status_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             // Skip the first tick since we already sent initial status
@@ -717,14 +740,16 @@ impl TartAgent {
                 Some(Err(e)) => {
                     error!("Error receiving message: {}", e);
                     status_handle.abort();
+                    transition_handle.abort();
                     return Err(Error::Status(e));
                 }
                 None => break,
             }
         }
 
-        // Clean up status task when stream closes
+        // Clean up status tasks when stream closes
         status_handle.abort();
+        transition_handle.abort();
 
         warn!("Stream closed by coordinator");
         Ok(())
@@ -750,9 +775,10 @@ impl TartAgent {
                     // Check capacity before acking - reject early if at max VMs
                     if agent.vm_manager.available_slots().await == 0 {
                         let max = agent.vm_manager.max_vms();
+                        let active = agent.vm_manager.active_count().await;
                         warn!(
                             "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                            cmd.vm_name, max, max
+                            cmd.vm_name, active, max
                         );
                         send_command_ack(
                             &tx,

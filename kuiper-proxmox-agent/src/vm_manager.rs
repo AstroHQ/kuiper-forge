@@ -14,7 +14,7 @@ use kuiper_proxmox_api::ProxmoxVEAPI;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, warn};
 
 /// Parameters for configuring a GitHub Actions runner on a VM.
@@ -82,6 +82,10 @@ pub struct VmManager {
     ssh_config: SshConfig,
     /// Currently active VMs
     active_vms: Arc<RwLock<HashMap<u32, VmInstance>>>,
+    /// Notifier fired whenever the active VM set changes (insert/remove).
+    /// Subscribers can use this to push immediate AgentStatus updates so the
+    /// coordinator's view doesn't lag the agent's true capacity.
+    state_changed: Arc<Notify>,
 }
 
 impl VmManager {
@@ -92,7 +96,14 @@ impl VmManager {
             vm_config,
             ssh_config,
             active_vms: Arc::new(RwLock::new(HashMap::new())),
+            state_changed: Arc::new(Notify::new()),
         }
+    }
+
+    /// Get the notifier for active-VM-set changes. Each call to `notified()`
+    /// awaits the next insert/remove on `active_vms`.
+    pub fn state_changes(&self) -> Arc<Notify> {
+        self.state_changed.clone()
     }
 
     /// Get the number of active VMs.
@@ -140,6 +151,7 @@ impl VmManager {
             created_at: Instant::now(),
         };
         self.active_vms.write().await.insert(vmid, instance.clone());
+        self.state_changed.notify_one();
 
         // Clone the template
         let storage = if self.vm_config.storage.is_empty() {
@@ -161,8 +173,10 @@ impl VmManager {
             .inspect_err(|_e| {
                 // Remove from tracking on failure
                 let vms = self.active_vms.clone();
+                let notify = self.state_changed.clone();
                 tokio::spawn(async move {
                     vms.write().await.remove(&vmid);
+                    notify.notify_one();
                 });
             })?;
 
@@ -173,8 +187,10 @@ impl VmManager {
             .await
             .inspect_err(|_e| {
                 let vms = self.active_vms.clone();
+                let notify = self.state_changed.clone();
                 tokio::spawn(async move {
                     vms.write().await.remove(&vmid);
+                    notify.notify_one();
                 });
             })?;
 
@@ -583,6 +599,7 @@ impl VmManager {
 
         // Remove from tracking
         self.active_vms.write().await.remove(&vmid);
+        self.state_changed.notify_one();
 
         info!("VM {} destroyed", vmid);
         Ok(())
