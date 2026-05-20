@@ -4,6 +4,10 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{debug, info, warn};
 
 /// Configuration for connecting to the coordinator.
+///
+/// Note: this is connection-only config. The agent's labels, label_sets, and
+/// max_vms aren't here because they're sent in the first AgentStatus stream
+/// message (built by the agent itself), not at registration time.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     /// gRPC URL of the coordinator (e.g., "https://coordinator.example.com:9443")
@@ -14,14 +18,6 @@ pub struct AgentConfig {
     pub registration_token: Option<String>,
     /// Agent type identifier ("tart" or "proxmox")
     pub agent_type: String,
-    /// Labels this agent advertises (legacy flat list)
-    pub labels: Vec<String>,
-    /// Label sets representing capabilities this agent can fulfill.
-    /// Each set is one capability (base labels + one image_mapping).
-    /// If non-empty, coordinator uses these instead of flat labels for matching.
-    pub label_sets: Vec<Vec<String>>,
-    /// Maximum concurrent VMs this agent can handle
-    pub max_vms: u32,
 }
 
 /// Handles connection to the coordinator with automatic registration and mTLS.
@@ -92,13 +88,16 @@ impl AgentConnector {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
 
-        // Call Register RPC
+        // Call Register RPC. labels/max_vms are vestigial wire fields — kept
+        // for backward compatibility with older coordinators, but sent as
+        // defaults. The authoritative values come from the first AgentStatus
+        // stream message, and the coordinator syncs its stored record from that.
         let request = tonic::Request::new(RegisterRequest {
             registration_token: token.to_string(),
             hostname,
             agent_type: self.config.agent_type.clone(),
-            labels: self.config.labels.clone(),
-            max_vms: self.config.max_vms,
+            labels: Vec::new(),
+            max_vms: 0,
         });
 
         let response = reg_client

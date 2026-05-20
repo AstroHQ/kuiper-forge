@@ -406,13 +406,52 @@ impl AgentRegistry {
         }
     }
 
-    /// Update agent status (active VMs, etc.)
-    pub async fn update_status(&self, agent_id: &str, active_vms: usize) {
+    /// Update agent status from a periodic AgentStatus message.
+    ///
+    /// Every field the agent reports (max_vms, labels, label_sets, active_vms)
+    /// is treated as the live truth — the agent's running config wins. This is
+    /// what lets a user edit the agent's config (e.g. `concurrent_vms`) and
+    /// have the coordinator pick up the new value without a full reconnect.
+    pub async fn update_status(
+        &self,
+        agent_id: &str,
+        active_vms: usize,
+        max_vms: usize,
+        labels: Vec<String>,
+        label_sets: Vec<Vec<String>>,
+    ) {
         if let Some(agent) = self.get(agent_id).await {
             let mut agent = agent.write().await;
             let old_active = agent.active_vms;
             let old_reserved = agent.reserved_slots;
+            let old_max = agent.max_vms;
             agent.active_vms = active_vms;
+
+            // Refresh fields that come from the agent's config so live config
+            // changes propagate. Logged at info! when max_vms changes since
+            // that affects scheduling capacity.
+            if old_max != max_vms {
+                info!(
+                    agent_id = %agent_id,
+                    old_max = old_max,
+                    new_max = max_vms,
+                    "Agent max_vms changed via status update"
+                );
+                agent.max_vms = max_vms;
+            }
+            if agent.labels != labels {
+                debug!(
+                    agent_id = %agent_id,
+                    old = ?agent.labels,
+                    new = ?labels,
+                    "Agent labels changed via status update"
+                );
+                agent.labels = labels;
+            }
+            if agent.label_sets != label_sets {
+                debug!(agent_id = %agent_id, "Agent label_sets changed via status update");
+                agent.label_sets = label_sets;
+            }
 
             if active_vms > old_active {
                 // VMs increased - some reserved slots materialized into active VMs.
@@ -727,7 +766,9 @@ mod tests {
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 2);
 
         // Update to have 2 active VMs (no capacity)
-        registry.update_status("agent_1", 2).await;
+        registry
+            .update_status("agent_1", 2, 2, vec!["macos".to_string()], vec![])
+            .await;
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
         // Should not find available agent now
@@ -762,22 +803,30 @@ mod tests {
 
         // Status update arrives with active_vms=0 (VMs not created yet)
         // This should NOT clear reserved_slots
-        registry.update_status("agent_1", 0).await;
+        registry
+            .update_status("agent_1", 0, 2, vec!["macos".to_string()], vec![])
+            .await;
 
         // Should still be at capacity
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
         // Now VM is created - status update with active_vms=1
         // Should reduce reserved_slots by 1
-        registry.update_status("agent_1", 1).await;
+        registry
+            .update_status("agent_1", 1, 2, vec!["macos".to_string()], vec![])
+            .await;
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0); // 1 active + 1 reserved = 2
 
         // Second VM created
-        registry.update_status("agent_1", 2).await;
+        registry
+            .update_status("agent_1", 2, 2, vec!["macos".to_string()], vec![])
+            .await;
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0); // 2 active + 0 reserved
 
         // VM destroyed
-        registry.update_status("agent_1", 1).await;
+        registry
+            .update_status("agent_1", 1, 2, vec!["macos".to_string()], vec![])
+            .await;
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 1); // 1 active
     }
 
@@ -896,7 +945,9 @@ mod tests {
         // or VM creation failed internally on agent side).
         // active_vms went 1→0, reserved_slots=1, total=0+1=1 <= max_vms=2: no clamp.
         // This is correct: the in-flight command may still produce a VM.
-        registry.update_status("agent_1", 0).await;
+        registry
+            .update_status("agent_1", 0, 2, vec!["macos".to_string()], vec![])
+            .await;
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 1);
 
         // Now test a scenario where reserved_slots exceed physical possibility:
@@ -909,18 +960,24 @@ mod tests {
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
         // Agent reports 1 active VM (one of our reserved slots materialized)
-        registry.update_status("agent_1", 1).await;
+        registry
+            .update_status("agent_1", 1, 2, vec!["macos".to_string()], vec![])
+            .await;
         // reserved=2-1=1, active=1, capacity=0
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
         // Agent suddenly reports 2 active VMs (maybe another external runner started)
-        registry.update_status("agent_1", 2).await;
+        registry
+            .update_status("agent_1", 2, 2, vec!["macos".to_string()], vec![])
+            .await;
         // reserved=1-1=0, active=2, capacity=0
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
         // Now VMs drop: active goes from 2→0. reserved_slots=0.
         // total = 0 + 0 = 0 <= max_vms=2. No clamping, capacity = 2.
-        registry.update_status("agent_1", 0).await;
+        registry
+            .update_status("agent_1", 0, 2, vec!["macos".to_string()], vec![])
+            .await;
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 2);
     }
 

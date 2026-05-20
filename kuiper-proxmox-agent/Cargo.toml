@@ -1,6 +1,6 @@
 [package]
 name = "kuiper-proxmox-agent"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -13,8 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 kuiper-agent-proto = { version = "0.2.0", path = "../kuiper-agent-proto" }
-kuiper-agent-lib = { version = "0.2.0", path = "../kuiper-agent-lib" }
-kuiper-proxmox-api = { version = "0.1.0", path = "../kuiper-proxmox-api" }
+kuiper-agent-lib = { version = "0.3.0", path = "../kuiper-agent-lib" }
+kuiper-proxmox-api = { version = "0.1.2", path = "../kuiper-proxmox-api" }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

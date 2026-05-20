@@ -244,19 +244,26 @@ async fn main() -> anyhow::Result<()> {
     // Initialize certificate store
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
 
-    // Build agent connector config
+    // Connection-only config. The advertised labels, label_sets, and max_vms
+    // travel in the first AgentStatus stream message (built by TartAgent), not
+    // here — so the coordinator always sees the current values from config.
     let agent_config = AgentConfig {
         coordinator_url: config.coordinator.url.clone(),
         coordinator_hostname: config.coordinator.hostname.clone(),
         registration_token: None, // Already registered, using stored certificates
         agent_type: "tart".to_string(),
-        labels: base_labels,
-        label_sets,
-        max_vms: config.tart.max_concurrent_vms,
     };
 
-    // Create agent instance
-    let agent = TartAgent::new(agent_config, cert_store, vm_manager.clone(), config.clone());
+    // Create agent instance. Pass the agent-level metadata (labels, label_sets)
+    // through; max_vms is read from config.tart.max_concurrent_vms in build_status.
+    let agent = TartAgent::new(
+        agent_config,
+        cert_store,
+        vm_manager.clone(),
+        config.clone(),
+        base_labels,
+        label_sets,
+    );
 
     // Spawn cleanup task
     let cleanup_vm_manager = vm_manager.clone();
@@ -326,15 +333,13 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         .and_then(|u| u.host_str().map(String::from))
         .unwrap_or_else(|| "localhost".to_string());
 
-    // 4. Build agent config for registration
+    // 4. Build agent config for registration. labels/max_vms aren't here —
+    // they're sent in the first AgentStatus when the daemon connects.
     let agent_config = kuiper_agent_lib::AgentConfig {
         coordinator_url: bundle.coordinator_url.clone(),
         coordinator_hostname: hostname.clone(),
         registration_token: Some(bundle.token),
         agent_type: "tart".to_string(),
-        labels: vec![],     // Empty for registration - user will set in config
-        label_sets: vec![], // Empty for registration - derived from image_mappings
-        max_vms: 2,         // Default - user will set in config
     };
 
     // 5. Connect and register
@@ -547,6 +552,10 @@ struct TartAgent {
     cert_store: AgentCertStore,
     vm_manager: Arc<VmManager>,
     config: Config,
+    /// Base labels this agent advertises (flat list; sent in AgentStatus).
+    labels: Vec<String>,
+    /// Capability sets derived from image_mappings (sent in AgentStatus).
+    label_sets: Vec<Vec<String>>,
 }
 
 async fn send_command_ack(
@@ -597,12 +606,16 @@ impl TartAgent {
         cert_store: AgentCertStore,
         vm_manager: Arc<VmManager>,
         config: Config,
+        labels: Vec<String>,
+        label_sets: Vec<Vec<String>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             agent_config,
             cert_store,
             vm_manager,
             config,
+            labels,
+            label_sets,
         })
     }
 
@@ -670,6 +683,29 @@ impl TartAgent {
         // when VMs complete so it can clean up the associated runners from GitHub
         let status_tx = tx.clone();
         let status_agent = Arc::clone(self);
+        // Push a status update on every VM-set transition (insert/remove). This
+        // closes the gap between accepting a CreateRunner and the coordinator's
+        // next periodic status tick — without it, the coordinator's `active_vms`
+        // view lags by up to 30s and reserve_slot accounting can leak via
+        // release-on-reject and cause retry storms.
+        let transition_tx = tx.clone();
+        let transition_agent = Arc::clone(self);
+        let transition_notify = self.vm_manager.state_changes();
+        let transition_handle = tokio::spawn(async move {
+            loop {
+                transition_notify.notified().await;
+                let status = transition_agent.build_status().await;
+                if transition_tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let status_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             // Skip the first tick since we already sent initial status
@@ -704,14 +740,16 @@ impl TartAgent {
                 Some(Err(e)) => {
                     error!("Error receiving message: {}", e);
                     status_handle.abort();
+                    transition_handle.abort();
                     return Err(Error::Status(e));
                 }
                 None => break,
             }
         }
 
-        // Clean up status task when stream closes
+        // Clean up status tasks when stream closes
         status_handle.abort();
+        transition_handle.abort();
 
         warn!("Stream closed by coordinator");
         Ok(())
@@ -737,9 +775,10 @@ impl TartAgent {
                     // Check capacity before acking - reject early if at max VMs
                     if agent.vm_manager.available_slots().await == 0 {
                         let max = agent.vm_manager.max_vms();
+                        let active = agent.vm_manager.active_count().await;
                         warn!(
                             "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                            cmd.vm_name, max, max
+                            cmd.vm_name, active, max
                         );
                         send_command_ack(
                             &tx,
@@ -1034,7 +1073,6 @@ impl TartAgent {
 
         // Convert Vec<Vec<String>> to Vec<LabelSet>
         let label_sets: Vec<LabelSet> = self
-            .agent_config
             .label_sets
             .iter()
             .map(|ls| LabelSet { labels: ls.clone() })
@@ -1048,8 +1086,8 @@ impl TartAgent {
             agent_id: self.cert_store.get_agent_id().unwrap_or_default(),
             hostname,
             agent_type: self.agent_config.agent_type.clone(),
-            labels: self.agent_config.labels.clone(),
-            max_vms: self.agent_config.max_vms,
+            labels: self.labels.clone(),
+            max_vms: self.config.tart.max_concurrent_vms,
             label_sets,
         }
     }

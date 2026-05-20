@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fmt::Debug;
 use std::process::Command;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Deserialize)]
 struct VmResponse {
@@ -497,15 +497,18 @@ impl ProxmoxVEAPI {
 
             match status.status.as_str() {
                 "stopped" => {
-                    if let Some(exit) = &status.exitstatus {
-                        if exit == "OK" {
+                    // Proxmox tasks report an `exitstatus` string. "OK" is a clean
+                    // success; "WARNINGS: N" means the task *succeeded* but emitted
+                    // warnings (e.g. the benign UEFI 2023 cert notice on VM start).
+                    // Only a non-OK, non-WARNINGS status is an actual failure.
+                    match status.exitstatus.as_deref() {
+                        Some("OK") | None => return Ok(()),
+                        Some(exit) if exit.starts_with("WARNINGS:") => {
+                            warn!("Task {upid} completed with warnings: {exit}");
                             return Ok(());
-                        } else {
-                            return Err(Error::TaskFailed(exit.clone()));
                         }
+                        Some(exit) => return Err(Error::TaskFailed(exit.to_string())),
                     }
-                    // No exitstatus but stopped - assume success
-                    return Ok(());
                 }
                 "running" => {
                     tokio::time::sleep(Duration::from_millis(500)).await;

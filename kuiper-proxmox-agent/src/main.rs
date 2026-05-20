@@ -198,15 +198,13 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         .and_then(|u| u.host_str().map(String::from))
         .unwrap_or_else(|| "localhost".to_string());
 
-    // 4. Build agent config for registration
+    // 4. Build agent config for registration. labels/max_vms aren't here —
+    // they're sent in the first AgentStatus when the daemon connects.
     let agent_config = kuiper_agent_lib::AgentConfig {
         coordinator_url: bundle.coordinator_url.clone(),
         coordinator_hostname: hostname.clone(),
         registration_token: Some(bundle.token),
         agent_type: "proxmox".to_string(),
-        labels: vec![],     // Empty for registration - user will set in config
-        label_sets: vec![], // Empty for registration - user will set in config
-        max_vms: 5,         // Default - user will set in config
     };
 
     // 5. Connect and register
@@ -380,18 +378,13 @@ impl ProxmoxAgent {
 
     /// Connect to coordinator and run the agent loop.
     async fn connect_and_run(self: &Arc<Self>) -> Result<()> {
-        // Create agent config for connector
-        // Use registration token from CLI args (for first-time registration)
-        // For proxmox, label_sets is just a single set containing the configured labels
-        let labels = self.config.agent.labels.clone();
+        // Connection-only config. labels and max_vms travel in the first
+        // AgentStatus stream message (see build_status), not here.
         let agent_config = LibAgentConfig {
             coordinator_url: self.config.coordinator.url.clone(),
             coordinator_hostname: self.config.coordinator.hostname.clone(),
             registration_token: None, // Already registered, using stored certificates
             agent_type: "proxmox".to_string(),
-            labels: labels.clone(),
-            label_sets: vec![labels], // Single capability set
-            max_vms: self.config.vm.concurrent_vms,
         };
 
         // Connect to coordinator using stored cert_store
@@ -460,6 +453,30 @@ impl ProxmoxAgent {
             }
         });
 
+        // Push a status update on every VM-set transition (insert/remove). This
+        // closes the gap between accepting a CreateRunner and the coordinator's
+        // next periodic status tick — without it, the coordinator's `active_vms`
+        // view lags by up to 30s, and reserve_slot accounting can leak via
+        // release-on-reject and cause retry storms.
+        let transition_tx = tx.clone();
+        let transition_agent = Arc::clone(self);
+        let transition_notify = self.vm_manager.state_changes();
+        let transition_handle = tokio::spawn(async move {
+            loop {
+                transition_notify.notified().await;
+                let status = transition_agent.build_status().await;
+                if transition_tx
+                    .send(AgentMessage {
+                        payload: Some(AgentPayload::Status(status)),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
         // Process messages from coordinator
         while let Some(msg) = inbound.message().await.transpose() {
             match msg {
@@ -470,14 +487,16 @@ impl ProxmoxAgent {
                 Err(e) => {
                     error!("Stream error: {}", e);
                     status_handle.abort();
+                    transition_handle.abort();
                     return Err(Error::Grpc(e));
                 }
             }
         }
         info!("Stream closed by coordinator");
 
-        // Clean up status task when stream closes
+        // Clean up status tasks when stream closes
         status_handle.abort();
+        transition_handle.abort();
 
         Ok(())
     }
@@ -506,9 +525,10 @@ impl ProxmoxAgent {
                 // Check capacity before acking - reject early if at max VMs
                 if !self.vm_manager.has_capacity().await {
                     let max = self.config.vm.concurrent_vms;
+                    let active = self.vm_manager.active_count().await;
                     warn!(
                         "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                        cmd.vm_name, max, max
+                        cmd.vm_name, active, max
                     );
                     send_command_ack(
                         tx,
