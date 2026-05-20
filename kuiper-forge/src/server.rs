@@ -211,11 +211,7 @@ impl RegistrationService for RegistrationServiceImpl {
         // and the coordinator syncs its persisted record from that live value.
         let cert = self
             .auth_manager
-            .exchange_token_for_certificate(
-                &req.registration_token,
-                &req.hostname,
-                &req.agent_type,
-            )
+            .exchange_token_for_certificate(&req.registration_token, &req.hostname, &req.agent_type)
             .await
             .map_err(|e| {
                 warn!(error = %e, "Registration failed");
