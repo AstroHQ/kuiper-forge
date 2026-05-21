@@ -42,6 +42,27 @@ struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
+    /// Run with system daemon (FHS) paths: config in /etc, logs in /var/log,
+    /// data/certs in /var/lib. Without this, per-user directories are used.
+    /// Individual paths (--config, --log-dir) still take precedence.
+    ///
+    /// As a flag it needs no value (`--system`); the env var accepts the usual
+    /// truthy values (1/true/yes/on), so `KUIPER_PROXMOX_AGENT_SYSTEM=1` works.
+    #[arg(
+        long,
+        env = "KUIPER_PROXMOX_AGENT_SYSTEM",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        num_args = 0..=1,
+        require_equals = true,
+        default_value_t = false,
+        default_missing_value = "true",
+    )]
+    system: bool,
+
+    /// Directory for rotating log files. Overrides the default chosen by --system.
+    #[arg(long, env = "KUIPER_PROXMOX_AGENT_LOG_DIR")]
+    log_dir: Option<PathBuf>,
+
     /// Debug mode: skip VM deletion on runner failure and exit the agent,
     /// leaving VMs running so you can SSH in and inspect.
     #[arg(long)]
@@ -51,6 +72,37 @@ struct Args {
     command: Option<Commands>,
 }
 
+impl Args {
+    /// Resolve the log directory: explicit `--log-dir`, else the system or
+    /// per-user default depending on `--system`.
+    fn resolve_log_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.log_dir {
+            dir.clone()
+        } else if self.system {
+            Config::system_log_dir()
+        } else {
+            Config::default_log_dir()
+        }
+    }
+
+    /// Resolve an explicit config path to load. Returns `None` to fall back to
+    /// the default search paths (per-user layout); `--system` pins it to /etc.
+    fn resolve_config_path(&self) -> Option<PathBuf> {
+        self.config
+            .clone()
+            .or_else(|| self.system.then(Config::system_config_path))
+    }
+
+    /// Data directory (used for certs during registration).
+    fn data_dir(&self) -> PathBuf {
+        if self.system {
+            Config::system_data_dir()
+        } else {
+            Config::default_data_dir()
+        }
+    }
+}
+
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
     /// Register this agent with the coordinator using a registration bundle
@@ -58,34 +110,54 @@ enum Commands {
         /// Registration bundle token from coordinator (kfr1_...)
         bundle: String,
     },
+    /// Print a systemd service unit for running this agent on startup.
+    ///
+    /// The unit references this binary's current path. It is written to stdout
+    /// only (status messages go to stderr) so it can be redirected straight to
+    /// the desired location, e.g.:
+    ///
+    ///   kuiper-proxmox-agent generate-service > /etc/systemd/system/kuiper-proxmox-agent.service
+    GenerateService,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let data_dir = Config::default_data_dir();
+
+    // Generate the systemd unit before initializing logging so the unit file is
+    // the only thing on stdout and can be redirected to a file cleanly.
+    if let Some(Commands::GenerateService) = args.command {
+        return cmd_generate_service(args.config.as_deref(), args.system);
+    }
 
     // Initialize logging with file output (retention applied after config load)
     init_logging(
-        &data_dir,
+        &args.resolve_log_dir(),
         config::LoggingConfig::default().retention_days as usize,
     )?;
 
     // Handle subcommands
-    if let Some(command) = args.command {
+    if let Some(command) = &args.command {
         match command {
             Commands::Register { bundle } => {
-                let config_path = args.config.unwrap_or_else(Config::default_config_path);
-                return cmd_register(&bundle, &config_path).await;
+                let config_path = args.config.clone().unwrap_or_else(|| {
+                    if args.system {
+                        Config::system_config_path()
+                    } else {
+                        Config::default_config_path()
+                    }
+                });
+                return cmd_register(bundle, &config_path, args.data_dir(), args.system).await;
             }
+            Commands::GenerateService => unreachable!("handled before logging init"),
         }
     }
 
     info!("Starting kuiper-proxmox-agent");
 
     // Normal agent mode - load existing config
-    let config = match &args.config {
-        Some(path) => Config::load(path)?,
+    let config = match args.resolve_config_path() {
+        Some(path) => Config::load(&path)?,
         None => Config::load_default()?,
     };
 
@@ -168,7 +240,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Handle the register subcommand to set up agent registration with the coordinator.
-async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<()> {
+///
+/// `data_dir` is where certificates are stored; the caller picks the per-user or
+/// system (`--system`) location.
+async fn cmd_register(
+    bundle_token: &str,
+    config_path: &Path,
+    data_dir: PathBuf,
+    system: bool,
+) -> anyhow::Result<()> {
     println!("Registering agent with coordinator...\n");
 
     // 1. Parse bundle
@@ -178,7 +258,6 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
     println!("Coordinator: {}", bundle.coordinator_url);
 
     // 2. Create cert store and save server trust
-    let data_dir = Config::default_data_dir();
     let certs_dir = data_dir.join("certs");
     std::fs::create_dir_all(&certs_dir)?;
 
@@ -207,11 +286,15 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         agent_type: "proxmox".to_string(),
     };
 
-    // 5. Connect and register
+    // 5. Connect and register.
+    // Use register() (not connect()): a `register` invocation always re-registers
+    // with this token instead of silently reusing an existing (possibly revoked)
+    // cert. The new identity is written only on success, so a bad/expired token
+    // leaves any existing certificate untouched.
     println!("Connecting to coordinator...");
     let mut connector = kuiper_agent_lib::AgentConnector::new(agent_config, cert_store.clone());
     let _client = connector
-        .connect()
+        .register()
         .await
         .map_err(|e| anyhow::anyhow!("Registration failed: {e}"))?;
 
@@ -227,6 +310,13 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
     let config = Config::generate_template(bundle.coordinator_url, hostname, certs_dir);
 
     config.save(config_path)?;
+    // Append a commented reference so the generated config documents the
+    // (non-obvious) label-based template selection feature.
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().append(true).open(config_path)?;
+        f.write_all(config::TEMPLATE_MAPPINGS_HELP.as_bytes())?;
+    }
     println!("✓ Configuration saved\n");
 
     // 7. Print next steps
@@ -237,12 +327,112 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
     println!("     • vm.* settings (template ID, resources)");
     println!("     • ssh.* settings (user, private key path)");
     println!("  2. Ensure VM template exists in Proxmox");
-    println!("  3. Start agent: kuiper-proxmox-agent\n");
+    let start_cmd = if system {
+        "kuiper-proxmox-agent --system"
+    } else {
+        "kuiper-proxmox-agent"
+    };
+    println!("  3. Start agent: {start_cmd}\n");
 
     println!("Certificate location: {}", cert_store.base_dir().display());
     println!("Config location:      {}", config_path.display());
 
     Ok(())
+}
+
+/// Handle the generate-service subcommand: print a systemd unit to stdout.
+///
+/// The unit's `ExecStart` uses this binary's own path (via [`std::env::current_exe`])
+/// so the generated file points at wherever the agent is currently installed. The
+/// unit is printed to stdout and all human-facing guidance to stderr, so the output
+/// can be redirected directly into a unit file.
+fn cmd_generate_service(config: Option<&Path>, system: bool) -> anyhow::Result<()> {
+    let binary_path = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to determine current binary path: {e}"))?;
+
+    // Resolve any explicit --config to an absolute path so the unit isn't tied to
+    // the install-time working directory.
+    let config_path = config.map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+
+    let unit = generate_systemd_unit(&binary_path, config_path.as_deref(), system);
+    print!("{unit}");
+
+    eprintln!("# Generated systemd unit for kuiper-proxmox-agent.");
+    eprintln!("# Binary: {}", binary_path.display());
+    if system {
+        eprintln!("# Mode:   --system (config /etc, logs /var/log, data /var/lib)");
+    } else if let Some(cfg) = &config_path {
+        eprintln!("# Config: {}", cfg.display());
+    } else {
+        eprintln!("# Config: /etc/kuiper-proxmox-agent/config.toml");
+        eprintln!("#         (tip: pass --system for full FHS daemon paths)");
+    }
+    eprintln!("#");
+    eprintln!("# Install it with, for example:");
+    eprintln!(
+        "#   kuiper-proxmox-agent generate-service > /etc/systemd/system/kuiper-proxmox-agent.service"
+    );
+    eprintln!("#   systemctl daemon-reload");
+    eprintln!("#   systemctl enable --now kuiper-proxmox-agent");
+
+    Ok(())
+}
+
+/// Build a systemd service unit for running the agent on startup.
+///
+/// When `system` is set the unit runs the agent with `--system` (FHS paths) and
+/// declares `LogsDirectory`/`StateDirectory` so systemd creates `/var/log` and
+/// `/var/lib` entries owned by the service user. Otherwise it passes an explicit
+/// `--config` (the given path, or the conventional `/etc` location).
+fn generate_systemd_unit(binary_path: &Path, config: Option<&Path>, system: bool) -> String {
+    let binary = binary_path.display();
+
+    // Build the ExecStart argument list.
+    let mut exec_args = String::new();
+    if system {
+        exec_args.push_str(" --system");
+    }
+    // In --system mode the daemon already resolves config from /etc; only append
+    // --config when the operator pinned a specific path (or in non-system mode).
+    if let Some(cfg) = config {
+        exec_args.push_str(&format!(" --config {}", cfg.display()));
+    } else if !system {
+        exec_args.push_str(" --config /etc/kuiper-proxmox-agent/config.toml");
+    }
+
+    // systemd-managed runtime directories (only meaningful in system mode).
+    let runtime_dirs = if system {
+        "# systemd creates these (owned by the service user) on start:\n\
+         LogsDirectory=kuiper-proxmox-agent\n\
+         StateDirectory=kuiper-proxmox-agent\n"
+    } else {
+        ""
+    };
+
+    format!(
+        r#"[Unit]
+Description=Kuiper Proxmox Agent (ephemeral CI runner VMs)
+Documentation=https://github.com/AstroHQ/kuiper-forge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={binary}{exec_args}
+Restart=on-failure
+RestartSec=5
+# The agent destroys all managed VMs on SIGTERM; give cleanup time to finish.
+TimeoutStopSec=120
+{runtime_dirs}# Recommended: run as a dedicated, non-root user with access to the config and
+# certificates. Create one (e.g. `useradd --system --no-create-home kuiper`) and
+# uncomment the lines below.
+#User=kuiper
+#Group=kuiper
+
+[Install]
+WantedBy=multi-user.target
+"#,
+    )
 }
 
 /// Wait for a shutdown signal (SIGTERM or SIGINT/Ctrl-C).
@@ -781,9 +971,8 @@ impl ProxmoxAgent {
 }
 
 /// Initialize logging with file output and stdout.
-fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
-    let log_dir = data_dir.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
+fn init_logging(log_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
+    std::fs::create_dir_all(log_dir)?;
 
     // Create a daily rotating file appender (e.g., kuiper-proxmox-agent.2026-01-15.log)
     let file_appender = RollingFileAppender::builder()
@@ -791,7 +980,7 @@ fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
         .filename_prefix("kuiper-proxmox-agent")
         .filename_suffix("log")
         .max_log_files(retention_days)
-        .build(&log_dir)?;
+        .build(log_dir)?;
 
     // Non-blocking writer for the file
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -819,4 +1008,62 @@ fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
 
     info!("Logging to: {}", log_dir.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BIN: &str = "/usr/local/bin/kuiper-proxmox-agent";
+
+    /// Extract the `ExecStart=` line from a unit (the `--system`/`--config`
+    /// comments elsewhere in the file would otherwise foil substring checks).
+    fn exec_start(unit: &str) -> &str {
+        unit.lines()
+            .find(|l| l.starts_with("ExecStart="))
+            .expect("unit has an ExecStart line")
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_explicit_config() {
+        let unit = generate_systemd_unit(Path::new(BIN), Some(Path::new("/srv/agent.toml")), false);
+
+        assert_eq!(
+            exec_start(&unit),
+            format!("ExecStart={BIN} --config /srv/agent.toml")
+        );
+        assert!(!unit.contains("LogsDirectory"));
+        assert!(unit.contains("WantedBy=multi-user.target"));
+        assert!(unit.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_defaults_to_etc_config() {
+        // No --config and not --system: pin the conventional /etc path explicitly.
+        let unit = generate_systemd_unit(Path::new(BIN), None, false);
+        assert_eq!(
+            exec_start(&unit),
+            format!("ExecStart={BIN} --config /etc/kuiper-proxmox-agent/config.toml")
+        );
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_system_mode() {
+        // --system uses FHS paths internally, so no --config is emitted, and
+        // systemd manages the log/state directories.
+        let unit = generate_systemd_unit(Path::new(BIN), None, true);
+        assert_eq!(exec_start(&unit), format!("ExecStart={BIN} --system"));
+        assert!(unit.contains("LogsDirectory=kuiper-proxmox-agent"));
+        assert!(unit.contains("StateDirectory=kuiper-proxmox-agent"));
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_system_mode_with_explicit_config() {
+        // An explicit --config is honored even alongside --system.
+        let unit = generate_systemd_unit(Path::new(BIN), Some(Path::new("/srv/agent.toml")), true);
+        assert_eq!(
+            exec_start(&unit),
+            format!("ExecStart={BIN} --system --config /srv/agent.toml")
+        );
+    }
 }

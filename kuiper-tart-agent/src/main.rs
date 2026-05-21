@@ -342,11 +342,15 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         agent_type: "tart".to_string(),
     };
 
-    // 5. Connect and register
+    // 5. Connect and register.
+    // Use register() (not connect()): a `register` invocation always re-registers
+    // with this token instead of silently reusing an existing (possibly revoked)
+    // cert. The new identity is written only on success, so a bad/expired token
+    // leaves any existing certificate untouched.
     println!("Connecting to coordinator...");
     let mut connector = kuiper_agent_lib::AgentConnector::new(agent_config, cert_store.clone());
     let _client = connector
-        .connect()
+        .register()
         .await
         .map_err(|e| anyhow::anyhow!("Registration failed: {e}"))?;
 

@@ -93,8 +93,10 @@ pub struct VmConfig {
     /// Timeout in seconds for clone operation
     #[serde(default = "default_clone_timeout")]
     pub clone_timeout_secs: u64,
-    /// Template mappings for label-based selection (first match wins)
-    #[serde(default)]
+    /// Template mappings for label-based selection (first match wins).
+    /// Skipped when empty so the generated config can carry a commented example
+    /// (see `TEMPLATE_MAPPINGS_HELP`) without a duplicate-key TOML conflict.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub template_mappings: Vec<TemplateMapping>,
     /// GitHub Actions runner version to install (e.g., "2.321.0")
     #[serde(default = "default_runner_version")]
@@ -120,6 +122,35 @@ fn default_clone_timeout() -> u64 {
 fn default_runner_version() -> String {
     "latest".to_string()
 }
+
+/// Commented reference appended to the config that `register` generates, so the
+/// (non-obvious) label-based template selection is discoverable without digging
+/// up the full example file. All lines are comments; uncomment to use.
+pub const TEMPLATE_MAPPINGS_HELP: &str = r#"
+# -----------------------------------------------------------------------------
+# Optional: serve multiple VM templates from one agent
+# -----------------------------------------------------------------------------
+# Every runner clones `vm.template_vmid` by default. To pick a different Proxmox
+# template per job, add one or more [[vm.template_mappings]] rules below. A rule
+# matches when ALL of its `labels` are present in the job's labels (case-
+# insensitive); the first match wins, otherwise `vm.template_vmid` is used.
+#
+# IMPORTANT: the coordinator only routes a job to this agent when the job's
+# labels are a subset of `agent.labels` above. So every label used in a mapping
+# must also appear in `agent.labels` — set `agent.labels` to the union of all
+# labels this agent should handle, e.g.:
+#   agent.labels = ["self-hosted", "Windows", "2019", "2022"]
+#
+# [[vm.template_mappings]]
+# labels = ["Windows", "2022"]
+# template_vmid = 9001
+#
+# [[vm.template_mappings]]
+# labels = ["Windows", "2019"]
+# template_vmid = 9002
+#
+# Full reference: examples/kuiper-proxmox-agent-config.toml
+"#;
 
 /// SSH configuration for connecting to VMs.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -277,12 +308,36 @@ impl Config {
             .join("kuiper-proxmox-agent")
     }
 
+    /// Get the default log directory for the per-user layout (`<data_dir>/logs`).
+    pub fn default_log_dir() -> PathBuf {
+        Self::default_data_dir().join("logs")
+    }
+
     /// Get the default configuration file path.
     pub fn default_config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("kuiper-proxmox-agent")
             .join("config.toml")
+    }
+
+    /// System (FHS) config path used when running as a `--system` daemon.
+    pub fn system_config_path() -> PathBuf {
+        PathBuf::from("/etc/kuiper-proxmox-agent/config.toml")
+    }
+
+    /// System (FHS) data directory (certs, etc.) for `--system` daemon mode.
+    ///
+    /// Matches systemd's `StateDirectory=kuiper-proxmox-agent`.
+    pub fn system_data_dir() -> PathBuf {
+        PathBuf::from("/var/lib/kuiper-proxmox-agent")
+    }
+
+    /// System (FHS) log directory for `--system` daemon mode.
+    ///
+    /// Matches systemd's `LogsDirectory=kuiper-proxmox-agent`.
+    pub fn system_log_dir() -> PathBuf {
+        PathBuf::from("/var/log/kuiper-proxmox-agent")
     }
 
     /// Generate a template configuration for initial registration.
@@ -444,6 +499,35 @@ fn expand_tilde(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_generated_config_documents_template_mappings() {
+        let config = Config::generate_template(
+            "https://coordinator.example.com:9443".to_string(),
+            "coordinator.example.com".to_string(),
+            PathBuf::from("/tmp/certs"),
+        );
+        let mut content = toml::to_string_pretty(&config).expect("serialize");
+
+        // Empty mappings must be omitted, otherwise uncommenting the appended
+        // [[vm.template_mappings]] example would be a duplicate-key TOML error.
+        assert!(
+            !content.contains("template_mappings"),
+            "empty template_mappings should not be serialized:\n{content}"
+        );
+
+        // The generated file carries the commented help, and still parses with it.
+        content.push_str(TEMPLATE_MAPPINGS_HELP);
+        let _: Config = toml::from_str(&content).expect("generated config + help parses");
+
+        // And the example mappings are valid TOML once uncommented.
+        let uncommented = content.replace("# [[vm.template_mappings]]", "[[vm.template_mappings]]");
+        let uncommented = uncommented
+            .replace("# labels = ", "labels = ")
+            .replace("# template_vmid = ", "template_vmid = ");
+        let parsed: Config = toml::from_str(&uncommented).expect("uncommented mappings parse");
+        assert_eq!(parsed.vm.template_mappings.len(), 2);
+    }
 
     #[test]
     fn test_parse_minimal_config() {

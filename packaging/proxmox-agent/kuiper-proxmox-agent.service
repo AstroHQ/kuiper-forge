@@ -1,0 +1,28 @@
+[Unit]
+Description=Kuiper Proxmox Agent (ephemeral CI runner VMs)
+Documentation=https://github.com/AstroHQ/kuiper-forge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --system uses FHS paths: config /etc, logs /var/log, data/certs /var/lib.
+ExecStart=/usr/bin/kuiper-proxmox-agent --system
+Restart=on-failure
+RestartSec=5
+# The agent destroys all managed VMs on SIGTERM; give cleanup time to finish.
+TimeoutStopSec=120
+
+# Run as the dedicated system user created by the package's postinstall script.
+User=kuiper
+Group=kuiper
+
+# systemd creates and owns these for the service user. They match the --system
+# paths (/var/lib/kuiper-proxmox-agent and /var/log/kuiper-proxmox-agent).
+StateDirectory=kuiper-proxmox-agent
+StateDirectoryMode=0750
+LogsDirectory=kuiper-proxmox-agent
+LogsDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
