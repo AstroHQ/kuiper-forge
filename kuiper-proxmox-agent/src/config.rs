@@ -74,6 +74,12 @@ pub struct TemplateMapping {
     pub template_vmid: u32,
 }
 
+impl kuiper_agent_lib::labels::LabelMapping for TemplateMapping {
+    fn labels(&self) -> &[String] {
+        &self.labels
+    }
+}
+
 /// VM configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VmConfig {
@@ -135,11 +141,11 @@ pub const TEMPLATE_MAPPINGS_HELP: &str = r#"
 # matches when ALL of its `labels` are present in the job's labels (case-
 # insensitive); the first match wins, otherwise `vm.template_vmid` is used.
 #
-# IMPORTANT: the coordinator only routes a job to this agent when the job's
-# labels are a subset of `agent.labels` above. So every label used in a mapping
-# must also appear in `agent.labels` — set `agent.labels` to the union of all
-# labels this agent should handle, e.g.:
-#   agent.labels = ["self-hosted", "Windows", "2019", "2022"]
+# Each mapping is also advertised to the coordinator as a capability: the agent
+# offers `agent.labels` PLUS each mapping's labels as a distinct label set, so
+# jobs for any mapped template route here automatically. Keep `agent.labels` as
+# the shared/base labels (e.g. ["self-hosted"]) and put the distinguishing
+# labels in the mappings — no need to repeat them in `agent.labels`.
 #
 # [[vm.template_mappings]]
 # labels = ["Windows", "2022"]

@@ -26,7 +26,6 @@ mod install;
 mod ssh;
 mod vm_manager;
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -192,8 +191,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Coordinator: {}", config.coordinator.url);
     info!("Max concurrent VMs: {}", config.tart.max_concurrent_vms);
 
-    // Build label_sets: each set is base_labels + one image_mapping's labels
-    // This represents the capabilities this agent can fulfill
+    // Build label_sets: each set is base_labels + one image_mapping's labels,
+    // representing the capabilities this agent can fulfill (shared with the
+    // proxmox agent via kuiper_agent_lib::labels so the two can't drift).
     let base_labels: Vec<String> = config
         .agent
         .labels
@@ -201,27 +201,8 @@ async fn main() -> anyhow::Result<()> {
         .map(|l| l.to_lowercase())
         .collect();
 
-    let label_sets: Vec<Vec<String>> = if config.tart.image_mappings.is_empty() {
-        // No image mappings - just use base labels as a single capability
-        vec![base_labels.clone()]
-    } else {
-        // Each image_mapping defines a capability: base_labels + mapping labels
-        config
-            .tart
-            .image_mappings
-            .iter()
-            .map(|mapping| {
-                let mut labels = base_labels.clone();
-                for label in &mapping.labels {
-                    let lower = label.to_lowercase();
-                    if !labels.iter().any(|l| l.eq_ignore_ascii_case(&lower)) {
-                        labels.push(lower);
-                    }
-                }
-                labels
-            })
-            .collect()
-    };
+    let label_sets: Vec<Vec<String>> =
+        kuiper_agent_lib::labels::label_sets(&base_labels, &config.tart.image_mappings);
 
     info!(
         "Label sets: {:?} (base: {:?}, image_mappings: {:?})",
@@ -840,33 +821,31 @@ impl TartAgent {
 
     /// Select the appropriate VM image based on job labels.
     ///
-    /// Iterates through `image_mappings` in order and returns the image from the first
-    /// mapping where ALL mapping labels are present in the job labels (case-insensitive).
-    /// Falls back to `base_image` if no mapping matches.
+    /// Returns the image of the first mapping whose capability set (agent labels
+    /// plus that mapping's labels) covers the job's labels, mirroring how the
+    /// coordinator routes. Falls back to `base_image` if no mapping covers the
+    /// job. See [`kuiper_agent_lib::labels::select_mapping`].
     fn select_image(&self, job_labels: &[String]) -> String {
-        let job_labels_lower: HashSet<String> =
-            job_labels.iter().map(|l| l.to_lowercase()).collect();
-
-        for mapping in &self.config.tart.image_mappings {
-            let all_match = mapping
-                .labels
-                .iter()
-                .all(|ml| job_labels_lower.contains(&ml.to_lowercase()));
-            if all_match {
+        match kuiper_agent_lib::labels::select_mapping(
+            &self.config.agent.labels,
+            &self.config.tart.image_mappings,
+            job_labels,
+        ) {
+            Some(mapping) => {
                 info!(
                     "Selected image '{}' for labels {:?} (matched mapping labels {:?})",
                     mapping.image, job_labels, mapping.labels
                 );
-                return mapping.image.clone();
+                mapping.image.clone()
+            }
+            None => {
+                info!(
+                    "No image mapping matched labels {:?}, using default '{}'",
+                    job_labels, self.config.tart.base_image
+                );
+                self.config.tart.base_image.clone()
             }
         }
-
-        // Fallback to default
-        info!(
-            "No image mapping matched labels {:?}, using default '{}'",
-            job_labels, self.config.tart.base_image
-        );
-        self.config.tart.base_image.clone()
     }
 
     /// Handle CreateRunner command.

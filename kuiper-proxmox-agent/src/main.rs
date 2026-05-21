@@ -22,7 +22,6 @@ use kuiper_agent_proto::{
     RunnerEvent, RunnerEventType, VmInfo,
 };
 use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -762,33 +761,31 @@ impl ProxmoxAgent {
 
     /// Select the appropriate template VMID based on job labels.
     ///
-    /// Iterates through `template_mappings` in order and returns the template_vmid from the first
-    /// mapping where ALL mapping labels are present in the job labels (case-insensitive).
-    /// Falls back to the default `template_vmid` if no mapping matches.
+    /// Returns the template_vmid of the first mapping whose capability set
+    /// (agent labels + that mapping's labels) covers the job's labels, mirroring
+    /// how the coordinator routes. Falls back to the default `template_vmid` if
+    /// no mapping covers the job. See [`kuiper_agent_lib::labels::select_mapping`].
     fn select_template(&self, job_labels: &[String]) -> u32 {
-        let job_labels_lower: HashSet<String> =
-            job_labels.iter().map(|l| l.to_lowercase()).collect();
-
-        for mapping in &self.config.vm.template_mappings {
-            let all_match = mapping
-                .labels
-                .iter()
-                .all(|ml| job_labels_lower.contains(&ml.to_lowercase()));
-            if all_match {
+        match kuiper_agent_lib::labels::select_mapping(
+            &self.config.agent.labels,
+            &self.config.vm.template_mappings,
+            job_labels,
+        ) {
+            Some(mapping) => {
                 info!(
                     "Selected template {} for labels {:?} (matched mapping labels {:?})",
                     mapping.template_vmid, job_labels, mapping.labels
                 );
-                return mapping.template_vmid;
+                mapping.template_vmid
+            }
+            None => {
+                info!(
+                    "No template mapping matched labels {:?}, using default {}",
+                    job_labels, self.config.vm.template_vmid
+                );
+                self.config.vm.template_vmid
             }
         }
-
-        // Fallback to default
-        info!(
-            "No template mapping matched labels {:?}, using default {}",
-            job_labels, self.config.vm.template_vmid
-        );
-        self.config.vm.template_vmid
     }
 
     /// Handle a CreateRunner command.
@@ -941,11 +938,15 @@ impl ProxmoxAgent {
         let available = self.config.vm.concurrent_vms.saturating_sub(active_count);
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
-        // Convert labels to label_sets (single capability set for proxmox)
+        // Advertise one capability set per template mapping (base agent.labels
+        // plus the mapping's labels), so the coordinator can route jobs for each
+        // mapped template here. With no mappings this is a single set: agent.labels.
         let labels = self.config.agent.labels.clone();
-        let label_sets = vec![LabelSet {
-            labels: labels.clone(),
-        }];
+        let label_sets: Vec<LabelSet> =
+            kuiper_agent_lib::labels::label_sets(&labels, &self.config.vm.template_mappings)
+                .into_iter()
+                .map(|labels| LabelSet { labels })
+                .collect();
 
         AgentStatus {
             active_vms: active_count,
