@@ -529,9 +529,11 @@ async fn serve(
         }
     });
 
-    // Spawn expired token cleanup task
+    // Spawn periodic cleanup task: expired tokens and old revoked agents.
     let cleanup_auth_store = auth_store.clone();
     tokio::spawn(async move {
+        // Revoked agents are kept this long for audit visibility, then purged.
+        let revoked_retention = chrono::Duration::days(7);
         let cleanup_interval = std::time::Duration::from_secs(3600); // hourly
         let mut ticker = tokio::time::interval(cleanup_interval);
 
@@ -540,6 +542,12 @@ async fn serve(
             let removed = cleanup_auth_store.cleanup_expired_tokens().await;
             if removed > 0 {
                 info!("Cleaned up {} expired registration token(s)", removed);
+            }
+            let revoked = cleanup_auth_store
+                .cleanup_revoked_agents(revoked_retention)
+                .await;
+            if revoked > 0 {
+                info!("Purged {} revoked agent(s) past retention", revoked);
             }
         }
     });
