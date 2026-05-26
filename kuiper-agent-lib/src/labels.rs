@@ -1,11 +1,10 @@
-//! Shared label matching for capability advertisement and resource selection.
+//! Label matching for capability advertisement and resource selection.
 //!
-//! Both agents map a job's labels to a provider-specific resource (a Tart image
-//! or a Proxmox template VMID) through an ordered list of mappings, and
-//! advertise their capabilities to the coordinator as "label sets". Keeping the
-//! matching and label-set derivation here ensures the agents can't drift apart
-//! (e.g. one advertising per-mapping capabilities and the other only a single
-//! set).
+//! A VM agent maps a job's labels to a provider-specific resource (e.g. a Tart
+//! image or a Proxmox template VMID) through an ordered list of mappings, and
+//! advertises its capabilities to the coordinator as "label sets". Sharing the
+//! matching and label-set derivation here keeps that behaviour identical across
+//! agents — the in-tree ones and any a third party builds.
 
 /// A label-based mapping rule. The rule matches a job when every label in
 /// [`labels`](LabelMapping::labels) is present in the job's labels

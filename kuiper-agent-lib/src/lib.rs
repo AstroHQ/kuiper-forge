@@ -1,6 +1,10 @@
-//! Shared library for CI runner agents.
+//! Shared library for building coordinator-managed CI runner agents.
 //!
-//! This crate provides common functionality for both kuiper-tart-agent and kuiper-proxmox-agent:
+//! This crate provides the common building blocks an agent needs, so a new agent
+//! (for any VM/provider backend, in-tree or third-party) only has to implement
+//! its provider-specific VM lifecycle:
+//! - The agent runtime / gRPC stream driver ([`runtime`])
+//! - Label matching and capability advertisement ([`labels`])
 //! - Certificate storage and management
 //! - gRPC connection handling with mTLS
 //! - Registration token exchange
@@ -13,6 +17,7 @@ mod connector;
 mod error;
 pub mod github_runner;
 pub mod labels;
+pub mod runtime;
 pub mod shell;
 
 pub use bundle::RegistrationBundle;

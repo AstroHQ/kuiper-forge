@@ -2078,8 +2078,9 @@ dependencies = [
 
 [[package]]
 name = "kuiper-agent-lib"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
+ "async-trait",
  "base64",
  "chrono",
  "dirs",
@@ -2162,7 +2163,6 @@ name = "kuiper-proxmox-agent"
 version = "0.2.3"
 dependencies = [
  "anyhow",
- "async-trait",
  "clap",
  "dirs",
  "gethostname",

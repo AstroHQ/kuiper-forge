@@ -31,6 +31,9 @@ pub enum Error {
 
     #[error("Connection lost")]
     ConnectionLost,
+
+    #[error("Failed to send on coordinator channel (stream closed)")]
+    ChannelSend,
 }
 
 impl Error {

@@ -49,10 +49,6 @@ pub enum Error {
     #[error("Agent error: {0}")]
     AgentLib(#[from] kuiper_agent_lib::Error),
 
-    /// Send error on channel.
-    #[error("Channel send error")]
-    ChannelSend,
-
     /// VM is already running.
     #[error("VM already running: {0}")]
     VmAlreadyRunning(String),

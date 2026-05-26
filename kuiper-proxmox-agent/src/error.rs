@@ -40,10 +40,6 @@ pub enum Error {
     /// Runner error
     #[error("Runner error: {0}")]
     Runner(String),
-
-    /// Channel send error
-    #[error("Channel send error")]
-    ChannelSend,
 }
 
 impl Error {

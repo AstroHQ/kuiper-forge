@@ -15,18 +15,15 @@ use clap::Parser;
 use config::Config;
 use error::{Error, Result};
 use kuiper_agent_lib::{
-    AgentCertStore, AgentConfig as LibAgentConfig, AgentConnector, RegistrationBundle,
+    AgentCertStore, AgentConfig as LibAgentConfig, RegistrationBundle, runtime,
 };
 use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, LabelSet, Ping, Pong,
-    RunnerEvent, RunnerEventType, VmInfo,
+    AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType, VmInfo,
 };
 use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -222,11 +219,40 @@ async fn main() -> anyhow::Result<()> {
     }
     let agent = ProxmoxAgent::new(config, vm_manager, cert_store, args.debug_keep_vms);
 
-    // Run the agent with graceful shutdown handling
+    // Live status: the agent updates this watch as its VM set changes; the runtime
+    // pushes the latest value to the coordinator (on change and on a timer).
+    let (status_tx, status_rx) = tokio::sync::watch::channel(agent.build_status().await);
+
+    // Bridge vm_manager state changes -> status watch.
+    let state_changes = agent.vm_manager.state_changes();
+    let bridge_agent = agent.clone();
+    tokio::spawn(async move {
+        loop {
+            state_changes.notified().await;
+            if status_tx.send(bridge_agent.build_status().await).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Hand the connection off to the runtime, which drives the coordinator loop.
+    let connection = runtime::connect(
+        LibAgentConfig {
+            coordinator_url: agent.config.coordinator.url.clone(),
+            coordinator_hostname: agent.config.coordinator.hostname.clone(),
+            registration_token: None,
+            agent_type: "proxmox".to_string(),
+        },
+        agent.cert_store.clone(),
+        status_rx,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+
+    // Run the command loop with graceful shutdown handling.
     tokio::select! {
-        result = agent.run() => {
-            // Agent loop exited (shouldn't happen normally)
-            result?;
+        _ = agent.clone().serve(connection) => {
+            info!("Command stream ended");
         }
         _ = shutdown_signal() => {
             info!("Shutdown signal received, cleaning up VMs...");
@@ -495,42 +521,6 @@ struct ProxmoxAgent {
     debug_keep_vms: bool,
 }
 
-async fn send_command_ack(
-    tx: &mpsc::Sender<AgentMessage>,
-    command_id: String,
-    accepted: bool,
-    error: String,
-) -> Result<()> {
-    tx.send(AgentMessage {
-        payload: Some(AgentPayload::Ack(CommandAck {
-            command_id,
-            accepted,
-            error,
-        })),
-    })
-    .await
-    .map_err(|_| Error::ChannelSend)
-}
-
-async fn send_runner_event(
-    tx: &mpsc::Sender<AgentMessage>,
-    runner_name: String,
-    vm_id: String,
-    event_type: RunnerEventType,
-    error: String,
-) -> Result<()> {
-    tx.send(AgentMessage {
-        payload: Some(AgentPayload::RunnerEvent(RunnerEvent {
-            runner_name,
-            vm_id,
-            event_type: event_type as i32,
-            error,
-        })),
-    })
-    .await
-    .map_err(|_| Error::ChannelSend)
-}
-
 impl ProxmoxAgent {
     /// Create a new Proxmox agent.
     fn new(
@@ -545,218 +535,6 @@ impl ProxmoxAgent {
             cert_store,
             debug_keep_vms,
         })
-    }
-
-    /// Run the agent, handling reconnection.
-    async fn run(self: &Arc<Self>) -> Result<()> {
-        loop {
-            match self.connect_and_run().await {
-                Ok(_) => {
-                    info!("Connection closed, reconnecting...");
-                }
-                Err(e) => {
-                    error!("Agent error: {}", e);
-                }
-            }
-
-            // Wait before reconnecting
-            info!("Reconnecting in 5 seconds...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    }
-
-    /// Connect to coordinator and run the agent loop.
-    async fn connect_and_run(self: &Arc<Self>) -> Result<()> {
-        // Connection-only config. labels and max_vms travel in the first
-        // AgentStatus stream message (see build_status), not here.
-        let agent_config = LibAgentConfig {
-            coordinator_url: self.config.coordinator.url.clone(),
-            coordinator_hostname: self.config.coordinator.hostname.clone(),
-            registration_token: None, // Already registered, using stored certificates
-            agent_type: "proxmox".to_string(),
-        };
-
-        // Connect to coordinator using stored cert_store
-        let mut connector = AgentConnector::new(agent_config, self.cert_store.clone());
-        let client = connector.connect().await?;
-
-        info!("Connected to coordinator");
-        if let Some(agent_id) = connector.agent_id() {
-            info!("Agent ID: {}", agent_id);
-        }
-
-        // Run the agent stream
-        self.run_stream(client).await
-    }
-
-    /// Run the bidirectional gRPC stream.
-    async fn run_stream(
-        self: &Arc<Self>,
-        mut client: kuiper_agent_proto::AgentServiceClient<tonic::transport::Channel>,
-    ) -> Result<()> {
-        // Create channels for sending/receiving
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-
-        // Build initial status message BEFORE starting stream
-        // The server expects the first message to identify the agent
-        let status = self.build_status().await;
-        tx.send(AgentMessage {
-            payload: Some(AgentPayload::Status(status)),
-        })
-        .await
-        .map_err(|_| Error::ChannelSend)?;
-
-        // Start the bidirectional stream (server will read our initial status)
-        let response = client
-            .agent_stream(ReceiverStream::new(rx))
-            .await
-            .map_err(Error::Grpc)?;
-
-        let mut inbound = response.into_inner();
-
-        info!("Sent initial status to coordinator");
-
-        // Spawn a task to send periodic status updates
-        // This is critical for recovery: when coordinator restarts, it needs to know
-        // when VMs complete so it can clean up the associated runners from GitHub
-        let status_tx = tx.clone();
-        let status_agent = Arc::clone(self);
-        let status_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            // Skip the first tick since we already sent initial status
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                let status = status_agent.build_status().await;
-                if status_tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Status(status)),
-                    })
-                    .await
-                    .is_err()
-                {
-                    // Channel closed, stream is ending
-                    break;
-                }
-            }
-        });
-
-        // Push a status update on every VM-set transition (insert/remove). This
-        // closes the gap between accepting a CreateRunner and the coordinator's
-        // next periodic status tick — without it, the coordinator's `active_vms`
-        // view lags by up to 30s, and reserve_slot accounting can leak via
-        // release-on-reject and cause retry storms.
-        let transition_tx = tx.clone();
-        let transition_agent = Arc::clone(self);
-        let transition_notify = self.vm_manager.state_changes();
-        let transition_handle = tokio::spawn(async move {
-            loop {
-                transition_notify.notified().await;
-                let status = transition_agent.build_status().await;
-                if transition_tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Status(status)),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
-        // Process messages from coordinator
-        while let Some(msg) = inbound.message().await.transpose() {
-            match msg {
-                Ok(coordinator_msg) => {
-                    self.handle_coordinator_message(coordinator_msg, &tx)
-                        .await?;
-                }
-                Err(e) => {
-                    error!("Stream error: {}", e);
-                    status_handle.abort();
-                    transition_handle.abort();
-                    return Err(Error::Grpc(e));
-                }
-            }
-        }
-        info!("Stream closed by coordinator");
-
-        // Clean up status tasks when stream closes
-        status_handle.abort();
-        transition_handle.abort();
-
-        Ok(())
-    }
-
-    /// Handle a message from the coordinator.
-    async fn handle_coordinator_message(
-        self: &Arc<Self>,
-        msg: kuiper_agent_proto::CoordinatorMessage,
-        tx: &mpsc::Sender<AgentMessage>,
-    ) -> Result<()> {
-        let payload = match msg.payload {
-            Some(p) => p,
-            None => {
-                debug!("Received empty message from coordinator");
-                return Ok(());
-            }
-        };
-
-        match payload {
-            CoordinatorPayload::CreateRunner(cmd) => {
-                info!(
-                    "Received CreateRunner command: {} ({})",
-                    cmd.command_id, cmd.vm_name
-                );
-
-                // Check capacity before acking - reject early if at max VMs
-                if !self.vm_manager.has_capacity().await {
-                    let max = self.config.vm.concurrent_vms;
-                    let active = self.vm_manager.active_count().await;
-                    warn!(
-                        "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                        cmd.vm_name, active, max
-                    );
-                    send_command_ack(
-                        tx,
-                        cmd.command_id,
-                        false,
-                        format!("Capacity exceeded: max {max} VMs"),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-
-                send_command_ack(tx, cmd.command_id.clone(), true, String::new()).await?;
-                self.handle_create_runner(cmd, tx.clone()).await;
-            }
-            CoordinatorPayload::DestroyRunner(cmd) => {
-                info!(
-                    "Received DestroyRunner command: {} ({})",
-                    cmd.command_id, cmd.vm_id
-                );
-                send_command_ack(tx, cmd.command_id.clone(), true, String::new()).await?;
-                self.handle_destroy_runner(cmd, tx.clone()).await;
-            }
-            CoordinatorPayload::Ping(Ping {}) => {
-                debug!("Received ping from coordinator");
-                tx.send(AgentMessage {
-                    payload: Some(AgentPayload::Pong(Pong {})),
-                })
-                .await
-                .map_err(|_| Error::ChannelSend)?;
-                let status = self.build_status().await;
-                tx.send(AgentMessage {
-                    payload: Some(AgentPayload::Status(status)),
-                })
-                .await
-                .map_err(|_| Error::ChannelSend)?;
-            }
-        }
-
-        Ok(())
     }
 
     /// Select the appropriate template VMID based on job labels.
@@ -787,148 +565,155 @@ impl ProxmoxAgent {
             }
         }
     }
+}
 
-    /// Handle a CreateRunner command.
-    async fn handle_create_runner(
-        self: &Arc<Self>,
-        cmd: kuiper_agent_proto::CreateRunnerCommand,
-        tx: mpsc::Sender<AgentMessage>,
-    ) {
-        let vm_manager = self.vm_manager.clone();
-        let runner_name = cmd.vm_name.clone();
-        let agent = Arc::clone(self);
-        let debug_keep_vms = self.debug_keep_vms;
+impl ProxmoxAgent {
+    async fn has_capacity(&self) -> bool {
+        self.vm_manager.has_capacity().await
+    }
 
+    /// `(active, max)` VM counts — for the capacity-rejection message.
+    async fn capacity(&self) -> (u32, u32) {
+        let active = self.vm_manager.active_count().await as u32;
+        (active, self.config.vm.concurrent_vms)
+    }
+
+    /// Read commands from the coordinator and act on them: check capacity, ack,
+    /// and spawn the (long-running) lifecycle so the loop keeps draining.
+    async fn serve(self: Arc<Self>, mut connection: runtime::Connection) {
+        while let Some(command) = connection.commands.recv().await {
+            match command {
+                runtime::RunnerCommand::Create(cmd) => {
+                    if !self.has_capacity().await {
+                        let (active, max) = self.capacity().await;
+                        warn!(
+                            "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
+                            cmd.vm_name, active, max
+                        );
+                        let _ = connection
+                            .events
+                            .command_ack(
+                                cmd.command_id,
+                                false,
+                                format!("Capacity exceeded: max {max} VMs"),
+                            )
+                            .await;
+                        continue;
+                    }
+                    let _ = connection
+                        .events
+                        .command_ack(cmd.command_id.clone(), true, String::new())
+                        .await;
+                    let agent = self.clone();
+                    let events = connection.events.clone();
+                    tokio::spawn(async move { agent.handle_create_runner(cmd, events).await });
+                }
+                runtime::RunnerCommand::Destroy(cmd) => {
+                    let _ = connection
+                        .events
+                        .command_ack(cmd.command_id.clone(), true, String::new())
+                        .await;
+                    let agent = self.clone();
+                    let events = connection.events.clone();
+                    tokio::spawn(async move { agent.handle_destroy_runner(cmd, events).await });
+                }
+            }
+        }
+    }
+
+    /// Run a runner VM's full lifecycle to completion, reporting runner events.
+    /// Status updates are emitted automatically as the VM set changes (see the
+    /// status bridge in `main`), so this only sends lifecycle events.
+    async fn handle_create_runner(&self, cmd: CreateRunnerCommand, events: runtime::EventSender) {
         // Select template based on job labels
         let template_vmid = self.select_template(&cmd.labels);
 
-        // Spawn task to handle the runner lifecycle
-        tokio::spawn(async move {
-            let params = vm_manager::RunnerParams {
-                registration_token: &cmd.registration_token,
-                labels: &cmd.labels,
-                runner_scope_url: &cmd.runner_scope_url,
-                runner_name: &cmd.vm_name,
-                jit_config: &cmd.jit_config,
-            };
-            let result = if debug_keep_vms {
-                vm_manager
-                    .run_lifecycle_debug(&cmd.vm_name, template_vmid, &params)
-                    .await
-            } else {
-                vm_manager
-                    .run_complete_lifecycle(&cmd.vm_name, template_vmid, &params)
-                    .await
-            };
+        let params = vm_manager::RunnerParams {
+            registration_token: &cmd.registration_token,
+            labels: &cmd.labels,
+            runner_scope_url: &cmd.runner_scope_url,
+            runner_name: &cmd.vm_name,
+            jit_config: &cmd.jit_config,
+        };
+        let result = if self.debug_keep_vms {
+            self.vm_manager
+                .run_lifecycle_debug(&cmd.vm_name, template_vmid, &params)
+                .await
+        } else {
+            self.vm_manager
+                .run_complete_lifecycle(&cmd.vm_name, template_vmid, &params)
+                .await
+        };
 
-            match result {
-                Ok((vmid, ip)) => {
-                    info!("Runner {} completed successfully", runner_name);
-
-                    // Send immediate status update so coordinator knows capacity is available
-                    let status = agent.build_status().await;
-                    let _ = tx
-                        .send(AgentMessage {
-                            payload: Some(AgentPayload::Status(status)),
-                        })
-                        .await;
-                    if let Err(e) = send_runner_event(
-                        &tx,
-                        runner_name,
+        match result {
+            Ok((vmid, ip)) => {
+                info!("Runner {} completed successfully", cmd.vm_name);
+                if let Err(e) = events
+                    .runner_event(
+                        cmd.vm_name.clone(),
                         vmid.to_string(),
                         RunnerEventType::Completed,
                         String::new(),
                     )
                     .await
-                    {
-                        error!("Failed to send runner event: {}", e);
-                    }
-                    info!("Runner completed at IP {}", ip);
+                {
+                    error!("Failed to send runner event: {}", e);
                 }
-                Err(e) => {
-                    error!("Runner {} failed: {}", runner_name, e);
+                info!("Runner completed at IP {}", ip);
+            }
+            Err(e) => {
+                error!("Runner {} failed: {}", cmd.vm_name, e);
 
-                    if debug_keep_vms {
-                        error!("Debug mode: VMs left running for inspection. Exiting agent.");
-                        std::process::exit(1);
-                    }
+                if self.debug_keep_vms {
+                    error!("Debug mode: VMs left running for inspection. Exiting agent.");
+                    std::process::exit(1);
+                }
 
-                    // Send immediate status update so coordinator knows capacity is available
-                    let status = agent.build_status().await;
-                    let _ = tx
-                        .send(AgentMessage {
-                            payload: Some(AgentPayload::Status(status)),
-                        })
-                        .await;
-                    if let Err(e) = send_runner_event(
-                        &tx,
-                        runner_name,
+                if let Err(e2) = events
+                    .runner_event(
+                        cmd.vm_name.clone(),
                         cmd.vm_name.clone(),
                         RunnerEventType::Failed,
                         e.to_string(),
                     )
                     .await
-                    {
-                        error!("Failed to send runner event: {}", e);
-                    }
+                {
+                    error!("Failed to send runner event: {}", e2);
                 }
             }
-        });
+        }
     }
 
-    /// Handle a DestroyRunner command.
-    async fn handle_destroy_runner(
-        self: &Arc<Self>,
-        cmd: kuiper_agent_proto::DestroyRunnerCommand,
-        tx: mpsc::Sender<AgentMessage>,
-    ) {
-        let vm_manager = self.vm_manager.clone();
+    /// Destroy a runner VM, reporting the result.
+    async fn handle_destroy_runner(&self, cmd: DestroyRunnerCommand, events: runtime::EventSender) {
         let vm_id = cmd.vm_id.clone();
         let runner_name = vm_id.clone();
-        let agent = Arc::clone(self);
 
-        // Spawn task to handle destruction
-        tokio::spawn(async move {
-            let result = vm_manager.force_destroy(&vm_id).await;
-
-            match result {
-                Ok(()) => {
-                    info!("VM {} destroyed successfully", vm_id);
-                    // Send immediate status update so coordinator knows capacity is available
-                    let status = agent.build_status().await;
-                    let _ = tx
-                        .send(AgentMessage {
-                            payload: Some(AgentPayload::Status(status)),
-                        })
-                        .await;
-                    if let Err(e) = send_runner_event(
-                        &tx,
+        match self.vm_manager.force_destroy(&vm_id).await {
+            Ok(()) => {
+                info!("VM {} destroyed successfully", vm_id);
+                if let Err(e) = events
+                    .runner_event(
                         runner_name,
                         vm_id,
                         RunnerEventType::Destroyed,
                         String::new(),
                     )
                     .await
-                    {
-                        error!("Failed to send runner event: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to destroy VM {}: {}", vm_id, e);
-                    if let Err(e) = send_runner_event(
-                        &tx,
-                        runner_name,
-                        vm_id,
-                        RunnerEventType::Failed,
-                        e.to_string(),
-                    )
-                    .await
-                    {
-                        error!("Failed to send runner event: {}", e);
-                    }
+                {
+                    error!("Failed to send runner event: {}", e);
                 }
             }
-        });
+            Err(e) => {
+                error!("Failed to destroy VM {}: {}", vm_id, e);
+                if let Err(e2) = events
+                    .runner_event(runner_name, vm_id, RunnerEventType::Failed, e.to_string())
+                    .await
+                {
+                    error!("Failed to send runner event: {}", e2);
+                }
+            }
+        }
     }
 
     /// Build current agent status.
