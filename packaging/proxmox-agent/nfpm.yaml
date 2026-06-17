@@ -1,4 +1,8 @@
-# nfpm config for kuiper-proxmox-agent Linux packages (deb/rpm/apk/archlinux).
+# nfpm config for kuiper-proxmox-agent Linux packages (deb/rpm).
+#
+# (apk/Alpine is intentionally not built yet: the service is a systemd unit and
+# Alpine uses OpenRC, so there's no managed service there until an OpenRC init
+# script is added.)
 #
 # Built via scripts/package-proxmox-agent.sh, which exports VERSION and ARCH and
 # stages the target binary at target/nfpm/kuiper-proxmox-agent before running

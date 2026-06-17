@@ -80,7 +80,7 @@ kuiper-proxmox-agent --system generate-service \
 systemctl daemon-reload && systemctl enable --now kuiper-proxmox-agent
 ```
 
-#### Linux packages (deb/rpm/...)
+#### Linux packages (deb/rpm)
 
 The proxmox agent can be packaged with [nfpm](https://nfpm.goreleaser.com). The
 package installs the binary to `/usr/bin`, a `--system` systemd unit to
@@ -93,11 +93,17 @@ defined in `packaging/proxmox-agent/`.
 # Requires Docker for the cross build; nfpm runs natively (brew install nfpm).
 mise run package:proxmox-agent             # x86_64, deb + rpm -> target/packages/
 mise run package:proxmox-agent arm64       # arm64
-PACKAGERS="deb rpm apk" mise run package:proxmox-agent
+PACKAGERS="deb rpm" mise run package:proxmox-agent
 
 # Equivalent to calling the script directly:
 scripts/package-proxmox-agent.sh arm64
 ```
+
+> **Alpine (apk) not supported yet.** nfpm can emit `apk`, and the maintainer
+> scripts handle BusyBox `addgroup`/`adduser`, so an apk would install without
+> error — but the service is a **systemd** unit and Alpine uses **OpenRC**, so
+> there's no managed service there yet (an OpenRC init script is still TODO).
+> `apk` is therefore left out of the default `PACKAGERS` for now.
 
 Then on the target host:
 

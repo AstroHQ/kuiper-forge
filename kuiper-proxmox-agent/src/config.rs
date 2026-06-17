@@ -147,6 +147,11 @@ pub const TEMPLATE_MAPPINGS_HELP: &str = r#"
 # the shared/base labels (e.g. ["self-hosted"]) and put the distinguishing
 # labels in the mappings — no need to repeat them in `agent.labels`.
 #
+# LIMITATION: this label-set routing only applies to WEBHOOK provisioning. In
+# FIXED-CAPACITY mode the coordinator pre-creates runners from `agent.labels`
+# only, so mapped labels (e.g. Windows/2022) are never pre-created and such jobs
+# won't match. Use webhook provisioning if you rely on template_mappings.
+#
 # [[vm.template_mappings]]
 # labels = ["Windows", "2022"]
 # template_vmid = 9001

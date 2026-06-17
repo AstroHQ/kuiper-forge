@@ -11,8 +11,9 @@ set -euo pipefail
 #     arch: x86_64 (default) | arm64
 #
 # Env:
-#   PACKAGERS  space-separated nfpm packagers (default: "deb rpm";
-#              nfpm also supports apk and archlinux)
+#   PACKAGERS  space-separated nfpm packagers (default: "deb rpm")
+#              Note: apk/Alpine isn't supported yet — the unit is systemd-only,
+#              and Alpine uses OpenRC (no managed service). Stick to deb/rpm.
 #
 # Requires: cross + Docker (for the build). Uses a local `nfpm` if installed,
 # otherwise falls back to the goreleaser/nfpm Docker image.

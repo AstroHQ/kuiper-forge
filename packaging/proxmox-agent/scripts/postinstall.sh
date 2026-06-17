@@ -3,14 +3,25 @@
 # reload systemd. Runs on install and upgrade.
 set -e
 
+# Create the kuiper system group/user. Support both shadow-utils
+# (Debian/RHEL: groupadd/useradd) and BusyBox (Alpine: addgroup/adduser).
+home=/var/lib/kuiper-proxmox-agent
 if ! getent group kuiper >/dev/null 2>&1; then
-    groupadd --system kuiper
+    if command -v groupadd >/dev/null 2>&1; then
+        groupadd --system kuiper
+    else
+        addgroup -S kuiper
+    fi
 fi
 if ! getent passwd kuiper >/dev/null 2>&1; then
-    nologin="$(command -v nologin || echo /usr/sbin/nologin)"
-    useradd --system --gid kuiper --no-create-home \
-        --home-dir /var/lib/kuiper-proxmox-agent \
-        --shell "$nologin" kuiper
+    if command -v useradd >/dev/null 2>&1; then
+        nologin="$(command -v nologin || echo /usr/sbin/nologin)"
+        useradd --system --gid kuiper --no-create-home \
+            --home-dir "$home" --shell "$nologin" kuiper
+    else
+        nologin="$(command -v nologin || echo /sbin/nologin)"
+        adduser -S -D -H -G kuiper -h "$home" -s "$nologin" kuiper
+    fi
 fi
 
 # Config lives in /etc and is written by the `register` subcommand. Create it
