@@ -403,6 +403,41 @@ fn cmd_generate_service(config: Option<&Path>, system: bool) -> anyhow::Result<(
     Ok(())
 }
 
+/// Escape a path for use as a single argument in a systemd `ExecStart=` line.
+///
+/// Implements the metacharacter rules from `man systemd.service` ("Command
+/// Lines"): the line is split on whitespace, `%` introduces a specifier, `$`
+/// introduces environment-variable expansion, and `"`/`'`/`\` drive quoting and
+/// C-style escapes. Note `%` and `$` are expanded even inside quotes, so they
+/// must be doubled regardless.
+///
+/// A clean path (none of those characters) is returned unchanged; otherwise it is
+/// wrapped in double quotes with `\` and `"` C-escaped and `%`/`$` doubled, so
+/// systemd treats it as one literal argument.
+fn systemd_escape_arg(s: &str) -> String {
+    let needs_quoting = s
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '%' | '$'));
+    if !needs_quoting {
+        return s.to_string();
+    }
+
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '%' => out.push_str("%%"),
+            '$' => out.push_str("$$"),
+            // A single quote is literal inside double quotes — no escaping needed.
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Build a systemd service unit for running the agent on startup.
 ///
 /// When `system` is set the unit runs the agent with `--system` (FHS paths) and
@@ -410,9 +445,10 @@ fn cmd_generate_service(config: Option<&Path>, system: bool) -> anyhow::Result<(
 /// `/var/lib` entries owned by the service user. Otherwise it passes an explicit
 /// `--config` (the given path, or the conventional `/etc` location).
 fn generate_systemd_unit(binary_path: &Path, config: Option<&Path>, system: bool) -> String {
-    let binary = binary_path.display();
+    let binary = systemd_escape_arg(&binary_path.display().to_string());
 
-    // Build the ExecStart argument list.
+    // Build the ExecStart argument list. Paths are escaped so a path containing
+    // spaces or `%` is parsed by systemd as a single, literal argument.
     let mut exec_args = String::new();
     if system {
         exec_args.push_str(" --system");
@@ -420,7 +456,10 @@ fn generate_systemd_unit(binary_path: &Path, config: Option<&Path>, system: bool
     // In --system mode the daemon already resolves config from /etc; only append
     // --config when the operator pinned a specific path (or in non-system mode).
     if let Some(cfg) = config {
-        exec_args.push_str(&format!(" --config {}", cfg.display()));
+        exec_args.push_str(&format!(
+            " --config {}",
+            systemd_escape_arg(&cfg.display().to_string())
+        ));
     } else if !system {
         exec_args.push_str(" --config /etc/kuiper-proxmox-agent/config.toml");
     }
@@ -851,5 +890,45 @@ mod tests {
             exec_start(&unit),
             format!("ExecStart={BIN} --system --config /srv/agent.toml")
         );
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_quotes_config_path_with_spaces() {
+        // A config path with spaces must become a single quoted argument so
+        // systemd doesn't split it into multiple args.
+        let unit = generate_systemd_unit(
+            Path::new(BIN),
+            Some(Path::new("/opt/Kuiper Agent/config.toml")),
+            false,
+        );
+        assert_eq!(
+            exec_start(&unit),
+            format!("ExecStart={BIN} --config \"/opt/Kuiper Agent/config.toml\"")
+        );
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_quotes_binary_path_with_spaces() {
+        let unit = generate_systemd_unit(Path::new("/opt/Kuiper Agent/bin"), None, true);
+        assert_eq!(
+            exec_start(&unit),
+            "ExecStart=\"/opt/Kuiper Agent/bin\" --system"
+        );
+    }
+
+    #[test]
+    fn test_systemd_escape_arg() {
+        // Clean paths are left untouched.
+        assert_eq!(systemd_escape_arg("/usr/bin/agent"), "/usr/bin/agent");
+        // Spaces force quoting.
+        assert_eq!(systemd_escape_arg("/a b/c"), "\"/a b/c\"");
+        // `%` is a systemd specifier and must be doubled (and triggers quoting).
+        assert_eq!(systemd_escape_arg("/a%b"), "\"/a%%b\"");
+        // `$` triggers env-var expansion and must be doubled.
+        assert_eq!(systemd_escape_arg("/a$b"), "\"/a$$b\"");
+        // Backslash and double-quote are C-escaped inside the quotes.
+        assert_eq!(systemd_escape_arg("a\\b\"c d"), "\"a\\\\b\\\"c d\"");
+        // A single quote forces quoting but is literal inside double quotes.
+        assert_eq!(systemd_escape_arg("/a'b"), "\"/a'b\"");
     }
 }
