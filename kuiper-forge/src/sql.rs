@@ -88,10 +88,22 @@ pub const SELECT_AGENT: &str = "SELECT * FROM registered_agents WHERE agent_id =
 pub const SELECT_AGENT: &str = "SELECT * FROM registered_agents WHERE agent_id = $1";
 
 #[cfg(feature = "sqlite")]
-pub const REVOKE_AGENT: &str = "UPDATE registered_agents SET revoked = 1 WHERE agent_id = ?";
+pub const REVOKE_AGENT: &str =
+    "UPDATE registered_agents SET revoked = 1, revoked_at = ? WHERE agent_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const REVOKE_AGENT: &str = "UPDATE registered_agents SET revoked = 1 WHERE agent_id = $1";
+pub const REVOKE_AGENT: &str =
+    "UPDATE registered_agents SET revoked = 1, revoked_at = $1 WHERE agent_id = $2";
+
+/// Purge revoked agents whose revocation is older than the retention cutoff.
+/// (A revoked or deleted row is rejected by CHECK_AGENT_VALID either way, so
+/// removing these doesn't weaken enforcement — it just unclutters the table/UI.)
+#[cfg(feature = "sqlite")]
+pub const DELETE_OLD_REVOKED_AGENTS: &str =
+    "DELETE FROM registered_agents WHERE revoked = 1 AND revoked_at IS NOT NULL AND revoked_at < ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_OLD_REVOKED_AGENTS: &str = "DELETE FROM registered_agents WHERE revoked = 1 AND revoked_at IS NOT NULL AND revoked_at < $1";
 
 /// Targeted update for the fields an agent can change at runtime via AgentStatus
 /// (labels, max_vms). Critically does NOT touch `revoked`, so a concurrent

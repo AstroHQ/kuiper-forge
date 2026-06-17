@@ -55,6 +55,68 @@ kuiper-proxmox-agent register kfr1_BUNDLE_TOKEN
 kuiper-proxmox-agent --config agent-config.toml
 ```
 
+#### Running as a system daemon (Linux)
+
+By default the proxmox agent uses per-user directories (`~/.config`, `~/.local/share`).
+Pass `--system` (or set `KUIPER_PROXMOX_AGENT_SYSTEM=1`) to use FHS daemon paths instead:
+
+| Path | default | `--system` |
+| --- | --- | --- |
+| config | `./`, `~/.config/...`, `/etc/...` (searched) | `/etc/kuiper-proxmox-agent/config.toml` |
+| logs | `~/.local/share/kuiper-proxmox-agent/logs` | `/var/log/kuiper-proxmox-agent` |
+| data / certs | `~/.local/share/kuiper-proxmox-agent` | `/var/lib/kuiper-proxmox-agent` |
+
+`--config` and `--log-dir` (env: `KUIPER_PROXMOX_AGENT_LOG_DIR`) override individual
+paths regardless of `--system`. Register and run in system mode with:
+
+```bash
+sudo kuiper-proxmox-agent --system register kfr1_BUNDLE_TOKEN   # writes /etc + /var/lib
+sudo kuiper-proxmox-agent --system                              # logs to /var/log
+
+# Generate a systemd unit (uses this binary's own path) and install it. The unit
+# is printed to stdout; status notes go to stderr, so redirect it directly:
+kuiper-proxmox-agent --system generate-service \
+  > /etc/systemd/system/kuiper-proxmox-agent.service
+systemctl daemon-reload && systemctl enable --now kuiper-proxmox-agent
+```
+
+#### Linux packages (deb/rpm)
+
+The proxmox agent can be packaged with [nfpm](https://nfpm.goreleaser.com). The
+package installs the binary to `/usr/bin`, a `--system` systemd unit to
+`/usr/lib/systemd/system`, and (via maintainer scripts) creates a dedicated
+`kuiper` user plus `/etc`, `/var/lib`, and `/var/log` directories. Config is
+defined in `packaging/proxmox-agent/`.
+
+`.deb` and `.rpm` (x86_64 and arm64) are built and attached automatically to
+`kuiper-proxmox-agent-v*` GitHub releases — grab them from the release page. To
+build one locally instead:
+
+```bash
+# Build a package locally for testing (mirrors build-proxmox-agent-musl.sh).
+# Requires Docker for the cross build; nfpm runs natively (brew install nfpm).
+mise run package:proxmox-agent             # x86_64, deb + rpm -> target/packages/
+mise run package:proxmox-agent arm64       # arm64
+PACKAGERS="deb rpm" mise run package:proxmox-agent
+
+# Equivalent to calling the script directly:
+scripts/package-proxmox-agent.sh arm64
+```
+
+> **Alpine (apk) not supported yet.** nfpm can emit `apk`, and the maintainer
+> scripts handle BusyBox `addgroup`/`adduser`, so an apk would install without
+> error — but the service is a **systemd** unit and Alpine uses **OpenRC**, so
+> there's no managed service there yet (an OpenRC init script is still TODO).
+> `apk` is therefore left out of the default `PACKAGERS` for now.
+
+Then on the target host:
+
+```bash
+sudo apt install ./kuiper-proxmox-agent_*_amd64.deb        # or: dnf install ...rpm
+sudo -u kuiper kuiper-proxmox-agent --system register kfr1_BUNDLE_TOKEN
+sudo systemctl enable --now kuiper-proxmox-agent
+```
+
 ### 3. Use in workflows
 
 ```yaml

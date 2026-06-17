@@ -124,6 +124,9 @@ pub struct FleetManager {
     webhook_rx: Option<mpsc::Receiver<WebhookEvent>>,
     /// Sender for self-notification (e.g., from spawned tasks that need to trigger reprocessing)
     notify_tx: mpsc::Sender<()>,
+    /// Agents already warned about label sets that fixed-capacity provisioning
+    /// can't pre-create. Warn once per agent to avoid log spam on each reconcile.
+    warned_capability_agents: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl FleetManager {
@@ -162,6 +165,7 @@ impl FleetManager {
             runner_event_rx,
             webhook_rx,
             notify_tx: notify_tx.clone(),
+            warned_capability_agents: std::sync::Mutex::new(std::collections::HashSet::new()),
         };
 
         let notifier = FleetNotifier {
@@ -1248,6 +1252,8 @@ impl FleetManager {
     ///
     /// Derives pools from connected agents and ensures target counts are met.
     async fn reconcile(&self) {
+        self.warn_unprovisionable_capabilities().await;
+
         let agent_count = self.agent_registry.count().await;
         let pool_defs = self.agent_registry.get_pool_definitions().await;
 
@@ -1267,6 +1273,47 @@ impl FleetManager {
                 .await
             {
                 error!("Failed to reconcile pool for {:?}: {}", pool_def.labels, e);
+            }
+        }
+    }
+
+    /// Warn (once per agent) about capabilities fixed-capacity mode can't pre-create.
+    ///
+    /// Fixed-capacity pools are derived from each agent's flat `labels` (its base
+    /// labels), not its `label_sets`. So an agent advertising mapping-specific
+    /// capabilities — e.g. via `vm.template_mappings` — gets runners pre-created
+    /// with only its base labels, and jobs requiring a mapped label won't match.
+    /// Webhook provisioning is the mode that matches on `label_sets`; surface this
+    /// so the mismatch isn't silent.
+    async fn warn_unprovisionable_capabilities(&self) {
+        let agents = self.agent_registry.list_all().await;
+        let mut warned = self
+            .warned_capability_agents
+            .lock()
+            .expect("warned_capability_agents mutex poisoned");
+
+        for agent in &agents {
+            let base: std::collections::HashSet<String> =
+                agent.labels.iter().map(|l| l.to_lowercase()).collect();
+            let mut extra: Vec<String> = agent
+                .label_sets
+                .iter()
+                .flatten()
+                .map(|l| l.to_lowercase())
+                .filter(|l| !base.contains(l))
+                .collect();
+            extra.sort();
+            extra.dedup();
+
+            if !extra.is_empty() && warned.insert(agent.agent_id.clone()) {
+                warn!(
+                    agent_id = %agent.agent_id,
+                    "Agent advertises capabilities {:?} only via label sets (e.g. \
+                     vm.template_mappings), but fixed-capacity provisioning pre-creates runners \
+                     from base labels {:?} only — jobs requiring those extra labels won't match \
+                     pre-created runners. Use webhook provisioning for label-based template selection.",
+                    extra, agent.labels
+                );
             }
         }
     }

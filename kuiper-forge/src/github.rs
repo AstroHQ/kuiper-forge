@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::RunnerScope;
 
@@ -282,6 +282,10 @@ pub struct GitHubClient {
 
     /// Cached mapping of account name -> installation_id
     installation_ids: Arc<RwLock<HashMap<String, u64>>>,
+
+    /// Recency window for the queued-job recovery scan's `pushed_at` repo
+    /// pre-filter. `None` disables the filter (scan every accessible repo).
+    scan_lookback: Option<Duration>,
 }
 
 impl GitHubClient {
@@ -310,7 +314,22 @@ impl GitHubClient {
             http_client,
             cached_tokens: Arc::new(RwLock::new(HashMap::new())),
             installation_ids: Arc::new(RwLock::new(HashMap::new())),
+            scan_lookback: Some(Duration::hours(168)), // 7 days; overridden via config
         })
+    }
+
+    /// Set the recovery-scan `pushed_at` recency window (in hours).
+    ///
+    /// `0` disables the filter entirely, scanning every accessible repo. This
+    /// is the only way to catch jobs queued by non-push triggers on repos that
+    /// haven't been pushed within the window.
+    pub fn with_scan_lookback_hours(mut self, hours: u64) -> Self {
+        self.scan_lookback = if hours == 0 {
+            None
+        } else {
+            Some(Duration::hours(hours as i64))
+        };
+        self
     }
 
     /// Validate GitHub API access and discover installations.
@@ -780,7 +799,12 @@ impl GitHubClient {
             let access_token = match self.get_access_token(installation_id).await {
                 Ok(token) => token,
                 Err(e) => {
-                    debug!("Failed to get access token for {}: {}", account, e);
+                    // Loud: a token failure silently drops a whole installation
+                    // from the scan, which looks identical to "nothing queued".
+                    warn!(
+                        "Queued-job scan: failed to get access token for {} — skipping installation: {}",
+                        account, e
+                    );
                     continue;
                 }
             };
@@ -805,17 +829,27 @@ impl GitHubClient {
                         match resp.json::<InstallationReposResponse>().await {
                             Ok(r) => r.repositories,
                             Err(e) => {
-                                debug!("Failed to parse repos for {}: {}", account, e);
+                                warn!(
+                                    "Queued-job scan: failed to parse repos page {} for {}: {}",
+                                    page, account, e
+                                );
                                 break;
                             }
                         }
                     }
                     Ok(resp) => {
-                        debug!("Failed to list repos for {} ({})", account, resp.status());
+                        warn!(
+                            "Queued-job scan: failed to list repos for {} (HTTP {})",
+                            account,
+                            resp.status()
+                        );
                         break;
                     }
                     Err(e) => {
-                        debug!("Failed to list repos for {}: {}", account, e);
+                        warn!(
+                            "Queued-job scan: failed to list repos for {}: {}",
+                            account, e
+                        );
                         break;
                     }
                 };
@@ -831,25 +865,39 @@ impl GitHubClient {
 
             debug!("Found {} repos for installation {}", repos.len(), account);
 
-            // Filter to only repos with recent activity (pushed in last 24 hours)
-            // Jobs can only be queued if there was a recent push triggering a workflow
-            let cutoff = Utc::now() - Duration::hours(24);
-            let active_repos: Vec<_> = repos
-                .into_iter()
-                .filter(|repo| {
-                    repo.pushed_at
-                        .as_ref()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|t| t.with_timezone(&Utc) > cutoff)
-                        .unwrap_or(true) // Include if we can't parse the date
-                })
-                .collect();
+            // Coarse pre-filter: only scan repos pushed within the lookback
+            // window, to avoid querying every repo's workflow runs. When the
+            // window is disabled (None) we scan everything.
+            //
+            // Caveat: `pushed_at` only tracks pushes, so a non-push trigger
+            // (schedule, workflow_dispatch, repository_dispatch) on a repo that
+            // hasn't been pushed within the window would be skipped. The window
+            // is configurable (and can be disabled) for exactly this reason.
+            let total_repos = repos.len();
+            let active_repos: Vec<_> = match self.scan_lookback {
+                None => repos,
+                Some(window) => {
+                    let cutoff = Utc::now() - window;
+                    repos
+                        .into_iter()
+                        .filter(|repo| {
+                            repo.pushed_at
+                                .as_ref()
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .map(|t| t.with_timezone(&Utc) > cutoff)
+                                .unwrap_or(true) // Include if we can't parse the date
+                        })
+                        .collect()
+                }
+            };
 
-            debug!(
-                "Filtered to {} recently active repos for {}",
-                active_repos.len(),
-                account
-            );
+            let skipped = total_repos - active_repos.len();
+            if skipped > 0 {
+                debug!(
+                    "Queued-job scan: {} of {} repos for {} skipped by lookback filter",
+                    skipped, total_repos, account
+                );
+            }
 
             // Query repos in parallel batches (limit concurrency to avoid rate limits)
             const BATCH_SIZE: usize = 20;

@@ -104,6 +104,12 @@ runner_version = "latest"
 #
 # Example: A job with runs-on: [self-hosted, Windows, 2022] will match the
 # first mapping below, but not the second (missing "2019" label).
+#
+# LIMITATION: template_mappings is intended for WEBHOOK provisioning. The agent
+# advertises each mapping as a capability (label set), and the coordinator routes
+# matching jobs on demand. In FIXED-CAPACITY mode the coordinator pre-creates
+# runners from the agent's base labels only, so mapped labels are never
+# pre-created and such jobs won't match. Use webhook provisioning here.
 
 # Example 1: Windows Server 2022
 # [[vm.template_mappings]]

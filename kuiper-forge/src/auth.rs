@@ -280,14 +280,37 @@ impl AuthStore {
             .collect()
     }
 
-    /// Mark an agent as revoked
+    /// Mark an agent as revoked, stamping the revocation time so it can be purged
+    /// after a retention window (see [`Self::cleanup_revoked_agents`]).
     pub async fn revoke_agent(&self, agent_id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
         let result = sqlx::query(sql::REVOKE_AGENT)
+            .bind(&now)
             .bind(agent_id)
             .execute(&self.pool)
             .await?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove revoked agents whose revocation is older than `retention`.
+    ///
+    /// Revoked (and missing) agents are already rejected by the validity check,
+    /// so this only unclutters the database and admin UI; it never affects auth.
+    /// Returns the number of agents removed.
+    pub async fn cleanup_revoked_agents(&self, retention: chrono::Duration) -> u64 {
+        let cutoff = (Utc::now() - retention).to_rfc3339();
+        match sqlx::query(sql::DELETE_OLD_REVOKED_AGENTS)
+            .bind(&cutoff)
+            .execute(&self.pool)
+            .await
+        {
+            Ok(result) => result.rows_affected(),
+            Err(e) => {
+                tracing::error!("Failed to cleanup revoked agents: {}", e);
+                0
+            }
+        }
     }
 
     /// Check if an agent is valid (exists and not revoked)

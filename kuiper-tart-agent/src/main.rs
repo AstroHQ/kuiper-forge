@@ -26,26 +26,22 @@ mod install;
 mod ssh;
 mod vm_manager;
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use kuiper_agent_lib::{AgentCertStore, AgentConfig, AgentConnector, RegistrationBundle};
+use kuiper_agent_lib::{AgentCertStore, AgentConfig, RegistrationBundle, runtime};
 use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentStatus, CommandAck, CoordinatorPayload, LabelSet, Pong,
-    RunnerEvent, RunnerEventType,
+    AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType,
 };
 use tokio::signal;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use config::Config;
-use error::{Error, Result};
+use error::Error;
 use ssh::SshConfig;
 use vm_manager::VmManager;
 
@@ -192,8 +188,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Coordinator: {}", config.coordinator.url);
     info!("Max concurrent VMs: {}", config.tart.max_concurrent_vms);
 
-    // Build label_sets: each set is base_labels + one image_mapping's labels
-    // This represents the capabilities this agent can fulfill
+    // Build label_sets: each set is base_labels + one image_mapping's labels,
+    // representing the capabilities this agent can fulfill (shared with the
+    // proxmox agent via kuiper_agent_lib::labels so the two can't drift).
     let base_labels: Vec<String> = config
         .agent
         .labels
@@ -201,27 +198,8 @@ async fn main() -> anyhow::Result<()> {
         .map(|l| l.to_lowercase())
         .collect();
 
-    let label_sets: Vec<Vec<String>> = if config.tart.image_mappings.is_empty() {
-        // No image mappings - just use base labels as a single capability
-        vec![base_labels.clone()]
-    } else {
-        // Each image_mapping defines a capability: base_labels + mapping labels
-        config
-            .tart
-            .image_mappings
-            .iter()
-            .map(|mapping| {
-                let mut labels = base_labels.clone();
-                for label in &mapping.labels {
-                    let lower = label.to_lowercase();
-                    if !labels.iter().any(|l| l.eq_ignore_ascii_case(&lower)) {
-                        labels.push(lower);
-                    }
-                }
-                labels
-            })
-            .collect()
-    };
+    let label_sets: Vec<Vec<String>> =
+        kuiper_agent_lib::labels::label_sets(&base_labels, &config.tart.image_mappings);
 
     info!(
         "Label sets: {:?} (base: {:?}, image_mappings: {:?})",
@@ -286,11 +264,35 @@ async fn main() -> anyhow::Result<()> {
     // Clone vm_manager for shutdown cleanup
     let shutdown_vm_manager = vm_manager.clone();
 
-    // Run the agent with graceful shutdown handling
+    // Live status: the agent updates this watch as its VM set changes; the runtime
+    // pushes the latest value to the coordinator (on change and on a timer).
+    let (status_tx, status_rx) = tokio::sync::watch::channel(agent.build_status().await);
+
+    // Bridge vm_manager state changes -> status watch.
+    let state_changes = agent.vm_manager.state_changes();
+    let bridge_agent = agent.clone();
+    tokio::spawn(async move {
+        loop {
+            state_changes.notified().await;
+            if status_tx.send(bridge_agent.build_status().await).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Hand the connection off to the runtime, which drives the coordinator loop.
+    let connection = runtime::connect(
+        agent.agent_config.clone(),
+        agent.cert_store.clone(),
+        status_rx,
+        Duration::from_secs(config.reconnect.initial_delay_secs),
+        Duration::from_secs(config.reconnect.max_delay_secs),
+    );
+
+    // Run the command loop with graceful shutdown handling.
     tokio::select! {
-        result = agent.run() => {
-            // Agent loop exited (shouldn't happen normally)
-            result?;
+        _ = agent.clone().serve(connection) => {
+            info!("Command stream ended");
         }
         _ = shutdown_signal() => {
             info!("Shutdown signal received, cleaning up VMs...");
@@ -342,11 +344,15 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         agent_type: "tart".to_string(),
     };
 
-    // 5. Connect and register
+    // 5. Connect and register.
+    // Use register() (not connect()): a `register` invocation always re-registers
+    // with this token instead of silently reusing an existing (possibly revoked)
+    // cert. The new identity is written only on success, so a bad/expired token
+    // leaves any existing certificate untouched.
     println!("Connecting to coordinator...");
     let mut connector = kuiper_agent_lib::AgentConnector::new(agent_config, cert_store.clone());
     let _client = connector
-        .connect()
+        .register()
         .await
         .map_err(|e| anyhow::anyhow!("Registration failed: {e}"))?;
 
@@ -558,48 +564,6 @@ struct TartAgent {
     label_sets: Vec<Vec<String>>,
 }
 
-async fn send_command_ack(
-    tx: &mpsc::Sender<AgentMessage>,
-    command_id: String,
-    accepted: bool,
-    error: String,
-) {
-    if let Err(e) = tx
-        .send(AgentMessage {
-            payload: Some(AgentPayload::Ack(CommandAck {
-                command_id,
-                accepted,
-                error,
-            })),
-        })
-        .await
-    {
-        error!("Failed to send command ack: {}", e);
-    }
-}
-
-async fn send_runner_event(
-    tx: &mpsc::Sender<AgentMessage>,
-    runner_name: String,
-    vm_id: String,
-    event_type: RunnerEventType,
-    error: String,
-) {
-    if let Err(e) = tx
-        .send(AgentMessage {
-            payload: Some(AgentPayload::RunnerEvent(RunnerEvent {
-                runner_name,
-                vm_id,
-                event_type: event_type as i32,
-                error,
-            })),
-        })
-        .await
-    {
-        error!("Failed to send runner event: {}", e);
-    }
-}
-
 impl TartAgent {
     fn new(
         agent_config: AgentConfig,
@@ -619,258 +583,94 @@ impl TartAgent {
         })
     }
 
-    /// Run the agent, automatically reconnecting on disconnect.
-    async fn run(self: &Arc<Self>) -> Result<()> {
-        let mut reconnect_delay = Duration::from_secs(self.config.reconnect.initial_delay_secs);
-        let max_delay = Duration::from_secs(self.config.reconnect.max_delay_secs);
-
-        loop {
-            let mut connector =
-                AgentConnector::new(self.agent_config.clone(), self.cert_store.clone());
-
-            let connect_result = connector.connect().await;
-            match connect_result {
-                Ok(client) => {
-                    info!("Connected to coordinator");
-                    // Reset reconnect delay on successful connection
-                    reconnect_delay = Duration::from_secs(self.config.reconnect.initial_delay_secs);
-
-                    let stream_result = self.run_stream(client).await;
-                    if let Err(e) = stream_result {
-                        warn!("Stream error: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("Connection failed: {}", e);
-                }
-            }
-
-            // Wait before reconnecting
-            info!("Reconnecting in {:?}...", reconnect_delay);
-            tokio::time::sleep(reconnect_delay).await;
-
-            // Exponential backoff
-            reconnect_delay = std::cmp::min(reconnect_delay * 2, max_delay);
-        }
-    }
-
-    /// Run the bidirectional gRPC stream.
-    async fn run_stream(
-        self: &Arc<Self>,
-        mut client: kuiper_agent_proto::AgentServiceClient<tonic::transport::Channel>,
-    ) -> Result<()> {
-        // Create channels for sending messages to coordinator
-        let (tx, rx) = mpsc::channel::<AgentMessage>(32);
-
-        // Build initial status message BEFORE starting stream
-        // The server expects the first message to identify the agent
-        let status = self.build_status().await;
-        tx.send(AgentMessage {
-            payload: Some(AgentPayload::Status(status)),
-        })
-        .await
-        .map_err(|_| Error::ChannelSend)?;
-
-        // Start the bidirectional stream (server will read our initial status)
-        let response = client.agent_stream(ReceiverStream::new(rx)).await?;
-
-        let mut inbound = response.into_inner();
-
-        info!("Stream established, processing commands...");
-
-        // Spawn a task to send periodic status updates
-        // This is critical for recovery: when coordinator restarts, it needs to know
-        // when VMs complete so it can clean up the associated runners from GitHub
-        let status_tx = tx.clone();
-        let status_agent = Arc::clone(self);
-        // Push a status update on every VM-set transition (insert/remove). This
-        // closes the gap between accepting a CreateRunner and the coordinator's
-        // next periodic status tick — without it, the coordinator's `active_vms`
-        // view lags by up to 30s and reserve_slot accounting can leak via
-        // release-on-reject and cause retry storms.
-        let transition_tx = tx.clone();
-        let transition_agent = Arc::clone(self);
-        let transition_notify = self.vm_manager.state_changes();
-        let transition_handle = tokio::spawn(async move {
-            loop {
-                transition_notify.notified().await;
-                let status = transition_agent.build_status().await;
-                if transition_tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Status(status)),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        let status_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            // Skip the first tick since we already sent initial status
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                let status = status_agent.build_status().await;
-                if status_tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Status(status)),
-                    })
-                    .await
-                    .is_err()
-                {
-                    // Channel closed, stream is ending
-                    break;
-                }
-            }
-        });
-
-        // Process messages from coordinator
-        loop {
-            let msg_result = inbound.message().await.transpose();
-            match msg_result {
-                Some(Ok(msg)) => {
-                    if let Some(payload) = msg.payload {
-                        // This spawns tasks for long-running commands, doesn't block
-                        self.handle_coordinator_message(payload, &tx);
-                    }
-                }
-                Some(Err(e)) => {
-                    error!("Error receiving message: {}", e);
-                    status_handle.abort();
-                    transition_handle.abort();
-                    return Err(Error::Status(e));
-                }
-                None => break,
-            }
-        }
-
-        // Clean up status tasks when stream closes
-        status_handle.abort();
-        transition_handle.abort();
-
-        warn!("Stream closed by coordinator");
-        Ok(())
-    }
-
-    /// Handle a message from the coordinator.
-    ///
-    /// Long-running commands (CreateRunner, DestroyRunner) are spawned as separate tasks
-    /// so we can continue processing messages (like Ping) without blocking.
-    fn handle_coordinator_message(
-        self: &Arc<Self>,
-        payload: CoordinatorPayload,
-        tx: &mpsc::Sender<AgentMessage>,
-    ) {
-        match payload {
-            CoordinatorPayload::CreateRunner(cmd) => {
-                info!("Received CreateRunner command: vm={}", cmd.vm_name);
-
-                // Spawn as a separate task so we don't block the message loop
-                let agent = Arc::clone(self);
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    // Check capacity before acking - reject early if at max VMs
-                    if agent.vm_manager.available_slots().await == 0 {
-                        let max = agent.vm_manager.max_vms();
-                        let active = agent.vm_manager.active_count().await;
-                        warn!(
-                            "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                            cmd.vm_name, active, max
-                        );
-                        send_command_ack(
-                            &tx,
-                            cmd.command_id,
-                            false,
-                            format!("Capacity exceeded: max {max} VMs"),
-                        )
-                        .await;
-                        return;
-                    }
-
-                    send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await;
-                    agent.handle_create_runner(cmd, &tx).await;
-                });
-            }
-
-            CoordinatorPayload::DestroyRunner(cmd) => {
-                info!("Received DestroyRunner command: vm={}", cmd.vm_id);
-
-                // Spawn as a separate task
-                let agent = Arc::clone(self);
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    send_command_ack(&tx, cmd.command_id.clone(), true, String::new()).await;
-                    agent.handle_destroy_runner(cmd, &tx).await;
-                });
-            }
-
-            CoordinatorPayload::Ping(_) => {
-                // Pings are quick, handle inline
-                let tx = tx.clone();
-                let agent = Arc::clone(self);
-                tokio::spawn(async move {
-                    if let Err(e) = tx
-                        .send(AgentMessage {
-                            payload: Some(AgentPayload::Pong(Pong {})),
-                        })
-                        .await
-                    {
-                        error!("Failed to send pong: {}", e);
-                    }
-                    let status = agent.build_status().await;
-                    if let Err(e) = tx
-                        .send(AgentMessage {
-                            payload: Some(AgentPayload::Status(status)),
-                        })
-                        .await
-                    {
-                        error!("Failed to send status update: {}", e);
-                    }
-                });
-            }
-        }
-    }
-
     /// Select the appropriate VM image based on job labels.
     ///
-    /// Iterates through `image_mappings` in order and returns the image from the first
-    /// mapping where ALL mapping labels are present in the job labels (case-insensitive).
-    /// Falls back to `base_image` if no mapping matches.
+    /// Returns the image of the first mapping whose capability set (agent labels
+    /// plus that mapping's labels) covers the job's labels, mirroring how the
+    /// coordinator routes. Falls back to `base_image` if no mapping covers the
+    /// job. See [`kuiper_agent_lib::labels::select_mapping`].
     fn select_image(&self, job_labels: &[String]) -> String {
-        let job_labels_lower: HashSet<String> =
-            job_labels.iter().map(|l| l.to_lowercase()).collect();
-
-        for mapping in &self.config.tart.image_mappings {
-            let all_match = mapping
-                .labels
-                .iter()
-                .all(|ml| job_labels_lower.contains(&ml.to_lowercase()));
-            if all_match {
+        match kuiper_agent_lib::labels::select_mapping(
+            &self.config.agent.labels,
+            &self.config.tart.image_mappings,
+            job_labels,
+        ) {
+            Some(mapping) => {
                 info!(
                     "Selected image '{}' for labels {:?} (matched mapping labels {:?})",
                     mapping.image, job_labels, mapping.labels
                 );
-                return mapping.image.clone();
+                mapping.image.clone()
+            }
+            None => {
+                info!(
+                    "No image mapping matched labels {:?}, using default '{}'",
+                    job_labels, self.config.tart.base_image
+                );
+                self.config.tart.base_image.clone()
             }
         }
+    }
+}
 
-        // Fallback to default
-        info!(
-            "No image mapping matched labels {:?}, using default '{}'",
-            job_labels, self.config.tart.base_image
-        );
-        self.config.tart.base_image.clone()
+impl TartAgent {
+    async fn has_capacity(&self) -> bool {
+        self.vm_manager.available_slots().await > 0
     }
 
-    /// Handle CreateRunner command.
-    async fn handle_create_runner(
-        &self,
-        cmd: kuiper_agent_proto::CreateRunnerCommand,
-        tx: &mpsc::Sender<AgentMessage>,
-    ) {
+    /// `(active, max)` VM counts — for the capacity-rejection message.
+    async fn capacity(&self) -> (u32, u32) {
+        let active = self.vm_manager.active_count().await as u32;
+        (active, self.vm_manager.max_vms())
+    }
+
+    /// Read commands from the coordinator and act on them: check capacity, ack,
+    /// and spawn the (long-running) lifecycle so the loop keeps draining.
+    async fn serve(self: Arc<Self>, mut connection: runtime::Connection) {
+        while let Some(command) = connection.commands.recv().await {
+            match command {
+                runtime::RunnerCommand::Create(cmd) => {
+                    if !self.has_capacity().await {
+                        let (active, max) = self.capacity().await;
+                        warn!(
+                            "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
+                            cmd.vm_name, active, max
+                        );
+                        let _ = connection
+                            .events
+                            .command_ack(
+                                cmd.command_id,
+                                false,
+                                format!("Capacity exceeded: max {max} VMs"),
+                            )
+                            .await;
+                        continue;
+                    }
+                    let _ = connection
+                        .events
+                        .command_ack(cmd.command_id.clone(), true, String::new())
+                        .await;
+                    let agent = self.clone();
+                    let events = connection.events.clone();
+                    tokio::spawn(async move { agent.handle_create_runner(cmd, events).await });
+                }
+                runtime::RunnerCommand::Destroy(cmd) => {
+                    let _ = connection
+                        .events
+                        .command_ack(cmd.command_id.clone(), true, String::new())
+                        .await;
+                    let agent = self.clone();
+                    let events = connection.events.clone();
+                    tokio::spawn(async move { agent.handle_destroy_runner(cmd, events).await });
+                }
+            }
+        }
+    }
+
+    /// Run a runner VM's full lifecycle to completion, reporting runner events.
+    /// Status updates are emitted automatically as the VM set changes (see the
+    /// status bridge in `main`), so this only sends lifecycle events.
+    async fn handle_create_runner(&self, cmd: CreateRunnerCommand, events: runtime::EventSender) {
         let vm_name = cmd.vm_name.clone();
 
         // Validate inputs early and warn about suspicious values
@@ -945,14 +745,14 @@ impl TartAgent {
                     e
                 })?;
 
-            send_runner_event(
-                tx,
-                vm_name.clone(),
-                vm_id.clone(),
-                RunnerEventType::Started,
-                String::new(),
-            )
-            .await;
+            let _ = events
+                .runner_event(
+                    vm_name.clone(),
+                    vm_id.clone(),
+                    RunnerEventType::Started,
+                    String::new(),
+                )
+                .await;
 
             // 4. Wait for runner to complete (this blocks until the job finishes)
             info!(
@@ -981,21 +781,9 @@ impl TartAgent {
                     "CreateRunner completed successfully: vm={}, ip={}",
                     vm_id, ip
                 );
-                // Send immediate status update so coordinator knows capacity is available
-                let status = self.build_status().await;
-                let _ = tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Status(status)),
-                    })
+                let _ = events
+                    .runner_event(vm_name, vm_id, RunnerEventType::Completed, String::new())
                     .await;
-                send_runner_event(
-                    tx,
-                    vm_name,
-                    vm_id,
-                    RunnerEventType::Completed,
-                    String::new(),
-                )
-                .await;
             }
             Err(e) => {
                 error!("CreateRunner FAILED for vm={}: {}", vm_name, e);
@@ -1007,62 +795,39 @@ impl TartAgent {
                         vm_name, cleanup_err
                     );
                 }
-                // Send immediate status update so coordinator knows capacity is available
-                let status = self.build_status().await;
-                let _ = tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Status(status)),
-                    })
+                let _ = events
+                    .runner_event(
+                        vm_name.clone(),
+                        vm_name,
+                        RunnerEventType::Failed,
+                        e.to_string(),
+                    )
                     .await;
-                send_runner_event(
-                    tx,
-                    vm_name.clone(),
-                    vm_name,
-                    RunnerEventType::Failed,
-                    e.to_string(),
-                )
-                .await;
             }
         }
     }
 
-    /// Handle DestroyRunner command.
-    async fn handle_destroy_runner(
-        &self,
-        cmd: kuiper_agent_proto::DestroyRunnerCommand,
-        tx: &mpsc::Sender<AgentMessage>,
-    ) {
+    /// Destroy a runner VM, reporting the result.
+    async fn handle_destroy_runner(&self, cmd: DestroyRunnerCommand, events: runtime::EventSender) {
         let vm_id = cmd.vm_id.clone();
 
         match self.vm_manager.destroy_vm(&vm_id).await {
             Ok(()) => {
                 info!("DestroyRunner completed: vm={}", vm_id);
-                // Send immediate status update so coordinator knows capacity is available
-                let status = self.build_status().await;
-                let _ = tx
-                    .send(AgentMessage {
-                        payload: Some(AgentPayload::Status(status)),
-                    })
+                let _ = events
+                    .runner_event(
+                        vm_id.clone(),
+                        vm_id,
+                        RunnerEventType::Destroyed,
+                        String::new(),
+                    )
                     .await;
-                send_runner_event(
-                    tx,
-                    vm_id.clone(),
-                    vm_id,
-                    RunnerEventType::Destroyed,
-                    String::new(),
-                )
-                .await;
             }
             Err(e) => {
                 error!("DestroyRunner failed: {}", e);
-                send_runner_event(
-                    tx,
-                    vm_id.clone(),
-                    vm_id,
-                    RunnerEventType::Failed,
-                    e.to_string(),
-                )
-                .await;
+                let _ = events
+                    .runner_event(vm_id.clone(), vm_id, RunnerEventType::Failed, e.to_string())
+                    .await;
             }
         }
     }

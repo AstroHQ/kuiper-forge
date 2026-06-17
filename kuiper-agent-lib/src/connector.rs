@@ -72,6 +72,22 @@ impl AgentConnector {
         self.register_and_connect(&reg_token).await
     }
 
+    /// Force registration with the configured token, ignoring any stored
+    /// certificate.
+    ///
+    /// Use this for an explicit `register` command: unlike [`connect`], it never
+    /// reuses an existing (possibly revoked) identity. The new client
+    /// certificate is written only after the coordinator accepts the token, so a
+    /// failed registration (expired/invalid token, unreachable coordinator)
+    /// leaves any existing certificates untouched.
+    pub async fn register(&mut self) -> Result<AgentServiceClient<Channel>> {
+        let reg_token = self.config.registration_token.clone().ok_or_else(|| {
+            Error::NoCredentials("No registration token provided for registration".to_string())
+        })?;
+
+        self.register_and_connect(&reg_token).await
+    }
+
     /// Register with coordinator using registration token.
     ///
     /// Uses the server trust from the cert store (provided via the registration bundle)

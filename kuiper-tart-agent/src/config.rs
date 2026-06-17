@@ -66,6 +66,12 @@ pub struct ImageMapping {
     pub image: String,
 }
 
+impl kuiper_agent_lib::labels::LabelMapping for ImageMapping {
+    fn labels(&self) -> &[String] {
+        &self.labels
+    }
+}
+
 /// Tart-specific configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TartConfig {

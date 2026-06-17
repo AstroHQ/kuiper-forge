@@ -136,11 +136,49 @@ jobs:
           Compress-Archive -Path "target\${target}\release\${binary}.exe" -DestinationPath $archive
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
+      # Build .deb/.rpm for the proxmox agent's Linux targets via nfpm (run from
+      # the goreleaser/nfpm image, mirroring scripts/package-proxmox-agent.sh).
+      - name: Package (deb/rpm)
+        if: ${{ needs.setup.outputs.binary == 'kuiper-proxmox-agent' && endsWith(matrix.target, '-linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export VERSION="${{ needs.setup.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          case "$TARGET" in
+            x86_64-*)  export ARCH=amd64 ;;
+            aarch64-*) export ARCH=arm64 ;;
+            *) echo "::error::Unsupported package target: $TARGET"; exit 1 ;;
+          esac
+
+          # Stage the built binary at the fixed path nfpm.yaml references.
+          mkdir -p target/nfpm target/packages
+          cp "target/${TARGET}/release/kuiper-proxmox-agent" target/nfpm/kuiper-proxmox-agent
+
+          for pkg in deb rpm; do
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "$PWD":/work -w /work \
+              -e VERSION -e ARCH \
+              ghcr.io/goreleaser/nfpm:latest \
+              package --config packaging/proxmox-agent/nfpm.yaml --packager "$pkg" --target target/packages
+          done
+
+          # Move packages to the repo root so they upload flat (no target/packages/
+          # prefix), matching the tarballs — otherwise download-artifact nests them
+          # under artifacts/target/packages/ and the release glob misses them.
+          mv target/packages/*.deb target/packages/*.rpm ./
+          ls -l ./*.deb ./*.rpm
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ needs.setup.outputs.binary }}-${{ matrix.target }}
-          path: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            *.deb
+            *.rpm
+          if-no-files-found: ignore
           retention-days: 1
 
   release:

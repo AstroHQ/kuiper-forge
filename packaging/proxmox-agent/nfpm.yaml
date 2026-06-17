@@ -1,0 +1,46 @@
+# nfpm config for kuiper-proxmox-agent Linux packages (deb/rpm).
+#
+# (apk/Alpine is intentionally not built yet: the service is a systemd unit and
+# Alpine uses OpenRC, so there's no managed service there until an OpenRC init
+# script is added.)
+#
+# Built via scripts/package-proxmox-agent.sh, which exports VERSION and ARCH and
+# stages the target binary at target/nfpm/kuiper-proxmox-agent before running
+# nfpm from the repository root (so all `src` paths below are repo-relative).
+#
+# Note: nfpm expands ${ENV} in scalar fields (version, arch, ...) but NOT in
+# contents[].src, which is globbed literally — hence the fixed staged path.
+# Docs: https://nfpm.goreleaser.com/configuration/
+name: kuiper-proxmox-agent
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: admin
+priority: optional
+maintainer: Astropad <jeremy@astropad.com>
+vendor: Astropad
+homepage: https://github.com/AstroHQ/kuiper-forge
+license: MIT
+description: |
+  Proxmox VE agent for kuiper-forge.
+  Connects to a kuiper-forge coordinator and manages ephemeral CI runner VMs
+  (clone, start, configure, destroy) via the Proxmox API.
+
+contents:
+  - src: target/nfpm/kuiper-proxmox-agent
+    dst: /usr/bin/kuiper-proxmox-agent
+    file_info:
+      mode: 0755
+
+  - src: packaging/proxmox-agent/kuiper-proxmox-agent.service
+    dst: /usr/lib/systemd/system/kuiper-proxmox-agent.service
+
+  # Reference config showing every option. The live config in /etc is created by
+  # the `register` subcommand, so this is documentation only.
+  - src: examples/kuiper-proxmox-agent-config.toml
+    dst: /usr/share/doc/kuiper-proxmox-agent/config.example.toml
+
+scripts:
+  postinstall: packaging/proxmox-agent/scripts/postinstall.sh
+  preremove: packaging/proxmox-agent/scripts/preremove.sh
+  postremove: packaging/proxmox-agent/scripts/postremove.sh

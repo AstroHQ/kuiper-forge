@@ -127,10 +127,27 @@ pub struct WebhookConfig {
     /// organization/repository scope from the webhook event.
     #[serde(default)]
     pub label_mappings: Vec<LabelMapping>,
+
+    /// How far back (in hours) the periodic GitHub recovery scan considers a
+    /// repository "active" when hunting for queued jobs that were missed
+    /// (default: 168 = 7 days). Set to `0` to scan every accessible repo with
+    /// no recency filter.
+    ///
+    /// The scan uses this as a coarse pre-filter on each repo's `pushed_at` to
+    /// avoid querying every repo's workflow runs. Note that `pushed_at` only
+    /// tracks pushes, so jobs queued by non-push triggers (schedule,
+    /// workflow_dispatch, etc.) on a repo that hasn't been pushed recently
+    /// would be missed by a narrow window — keep this generous, or `0`.
+    #[serde(default = "default_queued_scan_lookback_hours")]
+    pub queued_scan_lookback_hours: u64,
 }
 
 fn default_webhook_path() -> String {
     "/webhook".to_string()
+}
+
+fn default_queued_scan_lookback_hours() -> u64 {
+    168 // 7 days
 }
 
 fn default_required_labels() -> Vec<String> {
