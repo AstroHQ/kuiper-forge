@@ -15,26 +15,40 @@ pub trait LabelMapping {
 }
 
 /// Return the first mapping whose capability set covers `job_labels` — i.e. the
-/// first mapping where every job label is present in `base` or in that mapping's
-/// labels (case-insensitive).
+/// first mapping that the job both *requests* and is *covered by*:
 ///
-/// This mirrors how the coordinator routes (a job matches an agent when its
-/// labels are a subset of an advertised set = `base` + a mapping's labels), so
-/// any job routed here resolves to the mapping behind the set it matched —
-/// without the job having to list every label of that mapping. `None` means no
-/// mapping covers the job; the caller falls back to its default resource.
+/// - **requests**: the job contains at least one of the mapping's labels — so a
+///   job carrying only base labels (e.g. a fixed-capacity runner created from
+///   `agent.labels`, or a webhook job omitting mapping-specific labels) matches
+///   no mapping and the caller falls back to its default resource.
+/// - **covered**: every job label is in `base` or in that mapping's labels — so a
+///   job needing a label this agent/mapping can't provide is skipped. This
+///   mirrors how the coordinator routes (job labels ⊆ an advertised set =
+///   `base` + a mapping's labels), without the job having to list every label of
+///   the mapping.
+///
+/// Matching is case-insensitive. `None` means no mapping applies; the caller
+/// falls back to its default (e.g. `base_image` / `template_vmid`).
 pub fn select_mapping<'a, M: LabelMapping>(
     base: &[String],
     mappings: &'a [M],
     job_labels: &[String],
 ) -> Option<&'a M> {
     mappings.iter().find(|mapping| {
+        let mapping_labels = mapping.labels();
+
+        // The job must request at least one of this mapping's labels.
+        let requests = job_labels
+            .iter()
+            .any(|jl| mapping_labels.iter().any(|ml| ml.eq_ignore_ascii_case(jl)));
+        if !requests {
+            return false;
+        }
+
+        // ...and every job label must be covered by base + this mapping.
         job_labels.iter().all(|jl| {
             base.iter().any(|b| b.eq_ignore_ascii_case(jl))
-                || mapping
-                    .labels()
-                    .iter()
-                    .any(|ml| ml.eq_ignore_ascii_case(jl))
+                || mapping_labels.iter().any(|ml| ml.eq_ignore_ascii_case(jl))
         })
     })
 }
@@ -134,12 +148,25 @@ mod tests {
     }
 
     #[test]
-    fn select_returns_first_match_in_order() {
-        // A bare base-only job is covered by the first mapping's set.
-        let base = labels(&["self-hosted"]);
+    fn select_base_only_job_matches_no_mapping() {
+        // A job carrying only base labels (e.g. a fixed-capacity runner created
+        // from agent.labels) must fall back to the default resource, not grab the
+        // first mapping just because every label happens to be a base label.
+        let base = labels(&["self-hosted", "arm64"]);
         let mappings = [mapping(&["macos", "sequoia"], 1), mapping(&["linux"], 2)];
+        assert!(select_mapping(&base, &mappings, &labels(&["self-hosted", "arm64"])).is_none());
+        // Same when the job is a strict subset of the base labels.
+        assert!(select_mapping(&base, &mappings, &labels(&["self-hosted"])).is_none());
+    }
+
+    #[test]
+    fn select_returns_first_requested_match_in_order() {
+        // When a job requests labels covered by more than one mapping, the first
+        // in order wins.
+        let base = labels(&["self-hosted"]);
+        let mappings = [mapping(&["gpu"], 1), mapping(&["gpu", "cuda"], 2)];
         assert_eq!(
-            select_mapping(&base, &mappings, &labels(&["self-hosted"])).map(|m| m.value),
+            select_mapping(&base, &mappings, &labels(&["self-hosted", "gpu"])).map(|m| m.value),
             Some(1)
         );
     }
