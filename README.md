@@ -88,6 +88,10 @@ package installs the binary to `/usr/bin`, a `--system` systemd unit to
 `kuiper` user plus `/etc`, `/var/lib`, and `/var/log` directories. Config is
 defined in `packaging/proxmox-agent/`.
 
+`.deb` and `.rpm` (x86_64 and arm64) are built and attached automatically to
+`kuiper-proxmox-agent-v*` GitHub releases — grab them from the release page. To
+build one locally instead:
+
 ```bash
 # Build a package locally for testing (mirrors build-proxmox-agent-musl.sh).
 # Requires Docker for the cross build; nfpm runs natively (brew install nfpm).
