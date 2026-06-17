@@ -15,6 +15,7 @@ use tracing::{debug, error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use kuiper_agent_proto::{RunnerEvent, RunnerEventType};
 use kuiper_forge::admin::{AdminAuthStore, AdminState};
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
@@ -358,7 +359,14 @@ async fn serve(
         (token_provider, Some(fm), Some(notifier), wh_notifier)
     } else {
         let private_key = config.github.private_key_content()?;
-        let github_client = github::GitHubClient::from_key(config.github.app_id, private_key)?;
+        let scan_lookback_hours = config
+            .provisioning
+            .webhook
+            .as_ref()
+            .map(|w| w.queued_scan_lookback_hours)
+            .unwrap_or(168);
+        let github_client = github::GitHubClient::from_key(config.github.app_id, private_key)?
+            .with_scan_lookback_hours(scan_lookback_hours);
 
         // Validate GitHub API access before starting
         // This catches configuration issues early rather than failing later
@@ -411,9 +419,9 @@ async fn serve(
     };
 
     // Spawn stale agent cleanup task
+    // Runner records for removed agents are handled by the orphaned-runner
+    // sweep below, which gives the agent a grace period to reconnect first.
     let cleanup_registry = agent_registry.clone();
-    let cleanup_runner_state = runner_state.clone();
-    let cleanup_token_provider = token_provider.clone();
     tokio::spawn(async move {
         let cleanup_interval = std::time::Duration::from_secs(60);
         let stale_timeout = std::time::Duration::from_secs(120); // 2 minutes without heartbeat
@@ -424,107 +432,116 @@ async fn serve(
             let removed = cleanup_registry.remove_stale(stale_timeout).await;
             if !removed.is_empty() {
                 warn!("Removed {} stale agents: {:?}", removed.len(), removed);
+            }
+        }
+    });
 
-                // Clean up runner records for each stale agent
-                for agent_id in &removed {
-                    let runners = cleanup_runner_state
-                        .remove_runners_for_agent(agent_id)
-                        .await;
+    // Spawn recurring orphaned-runner sweep.
+    //
+    // Persisted runners whose agent is offline (killed, crashed, or never
+    // reconnected after a coordinator restart) would otherwise linger forever:
+    // their records block the pending-job queue from re-scheduling the job
+    // ("already has active runner"). After a grace period - leeway for agent
+    // restarts and network hiccups - each orphaned runner is routed through
+    // the fleet as a synthetic Destroyed event, which removes it from state
+    // and GitHub and releases its job for retry on another agent. Agents that
+    // reconnect within the grace period recover their runners via the normal
+    // recovery path instead.
+    let sweep_registry = agent_registry.clone();
+    let sweep_runner_state = runner_state.clone();
+    let sweep_token_provider = token_provider.clone();
+    let sweep_fleet_notifier = fleet_notifier.clone();
+    tokio::spawn(async move {
+        let sweep_interval = std::time::Duration::from_secs(60);
+        let offline_grace = std::time::Duration::from_secs(300);
+        let mut offline_since: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let mut ticker = tokio::time::interval(sweep_interval);
+
+        loop {
+            ticker.tick().await;
+
+            let all_runners = match sweep_runner_state.get_all_runners().await {
+                Ok(runners) => runners,
+                Err(e) => {
+                    error!("Failed to get runners for orphan sweep: {}", e);
+                    continue;
+                }
+            };
+
+            let connected_agents: std::collections::HashSet<String> = sweep_registry
+                .list_all()
+                .await
+                .into_iter()
+                .map(|a| a.agent_id)
+                .collect();
+
+            // Group runner names by offline agent
+            let mut orphaned: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for (runner_name, runner_info) in all_runners {
+                if !connected_agents.contains(&runner_info.agent_id) {
+                    orphaned
+                        .entry(runner_info.agent_id)
+                        .or_default()
+                        .push(runner_name);
+                }
+            }
+
+            // Forget agents that reconnected or have no runners left, so a
+            // later disconnect starts a fresh grace period.
+            offline_since.retain(|agent_id, _| orphaned.contains_key(agent_id));
+
+            for (agent_id, runner_names) in orphaned {
+                let since = *offline_since
+                    .entry(agent_id.clone())
+                    .or_insert_with(std::time::Instant::now);
+                if since.elapsed() < offline_grace {
+                    continue;
+                }
+
+                warn!(
+                    agent_id = %agent_id,
+                    runner_count = runner_names.len(),
+                    offline_secs = since.elapsed().as_secs(),
+                    "Agent offline past grace period - cleaning up orphaned runner(s) and releasing their jobs for retry"
+                );
+
+                if let Some(notifier) = &sweep_fleet_notifier {
+                    // The fleet's runner-event handler does the full cleanup:
+                    // remove from GitHub and state, and bump the pending job's
+                    // retry count so it can be re-scheduled. If an event is
+                    // dropped (channel full), the runner record survives and
+                    // the next sweep retries.
+                    for runner_name in runner_names {
+                        notifier
+                            .notify_runner_event(
+                                agent_id.clone(),
+                                RunnerEvent {
+                                    runner_name: runner_name.clone(),
+                                    vm_id: runner_name,
+                                    event_type: RunnerEventType::Destroyed.into(),
+                                    error: "agent offline".to_string(),
+                                },
+                            )
+                            .await;
+                    }
+                } else {
+                    // No fleet manager - remove directly from state and GitHub
+                    let runners = sweep_runner_state.remove_runners_for_agent(&agent_id).await;
                     for (runner_name, runner_info) in runners {
-                        // Remove from GitHub in background (non-blocking)
-                        let tp = cleanup_token_provider.clone();
+                        let tp = sweep_token_provider.clone();
                         let scope = runner_info.runner_scope.clone();
-                        let name = runner_name.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = tp.remove_runner(&scope, &name).await {
+                            if let Err(e) = tp.remove_runner(&scope, &runner_name).await {
                                 warn!(
-                                    "Failed to remove runner '{}' from GitHub for stale agent: {}",
-                                    name, e
+                                    "Failed to remove orphaned runner '{}' from GitHub: {}",
+                                    runner_name, e
                                 );
                             }
                         });
                     }
                 }
-            }
-        }
-    });
-
-    // Spawn one-time startup cleanup for orphaned runners
-    // These are runners persisted from a previous run whose agents never reconnected
-    let startup_cleanup_registry = agent_registry.clone();
-    let startup_cleanup_runner_state = runner_state.clone();
-    let startup_cleanup_token_provider = token_provider.clone();
-    tokio::spawn(async move {
-        // Wait for agents to have a chance to connect
-        let grace_period = std::time::Duration::from_secs(180); // 3 minutes
-        info!(
-            "Will check for orphaned runners in {} seconds",
-            grace_period.as_secs()
-        );
-        tokio::time::sleep(grace_period).await;
-
-        // Get all persisted runners
-        let all_runners = match startup_cleanup_runner_state.get_all_runners().await {
-            Ok(runners) => runners,
-            Err(e) => {
-                error!("Failed to get runners for startup cleanup: {}", e);
-                return;
-            }
-        };
-
-        if all_runners.is_empty() {
-            debug!("No persisted runners to check for orphan cleanup");
-            return;
-        }
-
-        // Get currently connected agents
-        let connected_agents: std::collections::HashSet<String> = startup_cleanup_registry
-            .list_all()
-            .await
-            .into_iter()
-            .map(|a| a.agent_id)
-            .collect();
-
-        // Find runners whose agents aren't connected
-        let mut orphaned_agents: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for (_, runner_info) in &all_runners {
-            if !connected_agents.contains(&runner_info.agent_id) {
-                orphaned_agents.insert(runner_info.agent_id.clone());
-            }
-        }
-
-        if orphaned_agents.is_empty() {
-            debug!("All persisted runners have connected agents");
-            return;
-        }
-
-        warn!(
-            "Found {} orphaned runner(s) from {} agent(s) that never reconnected - cleaning up",
-            all_runners
-                .iter()
-                .filter(|(_, r)| orphaned_agents.contains(&r.agent_id))
-                .count(),
-            orphaned_agents.len()
-        );
-
-        // Clean up runners for each orphaned agent
-        for agent_id in orphaned_agents {
-            let runners = startup_cleanup_runner_state
-                .remove_runners_for_agent(&agent_id)
-                .await;
-            for (runner_name, runner_info) in runners {
-                let tp = startup_cleanup_token_provider.clone();
-                let scope = runner_info.runner_scope.clone();
-                let name = runner_name.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = tp.remove_runner(&scope, &name).await {
-                        warn!(
-                            "Failed to remove orphaned runner '{}' from GitHub: {}",
-                            name, e
-                        );
-                    }
-                });
             }
         }
     });
