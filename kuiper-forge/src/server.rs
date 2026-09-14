@@ -46,6 +46,10 @@ use crate::runner_state::RunnerStateStore;
 use crate::tls::ServerTrust;
 use crate::webhook::{self, WebhookNotifier, WebhookState};
 
+/// How long a disconnected agent gets to come back before its in-flight runners are failed over.
+/// Short blips (agent restart, tls hiccup) reconnect well inside this.
+const AGENT_DISCONNECT_GRACE: Duration = Duration::from_secs(30);
+
 /// Parse PROXY protocol header from an incoming TCP connection.
 ///
 /// Supports both PROXY protocol v1 (text) and v2 (binary).
@@ -545,7 +549,49 @@ impl AgentService for AgentServiceImpl {
             }
 
             // Unregister agent on disconnect
-            agent_registry.unregister(&agent_id).await;
+            let disconnect_stamp = agent_registry.unregister(&agent_id).await;
+
+            // fail over this agent's in-flight webhook runners if it stays gone. without this the
+            // pending job keeps pointing at a runner record on a dead agent and every queue pass
+            // skips it, while other agents with free slots sit idle
+            if let (Some(rs), Some(notifier)) = (runner_state.clone(), fleet_notifier.clone()) {
+                let registry = Arc::clone(&agent_registry);
+                tokio::spawn(async move {
+                    tokio::time::sleep(AGENT_DISCONNECT_GRACE).await;
+                    // snapshot first, claim second: the claim proves the agent was still offline
+                    // after the snapshot, so nothing in it can belong to a new connection
+                    let orphaned: Vec<_> = rs
+                        .get_runners_for_agent(&agent_id)
+                        .await
+                        .into_iter()
+                        .filter(|(_, info)| info.job_id.is_some())
+                        .collect();
+                    if orphaned.is_empty() {
+                        return;
+                    }
+                    if !registry.claim_failover(&agent_id, disconnect_stamp).await {
+                        return; // reconnected, or dropped again and that timer owns the grace
+                    }
+                    warn!(
+                        agent_id = %agent_id,
+                        runners = orphaned.len(),
+                        "Agent still offline after grace period - failing its runners so jobs can move"
+                    );
+                    for (runner_name, _) in orphaned {
+                        notifier
+                            .send_runner_event(
+                                agent_id.clone(),
+                                RunnerEvent {
+                                    runner_name: runner_name.clone(),
+                                    vm_id: runner_name,
+                                    event_type: RunnerEventType::Destroyed.into(),
+                                    error: "agent disconnected".to_string(),
+                                },
+                            )
+                            .await;
+                    }
+                });
+            }
         });
 
         // Return the outbound stream

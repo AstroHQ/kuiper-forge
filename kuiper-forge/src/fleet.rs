@@ -100,6 +100,23 @@ impl FleetNotifier {
         }
         let _ = self.notify_tx.try_send(());
     }
+
+    /// Same as `notify_runner_event` but waits for channel space. For synthetic one-shot events
+    /// (disconnect failover) that nothing regenerates if dropped.
+    pub async fn send_runner_event(&self, agent_id: String, event: RunnerEvent) {
+        if self
+            .runner_event_tx
+            .send(AgentRunnerEvent {
+                agent_id: agent_id.clone(),
+                event,
+            })
+            .await
+            .is_err()
+        {
+            error!(agent_id = %agent_id, "Fleet runner event channel closed - event lost");
+        }
+        let _ = self.notify_tx.try_send(());
+    }
 }
 
 /// Fleet manager that maintains runner pools.
@@ -611,6 +628,7 @@ impl FleetManager {
             match self
                 .create_runner_on_demand(
                     &job_info.agent_labels,
+                    &job_info.failed_agents,
                     &job_info.runner_scope,
                     job_info
                         .runner_group
@@ -641,8 +659,10 @@ impl FleetManager {
                         continue;
                     } else {
                         // Different error (token fetch failed, etc.) - increment retry count
-                        if let Some(new_count) =
-                            self.pending_job_store.increment_retry_count(job_id).await
+                        if let Some(new_count) = self
+                            .pending_job_store
+                            .increment_retry_count(job_id, None)
+                            .await
                         {
                             if new_count >= MAX_RETRIES {
                                 warn!(
@@ -671,6 +691,7 @@ impl FleetManager {
     async fn create_runner_on_demand(
         &self,
         labels: &[String],
+        avoid_agents: &[String],
         runner_scope: &RunnerScope,
         runner_group_id: u64,
         job_id: u64,
@@ -678,10 +699,11 @@ impl FleetManager {
         repository: Option<&str>,
         workflow_name: Option<&str>,
     ) -> anyhow::Result<()> {
-        // Find an available agent with matching labels
+        // Find the least loaded agent with matching labels, steering away from ones that already
+        // failed this job
         let agent_id = self
             .agent_registry
-            .find_available_agent(labels)
+            .select_agent(labels, avoid_agents)
             .await
             .ok_or_else(|| anyhow::anyhow!("No available agent for labels {labels:?}"))?;
 
@@ -793,11 +815,15 @@ impl FleetManager {
         async fn handle_command_failure(
             pending_job_store: &crate::pending_jobs::PendingJobStore,
             job_id: u64,
+            agent_id: &str,
             error_context: &str,
         ) {
             use crate::pending_jobs::MAX_RETRIES;
 
-            if let Some(new_count) = pending_job_store.increment_retry_count(job_id).await {
+            if let Some(new_count) = pending_job_store
+                .increment_retry_count(job_id, Some(agent_id))
+                .await
+            {
                 if new_count >= MAX_RETRIES {
                     warn!(
                         job_id = %job_id,
@@ -869,6 +895,7 @@ impl FleetManager {
                             handle_command_failure(
                                 &pending_job_store,
                                 job_id,
+                                &agent_id_clone,
                                 &format!("runner failure: {}", result.error),
                             )
                             .await;
@@ -903,6 +930,7 @@ impl FleetManager {
                         handle_command_failure(
                             &pending_job_store,
                             job_id,
+                            &agent_id_clone,
                             "unexpected agent response",
                         )
                         .await;
@@ -924,6 +952,7 @@ impl FleetManager {
                     handle_command_failure(
                         &pending_job_store,
                         job_id,
+                        &agent_id_clone,
                         &format!("command error: {e}"),
                     )
                     .await;
@@ -1060,9 +1089,6 @@ impl FleetManager {
                 // Release the reserved slot on the agent.
                 self.agent_registry.release_slot(&event.agent_id).await;
 
-                // Agent slot freed - try to process pending webhook jobs
-                self.process_pending_jobs().await;
-
                 // Handle pending job state based on runner outcome
                 if let Some(job_id) = runner_info.job_id {
                     use crate::pending_jobs::MAX_RETRIES;
@@ -1080,8 +1106,10 @@ impl FleetManager {
                         }
                         RunnerEventType::Failed | RunnerEventType::Destroyed => {
                             // Failure - increment retry count for potential retry
-                            if let Some(new_count) =
-                                self.pending_job_store.increment_retry_count(job_id).await
+                            if let Some(new_count) = self
+                                .pending_job_store
+                                .increment_retry_count(job_id, Some(&event.agent_id))
+                                .await
                             {
                                 if new_count >= MAX_RETRIES {
                                     warn!(
@@ -1161,6 +1189,11 @@ impl FleetManager {
                         );
                     }
                 });
+
+                // only now: the runner is gone from state and the retry is recorded, so the job is
+                // eligible again. doing this earlier just logged "already has active runner" and
+                // left the retry to whatever notification came next
+                self.process_pending_jobs().await;
             }
         }
     }

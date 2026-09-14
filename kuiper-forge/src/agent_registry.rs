@@ -200,6 +200,10 @@ impl ConnectedAgent {
 #[derive(Debug, Default)]
 pub struct AgentRegistry {
     agents: RwLock<HashMap<String, Arc<RwLock<ConnectedAgent>>>>,
+    /// When each agent last dropped, cleared again on register. Also the lock that serializes
+    /// register against `claim_failover`, so a reconnect can't slip in between "still offline" and
+    /// "fail its runners". Always taken before `agents`.
+    disconnects: RwLock<HashMap<String, std::time::Instant>>,
 }
 
 impl AgentRegistry {
@@ -232,8 +236,12 @@ impl AgentRegistry {
             command_tx,
         )));
 
-        let mut agents = self.agents.write().await;
-        agents.insert(agent_id.clone(), Arc::clone(&agent));
+        {
+            let mut disconnects = self.disconnects.write().await;
+            let mut agents = self.agents.write().await;
+            agents.insert(agent_id.clone(), Arc::clone(&agent));
+            disconnects.remove(&agent_id);
+        }
 
         info!(
             agent_id = %agent_id,
@@ -253,9 +261,14 @@ impl AgentRegistry {
     ///
     /// This cancels all pending commands for the agent, which will cause
     /// the fleet manager to clean up any runners that were being created.
-    pub async fn unregister(&self, agent_id: &str) {
+    ///
+    /// Returns the disconnect stamp; compare with `last_disconnect` before acting on a grace timer.
+    pub async fn unregister(&self, agent_id: &str) -> std::time::Instant {
+        let stamp = std::time::Instant::now();
         let agent = {
+            let mut disconnects = self.disconnects.write().await;
             let mut agents = self.agents.write().await;
+            disconnects.insert(agent_id.to_string(), stamp);
             agents.remove(agent_id)
         };
 
@@ -280,6 +293,22 @@ impl AgentRegistry {
                 info!(agent_id = %agent_id, "Agent unregistered");
             }
         }
+
+        stamp
+    }
+
+    /// Returns true if the agent is still offline from the disconnect identified by `stamp`, and
+    /// consumes the stamp so nobody else claims it. Atomic with register: after this returns true,
+    /// any reconnect happens strictly later, so runners snapshotted *before* the call can't belong
+    /// to the new connection.
+    pub async fn claim_failover(&self, agent_id: &str, stamp: std::time::Instant) -> bool {
+        let mut disconnects = self.disconnects.write().await;
+        let agents = self.agents.read().await;
+        if agents.contains_key(agent_id) || disconnects.get(agent_id) != Some(&stamp) {
+            return false;
+        }
+        disconnects.remove(agent_id);
+        true
     }
 
     /// Get an agent by ID
@@ -290,19 +319,64 @@ impl AgentRegistry {
 
     /// Find an agent with capacity matching the required labels
     pub async fn find_available_agent(&self, labels: &[String]) -> Option<String> {
+        self.select_agent(labels, &[]).await
+    }
+
+    /// Pick the least loaded agent that matches the labels and has a free slot.
+    ///
+    /// Agents in `avoid` (ones that already failed this job) only get picked when no other agent
+    /// fits, so a single-agent setup still retries instead of stranding the job.
+    ///
+    /// Least loaded = most free slots, then fewest in use, then id. Iterating the HashMap and taking
+    /// the first match biased everything onto whichever agent happened to hash first.
+    pub async fn select_agent(&self, labels: &[String], avoid: &[String]) -> Option<String> {
         let agents = self.agents.read().await;
         let mut reasons: Vec<String> = Vec::new();
+        // (avoided, free, in_use, id) - sorted so a non-avoided agent with the most free slots wins
+        let mut candidates: Vec<(bool, usize, usize, String)> = Vec::new();
         for (id, agent) in agents.iter() {
             let agent = agent.read().await;
             let has_cap = agent.has_capacity();
             let matches = agent.matches_labels(labels);
             if has_cap && matches {
-                return Some(id.clone());
+                let in_use = agent.active_vms + agent.reserved_slots;
+                candidates.push((
+                    avoid.contains(id),
+                    agent.available_capacity(),
+                    in_use,
+                    id.clone(),
+                ));
+                continue;
             }
             reasons.push(format!(
                 "{}: matches={}, capacity={} (active={}, reserved={}, max={})",
                 id, matches, has_cap, agent.active_vms, agent.reserved_slots, agent.max_vms
             ));
+        }
+        drop(agents);
+
+        candidates.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(b.1.cmp(&a.1))
+                .then(a.2.cmp(&b.2))
+                .then(a.3.cmp(&b.3))
+        });
+        if let Some((avoided, free, in_use, id)) = candidates.first() {
+            if *avoided {
+                warn!(
+                    agent_id = %id,
+                    "Only agents that already failed this job have capacity - retrying on one anyway"
+                );
+            } else {
+                debug!(
+                    agent_id = %id,
+                    free_slots = free,
+                    in_use = in_use,
+                    candidates = candidates.len(),
+                    "Selected least loaded agent"
+                );
+            }
+            return Some(id.clone());
         }
         if reasons.is_empty() {
             warn!("No agents registered to handle labels {:?}", labels);
@@ -1086,5 +1160,122 @@ mod tests {
             .find_available_agent(&["self-hosted".to_string(), "macos".to_string()])
             .await;
         assert_eq!(found, Some("agent_1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_select_agent_prefers_least_loaded() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+
+        for (id, active) in [("busy", 1usize), ("idle", 0usize)] {
+            registry
+                .register(
+                    id.to_string(),
+                    AgentType::Tart,
+                    format!("{id}.local"),
+                    2,
+                    active,
+                    vec!["macos".to_string()],
+                    vec![],
+                    tx.clone(),
+                )
+                .await;
+        }
+
+        let labels = ["macos".to_string()];
+        assert_eq!(
+            registry.select_agent(&labels, &[]).await,
+            Some("idle".to_string())
+        );
+
+        // a reservation counts as load too
+        assert!(registry.reserve_slot("idle").await);
+        assert!(registry.reserve_slot("idle").await);
+        assert_eq!(
+            registry.select_agent(&labels, &[]).await,
+            Some("busy".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_select_agent_avoids_failed_agent_when_possible() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+
+        for id in ["a", "b"] {
+            registry
+                .register(
+                    id.to_string(),
+                    AgentType::Tart,
+                    format!("{id}.local"),
+                    2,
+                    0,
+                    vec!["macos".to_string()],
+                    vec![],
+                    tx.clone(),
+                )
+                .await;
+        }
+
+        let labels = ["macos".to_string()];
+        // tie on load, ids break it: "a" wins unless avoided
+        assert_eq!(
+            registry.select_agent(&labels, &[]).await,
+            Some("a".to_string())
+        );
+        assert_eq!(
+            registry.select_agent(&labels, &["a".to_string()]).await,
+            Some("b".to_string())
+        );
+        // everyone failed: still hand out someone rather than strand the job
+        assert_eq!(
+            registry
+                .select_agent(&labels, &["a".to_string(), "b".to_string()])
+                .await,
+            Some("a".to_string())
+        );
+        // a full non-failed agent doesn't count as an alternative
+        assert!(registry.reserve_slot("b").await);
+        assert!(registry.reserve_slot("b").await);
+        assert_eq!(
+            registry.select_agent(&labels, &["a".to_string()]).await,
+            Some("a".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_stamp_is_replaced_by_newer_drop() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        let reg = || {
+            registry.register(
+                "a".to_string(),
+                AgentType::Tart,
+                "a.local".to_string(),
+                1,
+                0,
+                vec![],
+                vec![],
+                tx.clone(),
+            )
+        };
+
+        reg().await;
+        let first = registry.unregister("a").await;
+
+        // came back and dropped again: the first timer's claim is stale, the second's wins once
+        reg().await;
+        assert!(!registry.claim_failover("a", first).await);
+        let second = registry.unregister("a").await;
+        assert!(second > first);
+        assert!(!registry.claim_failover("a", first).await);
+        assert!(registry.claim_failover("a", second).await);
+        assert!(!registry.claim_failover("a", second).await);
+
+        // reconnect clears the stamp, so a timer from before can't claim after registration
+        reg().await;
+        let third = registry.unregister("a").await;
+        reg().await;
+        assert!(!registry.claim_failover("a", third).await);
     }
 }
