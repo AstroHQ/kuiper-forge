@@ -549,7 +549,7 @@ impl AgentService for AgentServiceImpl {
             }
 
             // Unregister agent on disconnect
-            agent_registry.unregister(&agent_id).await;
+            let disconnect_stamp = agent_registry.unregister(&agent_id).await;
 
             // fail over this agent's in-flight webhook runners if it stays gone. without this the
             // pending job keeps pointing at a runner record on a dead agent and every queue pass
@@ -560,6 +560,9 @@ impl AgentService for AgentServiceImpl {
                     tokio::time::sleep(AGENT_DISCONNECT_GRACE).await;
                     if registry.get(&agent_id).await.is_some() {
                         return; // reconnected in time, its status report reconciles the runners
+                    }
+                    if registry.last_disconnect(&agent_id).await != Some(disconnect_stamp) {
+                        return; // it came back and dropped again; that drop's timer owns the grace
                     }
                     let orphaned: Vec<_> = rs
                         .get_runners_for_agent(&agent_id)

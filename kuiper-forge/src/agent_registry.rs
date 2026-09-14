@@ -200,6 +200,9 @@ impl ConnectedAgent {
 #[derive(Debug, Default)]
 pub struct AgentRegistry {
     agents: RwLock<HashMap<String, Arc<RwLock<ConnectedAgent>>>>,
+    /// When each agent last dropped. A disconnect grace timer only acts if its own stamp is still
+    /// the latest, so a reconnect + second drop gets a fresh grace period instead of the stale one.
+    disconnects: RwLock<HashMap<String, std::time::Instant>>,
 }
 
 impl AgentRegistry {
@@ -253,7 +256,15 @@ impl AgentRegistry {
     ///
     /// This cancels all pending commands for the agent, which will cause
     /// the fleet manager to clean up any runners that were being created.
-    pub async fn unregister(&self, agent_id: &str) {
+    ///
+    /// Returns the disconnect stamp; compare with `last_disconnect` before acting on a grace timer.
+    pub async fn unregister(&self, agent_id: &str) -> std::time::Instant {
+        let stamp = std::time::Instant::now();
+        self.disconnects
+            .write()
+            .await
+            .insert(agent_id.to_string(), stamp);
+
         let agent = {
             let mut agents = self.agents.write().await;
             agents.remove(agent_id)
@@ -280,6 +291,13 @@ impl AgentRegistry {
                 info!(agent_id = %agent_id, "Agent unregistered");
             }
         }
+
+        stamp
+    }
+
+    /// Stamp of the most recent disconnect for this agent, if it ever dropped.
+    pub async fn last_disconnect(&self, agent_id: &str) -> Option<std::time::Instant> {
+        self.disconnects.read().await.get(agent_id).copied()
     }
 
     /// Get an agent by ID
@@ -1212,5 +1230,33 @@ mod tests {
             registry.select_agent(&labels, &["a".to_string()]).await,
             Some("a".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_stamp_is_replaced_by_newer_drop() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        let reg = || {
+            registry.register(
+                "a".to_string(),
+                AgentType::Tart,
+                "a.local".to_string(),
+                1,
+                0,
+                vec![],
+                vec![],
+                tx.clone(),
+            )
+        };
+
+        assert!(registry.last_disconnect("a").await.is_none());
+        reg().await;
+        let first = registry.unregister("a").await;
+        assert_eq!(registry.last_disconnect("a").await, Some(first));
+
+        reg().await;
+        let second = registry.unregister("a").await;
+        assert!(second > first);
+        assert_eq!(registry.last_disconnect("a").await, Some(second));
     }
 }
