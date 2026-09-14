@@ -100,6 +100,23 @@ impl FleetNotifier {
         }
         let _ = self.notify_tx.try_send(());
     }
+
+    /// Same as `notify_runner_event` but waits for channel space. For synthetic one-shot events
+    /// (disconnect failover) that nothing regenerates if dropped.
+    pub async fn send_runner_event(&self, agent_id: String, event: RunnerEvent) {
+        if self
+            .runner_event_tx
+            .send(AgentRunnerEvent {
+                agent_id: agent_id.clone(),
+                event,
+            })
+            .await
+            .is_err()
+        {
+            error!(agent_id = %agent_id, "Fleet runner event channel closed - event lost");
+        }
+        let _ = self.notify_tx.try_send(());
+    }
 }
 
 /// Fleet manager that maintains runner pools.

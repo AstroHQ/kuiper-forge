@@ -200,8 +200,9 @@ impl ConnectedAgent {
 #[derive(Debug, Default)]
 pub struct AgentRegistry {
     agents: RwLock<HashMap<String, Arc<RwLock<ConnectedAgent>>>>,
-    /// When each agent last dropped. A disconnect grace timer only acts if its own stamp is still
-    /// the latest, so a reconnect + second drop gets a fresh grace period instead of the stale one.
+    /// When each agent last dropped, cleared again on register. Also the lock that serializes
+    /// register against `claim_failover`, so a reconnect can't slip in between "still offline" and
+    /// "fail its runners". Always taken before `agents`.
     disconnects: RwLock<HashMap<String, std::time::Instant>>,
 }
 
@@ -235,8 +236,12 @@ impl AgentRegistry {
             command_tx,
         )));
 
-        let mut agents = self.agents.write().await;
-        agents.insert(agent_id.clone(), Arc::clone(&agent));
+        {
+            let mut disconnects = self.disconnects.write().await;
+            let mut agents = self.agents.write().await;
+            agents.insert(agent_id.clone(), Arc::clone(&agent));
+            disconnects.remove(&agent_id);
+        }
 
         info!(
             agent_id = %agent_id,
@@ -260,13 +265,10 @@ impl AgentRegistry {
     /// Returns the disconnect stamp; compare with `last_disconnect` before acting on a grace timer.
     pub async fn unregister(&self, agent_id: &str) -> std::time::Instant {
         let stamp = std::time::Instant::now();
-        self.disconnects
-            .write()
-            .await
-            .insert(agent_id.to_string(), stamp);
-
         let agent = {
+            let mut disconnects = self.disconnects.write().await;
             let mut agents = self.agents.write().await;
+            disconnects.insert(agent_id.to_string(), stamp);
             agents.remove(agent_id)
         };
 
@@ -295,9 +297,18 @@ impl AgentRegistry {
         stamp
     }
 
-    /// Stamp of the most recent disconnect for this agent, if it ever dropped.
-    pub async fn last_disconnect(&self, agent_id: &str) -> Option<std::time::Instant> {
-        self.disconnects.read().await.get(agent_id).copied()
+    /// Returns true if the agent is still offline from the disconnect identified by `stamp`, and
+    /// consumes the stamp so nobody else claims it. Atomic with register: after this returns true,
+    /// any reconnect happens strictly later, so runners snapshotted *before* the call can't belong
+    /// to the new connection.
+    pub async fn claim_failover(&self, agent_id: &str, stamp: std::time::Instant) -> bool {
+        let mut disconnects = self.disconnects.write().await;
+        let agents = self.agents.read().await;
+        if agents.contains_key(agent_id) || disconnects.get(agent_id) != Some(&stamp) {
+            return false;
+        }
+        disconnects.remove(agent_id);
+        true
     }
 
     /// Get an agent by ID
@@ -1249,14 +1260,22 @@ mod tests {
             )
         };
 
-        assert!(registry.last_disconnect("a").await.is_none());
         reg().await;
         let first = registry.unregister("a").await;
-        assert_eq!(registry.last_disconnect("a").await, Some(first));
 
+        // came back and dropped again: the first timer's claim is stale, the second's wins once
         reg().await;
+        assert!(!registry.claim_failover("a", first).await);
         let second = registry.unregister("a").await;
         assert!(second > first);
-        assert_eq!(registry.last_disconnect("a").await, Some(second));
+        assert!(!registry.claim_failover("a", first).await);
+        assert!(registry.claim_failover("a", second).await);
+        assert!(!registry.claim_failover("a", second).await);
+
+        // reconnect clears the stamp, so a timer from before can't claim after registration
+        reg().await;
+        let third = registry.unregister("a").await;
+        reg().await;
+        assert!(!registry.claim_failover("a", third).await);
     }
 }

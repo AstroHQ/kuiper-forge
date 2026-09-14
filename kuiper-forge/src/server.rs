@@ -558,12 +558,8 @@ impl AgentService for AgentServiceImpl {
                 let registry = Arc::clone(&agent_registry);
                 tokio::spawn(async move {
                     tokio::time::sleep(AGENT_DISCONNECT_GRACE).await;
-                    if registry.get(&agent_id).await.is_some() {
-                        return; // reconnected in time, its status report reconciles the runners
-                    }
-                    if registry.last_disconnect(&agent_id).await != Some(disconnect_stamp) {
-                        return; // it came back and dropped again; that drop's timer owns the grace
-                    }
+                    // snapshot first, claim second: the claim proves the agent was still offline
+                    // after the snapshot, so nothing in it can belong to a new connection
                     let orphaned: Vec<_> = rs
                         .get_runners_for_agent(&agent_id)
                         .await
@@ -573,6 +569,9 @@ impl AgentService for AgentServiceImpl {
                     if orphaned.is_empty() {
                         return;
                     }
+                    if !registry.claim_failover(&agent_id, disconnect_stamp).await {
+                        return; // reconnected, or dropped again and that timer owns the grace
+                    }
                     warn!(
                         agent_id = %agent_id,
                         runners = orphaned.len(),
@@ -580,7 +579,7 @@ impl AgentService for AgentServiceImpl {
                     );
                     for (runner_name, _) in orphaned {
                         notifier
-                            .notify_runner_event(
+                            .send_runner_event(
                                 agent_id.clone(),
                                 RunnerEvent {
                                     runner_name: runner_name.clone(),
