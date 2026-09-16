@@ -119,6 +119,29 @@ impl FleetNotifier {
     }
 }
 
+/// Returns true if GitHub still lists the job as queued.
+///
+/// JIT runners aren't bound to a job: any queued job with matching labels can grab any idle runner.
+/// So "the runner we made for job X finished" doesn't mean X ran. Check before dropping X from the
+/// pending queue, or the last job in a same-label burst is left queued with no runner and no record.
+async fn job_still_queued(
+    token_provider: &dyn RunnerTokenProvider,
+    repository: Option<&str>,
+    job_id: u64,
+) -> bool {
+    let Some(repo) = repository else {
+        return false; // no repo means no way to ask; keep the old assumption
+    };
+    match token_provider.get_job_status(repo, job_id).await {
+        Ok(Some(status)) => status == "queued",
+        Ok(None) => false,
+        Err(e) => {
+            warn!(job_id = %job_id, "Could not verify job status after runner completion: {e}");
+            false
+        }
+    }
+}
+
 /// Fleet manager that maintains runner pools.
 pub struct FleetManager {
     /// Configuration
@@ -323,7 +346,8 @@ impl FleetManager {
         // Tracked as an elapsed-time check on the 30s ticker rather than a separate
         // select! branch, because select! can starve lower-priority branches when
         // higher-priority ones (notifications, events) have constant traffic.
-        let github_verify_interval = Duration::from_secs(900); // 15 minutes
+        // also the backstop that re-adds jobs lost to runner steals, so keep it short-ish
+        let github_verify_interval = Duration::from_secs(300);
         let mut last_github_check = tokio::time::Instant::now();
 
         loop {
@@ -809,6 +833,7 @@ impl FleetManager {
         let runner_state = self.runner_state.clone();
         let agent_id_clone = agent_id.clone();
         let notify_tx = self.notify_tx.clone();
+        let repository_clone = repository.map(String::from);
 
         // Helper to handle retry counting on command-level failures
         // (agent rejection, timeout, unexpected response)
@@ -884,12 +909,25 @@ impl FleetManager {
                         // Legacy agents may respond with a full lifecycle result
                         agent_registry.release_slot(&agent_id_clone).await;
                         if result.success {
-                            info!(
-                                "Runner {} completed successfully (webhook)",
-                                runner_name_clone
-                            );
-                            // Success - remove from pending queue
-                            pending_job_store.remove_job(job_id).await;
+                            if job_still_queued(
+                                token_provider.as_ref(),
+                                repository_clone.as_deref(),
+                                job_id,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    "Runner {} completed but job {} is still queued on GitHub - it ran another job, re-provisioning",
+                                    runner_name_clone, job_id
+                                );
+                                let _ = notify_tx.try_send(());
+                            } else {
+                                info!(
+                                    "Runner {} completed successfully (webhook)",
+                                    runner_name_clone
+                                );
+                                pending_job_store.remove_job(job_id).await;
+                            }
                         } else {
                             warn!("Runner {} failed: {}", runner_name_clone, result.error);
                             handle_command_failure(
@@ -1095,14 +1133,30 @@ impl FleetManager {
 
                     match event_type {
                         RunnerEventType::Completed => {
-                            // Success - remove from pending queue
-                            self.pending_job_store.remove_job(job_id).await;
-                            info!(
-                                agent_id = %event.agent_id,
-                                runner_name = %runner_name,
-                                job_id = %job_id,
-                                "Runner completed successfully"
-                            );
+                            if job_still_queued(
+                                self.token_provider.as_ref(),
+                                runner_info.repository.as_deref(),
+                                job_id,
+                            )
+                            .await
+                            {
+                                // the runner ran some sibling job; leave ours pending so the
+                                // reprocess below makes it a fresh runner
+                                warn!(
+                                    agent_id = %event.agent_id,
+                                    runner_name = %runner_name,
+                                    job_id = %job_id,
+                                    "Runner completed but its job is still queued on GitHub - it ran another job, re-provisioning"
+                                );
+                            } else {
+                                self.pending_job_store.remove_job(job_id).await;
+                                info!(
+                                    agent_id = %event.agent_id,
+                                    runner_name = %runner_name,
+                                    job_id = %job_id,
+                                    "Runner completed successfully"
+                                );
+                            }
                         }
                         RunnerEventType::Failed | RunnerEventType::Destroyed => {
                             // Failure - increment retry count for potential retry
