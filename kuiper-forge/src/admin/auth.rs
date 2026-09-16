@@ -7,8 +7,8 @@ use crate::db::DbPool;
 use crate::sql;
 use anyhow::{Context, Result, anyhow};
 use argon2::{
-    Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    Argon2, PasswordHash,
+    password_hash::{PasswordHasher, PasswordVerifier},
 };
 use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
@@ -49,10 +49,9 @@ impl AdminAuthStore {
 
     /// Hash a password using Argon2id.
     pub fn hash_password(password: &str) -> Result<String> {
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let hash = argon2
-            .hash_password(password.as_bytes(), &salt)
+        // salt comes from the os rng inside hash_password now
+        let hash = Argon2::default()
+            .hash_password(password.as_bytes())
             .map_err(|e| anyhow!("Failed to hash password: {e}"))?;
         Ok(hash.to_string())
     }

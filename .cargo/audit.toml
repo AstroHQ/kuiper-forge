@@ -1,0 +1,5 @@
+[advisories]
+# rsa: Marvin timing attack, no fixed release. pulled in by russh's default `rsa` feature and only
+# used for ssh host-key / client-key crypto on our own agents, not exposed to untrusted callers.
+# drop this once russh moves to a fixed rsa.
+ignore = ["RUSTSEC-2023-0071"]

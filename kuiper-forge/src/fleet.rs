@@ -119,6 +119,40 @@ impl FleetNotifier {
     }
 }
 
+/// What GitHub says about a job after the runner we made for it finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobCheck {
+    /// Still queued: the runner ran some other same-label job, ours needs a new runner.
+    Queued,
+    /// Running, finished, or gone: safe to drop the pending record.
+    Done,
+    /// GitHub didn't answer: keep the record, the periodic verify settles it.
+    Unknown,
+}
+
+/// JIT runners aren't bound to a job: any queued job with matching labels can grab any idle runner.
+/// So "the runner we made for job X finished" doesn't mean X ran. Check before dropping X from the
+/// pending queue, or the last job in a same-label burst is left queued with no runner and no record.
+async fn check_job_after_runner(
+    token_provider: &dyn RunnerTokenProvider,
+    repository: Option<&str>,
+    job_id: u64,
+) -> JobCheck {
+    let Some(repo) = repository else {
+        // nothing to ask with, ever. keeping such a record would re-provision a runner every time
+        // one finished until the stale sweep removed it, so fall back to trusting the runner
+        return JobCheck::Done;
+    };
+    match token_provider.get_job_status(repo, job_id).await {
+        Ok(Some(status)) if status == "queued" => JobCheck::Queued,
+        Ok(_) => JobCheck::Done,
+        Err(e) => {
+            warn!(job_id = %job_id, "Could not verify job status after runner completion: {e}");
+            JobCheck::Unknown
+        }
+    }
+}
+
 /// Fleet manager that maintains runner pools.
 pub struct FleetManager {
     /// Configuration
@@ -323,7 +357,8 @@ impl FleetManager {
         // Tracked as an elapsed-time check on the 30s ticker rather than a separate
         // select! branch, because select! can starve lower-priority branches when
         // higher-priority ones (notifications, events) have constant traffic.
-        let github_verify_interval = Duration::from_secs(900); // 15 minutes
+        // also the backstop that re-adds jobs lost to runner steals, so keep it short-ish
+        let github_verify_interval = Duration::from_secs(300);
         let mut last_github_check = tokio::time::Instant::now();
 
         loop {
@@ -809,6 +844,7 @@ impl FleetManager {
         let runner_state = self.runner_state.clone();
         let agent_id_clone = agent_id.clone();
         let notify_tx = self.notify_tx.clone();
+        let repository_clone = repository.map(String::from);
 
         // Helper to handle retry counting on command-level failures
         // (agent rejection, timeout, unexpected response)
@@ -883,13 +919,37 @@ impl FleetManager {
                     Some(AgentPayload::Result(result)) => {
                         // Legacy agents may respond with a full lifecycle result
                         agent_registry.release_slot(&agent_id_clone).await;
+                        let mut reprovision = false;
                         if result.success {
-                            info!(
-                                "Runner {} completed successfully (webhook)",
-                                runner_name_clone
-                            );
-                            // Success - remove from pending queue
-                            pending_job_store.remove_job(job_id).await;
+                            match check_job_after_runner(
+                                token_provider.as_ref(),
+                                repository_clone.as_deref(),
+                                job_id,
+                            )
+                            .await
+                            {
+                                JobCheck::Queued => {
+                                    warn!(
+                                        "Runner {} completed but job {} is still queued on GitHub - it ran another job, re-provisioning",
+                                        runner_name_clone, job_id
+                                    );
+                                    reprovision = true;
+                                }
+                                JobCheck::Unknown => {
+                                    info!(
+                                        "Runner {} completed but job {} status is unverified - keeping it pending",
+                                        runner_name_clone, job_id
+                                    );
+                                    reprovision = true;
+                                }
+                                JobCheck::Done => {
+                                    info!(
+                                        "Runner {} completed successfully (webhook)",
+                                        runner_name_clone
+                                    );
+                                    pending_job_store.remove_job(job_id).await;
+                                }
+                            }
                         } else {
                             warn!("Runner {} failed: {}", runner_name_clone, result.error);
                             handle_command_failure(
@@ -910,6 +970,11 @@ impl FleetManager {
                             );
                         }
                         runner_state.remove_runner(&runner_name_clone).await;
+                        if reprovision {
+                            // only after the runner record is gone, or the pass this wakes finds
+                            // it via runners_for_job and skips the job
+                            let _ = notify_tx.try_send(());
+                        }
                     }
                     other => {
                         warn!(
@@ -1095,14 +1160,43 @@ impl FleetManager {
 
                     match event_type {
                         RunnerEventType::Completed => {
-                            // Success - remove from pending queue
-                            self.pending_job_store.remove_job(job_id).await;
-                            info!(
-                                agent_id = %event.agent_id,
-                                runner_name = %runner_name,
-                                job_id = %job_id,
-                                "Runner completed successfully"
-                            );
+                            match check_job_after_runner(
+                                self.token_provider.as_ref(),
+                                runner_info.repository.as_deref(),
+                                job_id,
+                            )
+                            .await
+                            {
+                                JobCheck::Queued => {
+                                    // the runner ran some sibling job; leave ours pending so the
+                                    // reprocess below makes it a fresh runner
+                                    warn!(
+                                        agent_id = %event.agent_id,
+                                        runner_name = %runner_name,
+                                        job_id = %job_id,
+                                        "Runner completed but its job is still queued on GitHub - it ran another job, re-provisioning"
+                                    );
+                                }
+                                JobCheck::Unknown => {
+                                    // deleting on a guess is the one irreversible move here, so
+                                    // don't. worst case is one spare runner for a job that did run
+                                    info!(
+                                        agent_id = %event.agent_id,
+                                        runner_name = %runner_name,
+                                        job_id = %job_id,
+                                        "Runner completed but job status is unverified - keeping it pending"
+                                    );
+                                }
+                                JobCheck::Done => {
+                                    self.pending_job_store.remove_job(job_id).await;
+                                    info!(
+                                        agent_id = %event.agent_id,
+                                        runner_name = %runner_name,
+                                        job_id = %job_id,
+                                        "Runner completed successfully"
+                                    );
+                                }
+                            }
                         }
                         RunnerEventType::Failed | RunnerEventType::Destroyed => {
                             // Failure - increment retry count for potential retry

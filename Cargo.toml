@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.88"
+rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/AstroHQ/kuiper-forge"
 
@@ -28,7 +28,6 @@ tokio-stream = "0.1.17"
 tonic = { version = "0.14", features = ["tls-aws-lc", "tls-native-roots", "tls-connect-info"] }
 prost = "0.14"
 rcgen = { version = "0.14", features = ["pem", "aws_lc_rs"], default-features = false }
-rustls-pemfile = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.13", features = ["json", "rustls", "form"], default-features = false }
@@ -44,7 +43,7 @@ sha2 = "0.10"
 
 # Agent-specific dependencies
 toml = "0.9"
-base64 = "0.22"
+base64 = "0.23"
 gethostname = "1.1"
 libc = "0.2"
-russh = "0.61"
+russh = "0.62"
