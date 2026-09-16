@@ -29,6 +29,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::service::Routes;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -827,13 +828,12 @@ pub async fn run_server(
         .with_context(|| format!("Failed to read CA cert: {:?}", config.tls.ca_cert))?;
 
     // Build TLS config using rustls
-    let certs = rustls_pemfile::certs(&mut server_cert.as_bytes())
+    let certs = CertificateDer::pem_slice_iter(server_cert.as_bytes())
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("Failed to parse server certificate")?;
-    let key = rustls_pemfile::private_key(&mut server_key.as_bytes())
-        .context("Failed to parse server key")?
-        .context("No private key found")?;
-    let ca_certs = rustls_pemfile::certs(&mut ca_cert.as_bytes())
+    let key = PrivateKeyDer::from_pem_slice(server_key.as_bytes())
+        .context("Failed to parse server key")?;
+    let ca_certs = CertificateDer::pem_slice_iter(ca_cert.as_bytes())
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("Failed to parse CA certificate")?;
 
@@ -1081,13 +1081,12 @@ async fn run_grpc_only_server(
         );
 
         // Build TLS config using rustls (same as webhook mode)
-        let certs = rustls_pemfile::certs(&mut server_cert.as_bytes())
+        let certs = CertificateDer::pem_slice_iter(server_cert.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("Failed to parse server certificate")?;
-        let key = rustls_pemfile::private_key(&mut server_key.as_bytes())
-            .context("Failed to parse server key")?
-            .context("No private key found")?;
-        let ca_certs = rustls_pemfile::certs(&mut ca_cert.as_bytes())
+        let key = PrivateKeyDer::from_pem_slice(server_key.as_bytes())
+            .context("Failed to parse server key")?;
+        let ca_certs = CertificateDer::pem_slice_iter(ca_cert.as_bytes())
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("Failed to parse CA certificate")?;
 

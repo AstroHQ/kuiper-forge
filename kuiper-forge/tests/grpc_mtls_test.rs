@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::pki_types::{CertificateDer, pem::PemObject};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 
 // Install default crypto provider for rustls
@@ -172,7 +173,7 @@ impl TestFixture {
     /// Build a rustls client config for manual TLS connections
     fn build_tls_client_config(&self) -> Arc<rustls::ClientConfig> {
         let mut root_store = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut self.ca_cert_pem.as_bytes()) {
+        for cert in CertificateDer::pem_slice_iter(self.ca_cert_pem.as_bytes()) {
             root_store.add(cert.unwrap()).unwrap();
         }
 
