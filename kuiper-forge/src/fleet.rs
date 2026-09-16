@@ -908,6 +908,7 @@ impl FleetManager {
                     Some(AgentPayload::Result(result)) => {
                         // Legacy agents may respond with a full lifecycle result
                         agent_registry.release_slot(&agent_id_clone).await;
+                        let mut reprovision = false;
                         if result.success {
                             if job_still_queued(
                                 token_provider.as_ref(),
@@ -920,7 +921,7 @@ impl FleetManager {
                                     "Runner {} completed but job {} is still queued on GitHub - it ran another job, re-provisioning",
                                     runner_name_clone, job_id
                                 );
-                                let _ = notify_tx.try_send(());
+                                reprovision = true;
                             } else {
                                 info!(
                                     "Runner {} completed successfully (webhook)",
@@ -948,6 +949,11 @@ impl FleetManager {
                             );
                         }
                         runner_state.remove_runner(&runner_name_clone).await;
+                        if reprovision {
+                            // only after the runner record is gone, or the pass this wakes finds
+                            // it via runners_for_job and skips the job
+                            let _ = notify_tx.try_send(());
+                        }
                     }
                     other => {
                         warn!(
