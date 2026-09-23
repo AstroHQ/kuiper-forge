@@ -358,3 +358,37 @@ pub const DELETE_API_TOKEN: &str = "DELETE FROM api_tokens WHERE id = ?";
 
 #[cfg(feature = "postgres")]
 pub const DELETE_API_TOKEN: &str = "DELETE FROM api_tokens WHERE id = $1";
+
+// Agent failures queries
+
+#[cfg(feature = "sqlite")]
+pub const INSERT_AGENT_FAILURE: &str = r#"
+    INSERT INTO agent_failures (id, agent_id, occurred_at, kind, runner_name, job_id, message)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+"#;
+
+#[cfg(feature = "postgres")]
+pub const INSERT_AGENT_FAILURE: &str = r#"
+    INSERT INTO agent_failures (id, agent_id, occurred_at, kind, runner_name, job_id, message)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+"#;
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_AGENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind, runner_name, job_id, message FROM agent_failures WHERE agent_id = ? ORDER BY occurred_at DESC LIMIT ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_AGENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind, runner_name, job_id, message FROM agent_failures WHERE agent_id = $1 ORDER BY occurred_at DESC LIMIT $2";
+
+#[cfg(feature = "sqlite")]
+pub const PRUNE_AGENT_FAILURES: &str = r#"
+    DELETE FROM agent_failures WHERE agent_id = ? AND id NOT IN (
+        SELECT id FROM agent_failures WHERE agent_id = ? ORDER BY occurred_at DESC LIMIT ?
+    )
+"#;
+
+#[cfg(feature = "postgres")]
+pub const PRUNE_AGENT_FAILURES: &str = r#"
+    DELETE FROM agent_failures WHERE agent_id = $1 AND id NOT IN (
+        SELECT id FROM agent_failures WHERE agent_id = $2 ORDER BY occurred_at DESC LIMIT $3
+    )
+"#;

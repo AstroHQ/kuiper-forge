@@ -2,6 +2,7 @@
 
 use crate::admin::api_tokens::ApiTokenStore;
 use crate::admin::auth::AdminAuthStore;
+use crate::agent_failures::AgentFailureStore;
 use crate::agent_registry::AgentRegistry;
 use crate::auth::AuthManager;
 use crate::pending_jobs::PendingJobStore;
@@ -28,6 +29,8 @@ pub struct AdminState {
     pub runner_state: Arc<RunnerStateStore>,
     /// Pending webhook jobs
     pub pending_jobs: Arc<PendingJobStore>,
+    /// Recent per-agent failures
+    pub agent_failures: Arc<AgentFailureStore>,
     /// Server trust info for registration bundles
     pub server_trust: ServerTrust,
     /// Coordinator URL for registration bundles

@@ -97,11 +97,17 @@ impl Database {
             .await
             .context("Failed to connect to PostgreSQL database")?;
 
-        // Run migrations
+        // both sets record into the same _sqlx_migrations table, so each has to ignore the other's versions
         sqlx::migrate!("./migrations/shared")
+            .set_ignore_missing(true)
             .run(&pool)
             .await
             .context("Failed to run migrations")?;
+        sqlx::migrate!("./migrations/postgres")
+            .set_ignore_missing(true)
+            .run(&pool)
+            .await
+            .context("Failed to run postgres migrations")?;
 
         info!(
             backend = "postgres",

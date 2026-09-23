@@ -5,10 +5,11 @@
 use crate::admin::auth::AdminSession;
 use crate::admin::middleware::{AdminState, SESSION_COOKIE};
 use crate::admin::templates::{
-    AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, LoginTemplate,
-    PendingJobSummary, RunnerSummary, TokenSummary,
+    AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, FailureSummary,
+    LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary,
 };
 use crate::admin::{api_token_routes, user_routes};
+use crate::agent_failures::FailureKind;
 use crate::agent_registry::AgentInfo;
 use askama::Template;
 use axum::{
@@ -435,10 +436,31 @@ async fn agent_detail(
         revoked: agent.revoked,
     };
 
+    let now = Utc::now();
+    let failures = state
+        .agent_failures
+        .recent(&agent_id, 25)
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to load failures for agent {}: {}", agent_id, e);
+            Vec::new()
+        })
+        .into_iter()
+        .map(|f| FailureSummary {
+            ago: format_age(now - f.occurred_at),
+            occurred_at: f.occurred_at,
+            kind: FailureKind::label(&f.kind),
+            runner_name: f.runner_name,
+            job_id: f.job_id,
+            message: f.message,
+        })
+        .collect();
+
     let template = AgentDetailTemplate {
         base,
         agent: agent_summary,
         runners,
+        failures,
     };
 
     Html(

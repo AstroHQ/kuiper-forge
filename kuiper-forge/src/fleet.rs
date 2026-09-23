@@ -17,6 +17,7 @@ use kuiper_agent_proto::{
     RunnerEventType,
 };
 
+use crate::agent_failures::{AgentFailureStore, FailureKind};
 use crate::agent_registry::{AgentRegistry, PoolDefinition};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
 use crate::github::RunnerTokenProvider;
@@ -165,6 +166,8 @@ pub struct FleetManager {
     runner_state: Arc<RunnerStateStore>,
     /// Persistent pending jobs store (webhook mode only)
     pending_job_store: Arc<PendingJobStore>,
+    /// Recent per-agent failures for the admin UI
+    failures: Arc<AgentFailureStore>,
     /// Channel for receiving reconciliation notifications
     notify_rx: mpsc::Receiver<()>,
     /// Channel for receiving recovery notifications
@@ -191,6 +194,7 @@ impl FleetManager {
         agent_registry: Arc<AgentRegistry>,
         runner_state: Arc<RunnerStateStore>,
         pending_job_store: Arc<PendingJobStore>,
+        failures: Arc<AgentFailureStore>,
     ) -> (Self, FleetNotifier, Option<WebhookNotifier>) {
         let (notify_tx, notify_rx) = mpsc::channel(64);
         let (recovery_tx, recovery_rx) = mpsc::channel(64);
@@ -211,6 +215,7 @@ impl FleetManager {
             agent_registry,
             runner_state,
             pending_job_store,
+            failures,
             notify_rx,
             recovery_rx,
             runner_event_rx,
@@ -845,6 +850,7 @@ impl FleetManager {
         let agent_id_clone = agent_id.clone();
         let notify_tx = self.notify_tx.clone();
         let repository_clone = repository.map(String::from);
+        let failures = self.failures.clone();
 
         // Helper to handle retry counting on command-level failures
         // (agent rejection, timeout, unexpected response)
@@ -898,6 +904,15 @@ impl FleetManager {
                                 "CreateRunner rejected by agent {} for {}: {}",
                                 agent_id_clone, runner_name_clone, ack.error
                             );
+                            failures
+                                .record(
+                                    &agent_id_clone,
+                                    FailureKind::CommandRejected,
+                                    Some(&runner_name_clone),
+                                    Some(job_id),
+                                    &ack.error,
+                                )
+                                .await;
                             agent_registry.release_slot(&agent_id_clone).await;
                             if let Err(e) = token_provider
                                 .remove_runner(&runner_scope, &runner_name_clone)
@@ -952,6 +967,15 @@ impl FleetManager {
                             }
                         } else {
                             warn!("Runner {} failed: {}", runner_name_clone, result.error);
+                            failures
+                                .record(
+                                    &agent_id_clone,
+                                    FailureKind::RunnerFailed,
+                                    Some(&runner_name_clone),
+                                    Some(job_id),
+                                    &result.error,
+                                )
+                                .await;
                             handle_command_failure(
                                 &pending_job_store,
                                 job_id,
@@ -981,6 +1005,15 @@ impl FleetManager {
                             "Unexpected CreateRunner response from agent {} for {}: {:?}",
                             agent_id_clone, runner_name_clone, other
                         );
+                        failures
+                            .record(
+                                &agent_id_clone,
+                                FailureKind::CommandFailed,
+                                Some(&runner_name_clone),
+                                Some(job_id),
+                                &format!("unexpected response to CreateRunner: {other:?}"),
+                            )
+                            .await;
                         agent_registry.release_slot(&agent_id_clone).await;
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)
@@ -1003,6 +1036,15 @@ impl FleetManager {
                 },
                 Err(e) => {
                     error!("CreateRunner command failed (webhook): {}", e);
+                    failures
+                        .record(
+                            &agent_id_clone,
+                            FailureKind::CommandFailed,
+                            Some(&runner_name_clone),
+                            Some(job_id),
+                            &format!("CreateRunner: {e:#}"),
+                        )
+                        .await;
                     agent_registry.release_slot(&agent_id_clone).await;
                     if let Err(e_inner) = token_provider
                         .remove_runner(&runner_scope, &runner_name_clone)
@@ -1137,6 +1179,19 @@ impl FleetManager {
             }
             RunnerEventType::Completed | RunnerEventType::Failed | RunnerEventType::Destroyed => {
                 let runner_info = self.runner_state.get_runner(&runner_name).await;
+
+                // record before the early return below, a failed destroy arrives after the runner is untracked
+                if event_type == RunnerEventType::Failed {
+                    self.failures
+                        .record(
+                            &event.agent_id,
+                            FailureKind::RunnerFailed,
+                            Some(&runner_name),
+                            runner_info.as_ref().and_then(|r| r.job_id),
+                            &event.event.error,
+                        )
+                        .await;
+                }
                 let Some(runner_info) = runner_info else {
                     // Runner already removed from state (e.g., by reconciliation).
                     // Reconciliation already released the slot, so don't double-release.
@@ -1153,6 +1208,26 @@ impl FleetManager {
                 // Runner still in state - we're the first to handle cleanup.
                 // Release the reserved slot on the agent.
                 self.agent_registry.release_slot(&event.agent_id).await;
+
+                // a plain destroy of a fixed-capacity runner is normal, anything else means it died mid-job
+                if event_type == RunnerEventType::Destroyed
+                    && (runner_info.job_id.is_some() || !event.event.error.is_empty())
+                {
+                    let message = if event.event.error.is_empty() {
+                        "runner destroyed before finishing"
+                    } else {
+                        event.event.error.as_str()
+                    };
+                    self.failures
+                        .record(
+                            &event.agent_id,
+                            FailureKind::RunnerLost,
+                            Some(&runner_name),
+                            runner_info.job_id,
+                            message,
+                        )
+                        .await;
+                }
 
                 // Handle pending job state based on runner outcome
                 if let Some(job_id) = runner_info.job_id {
@@ -1641,6 +1716,7 @@ impl FleetManager {
             let runner_scope = runner_scope.clone();
             let runner_name_clone = runner_name.clone();
             let runner_state = self.runner_state.clone();
+            let failures = self.failures.clone();
 
             // Spawn task to send command and handle response
             tokio::spawn(async move {
@@ -1662,6 +1738,15 @@ impl FleetManager {
                                     "CreateRunner rejected by agent {} for {}: {}",
                                     agent_id_clone, runner_name_clone, ack.error
                                 );
+                                failures
+                                    .record(
+                                        &agent_id_clone,
+                                        FailureKind::CommandRejected,
+                                        Some(&runner_name_clone),
+                                        None,
+                                        &ack.error,
+                                    )
+                                    .await;
                                 agent_registry.release_slot(&agent_id_clone).await;
                                 if let Err(e) = token_provider
                                     .remove_runner(&runner_scope, &runner_name_clone)
@@ -1681,6 +1766,15 @@ impl FleetManager {
                                 info!("Runner {} completed successfully", runner_name_clone);
                             } else {
                                 warn!("Runner {} failed: {}", runner_name_clone, result.error);
+                                failures
+                                    .record(
+                                        &agent_id_clone,
+                                        FailureKind::RunnerFailed,
+                                        Some(&runner_name_clone),
+                                        None,
+                                        &result.error,
+                                    )
+                                    .await;
                             }
                             if let Err(e) = token_provider
                                 .remove_runner(&runner_scope, &runner_name_clone)
@@ -1698,6 +1792,15 @@ impl FleetManager {
                                 "Unexpected CreateRunner response from agent {} for {}: {:?}",
                                 agent_id_clone, runner_name_clone, other
                             );
+                            failures
+                                .record(
+                                    &agent_id_clone,
+                                    FailureKind::CommandFailed,
+                                    Some(&runner_name_clone),
+                                    None,
+                                    &format!("unexpected response to CreateRunner: {other:?}"),
+                                )
+                                .await;
                             agent_registry.release_slot(&agent_id_clone).await;
                             if let Err(e) = token_provider
                                 .remove_runner(&runner_scope, &runner_name_clone)
@@ -1713,6 +1816,15 @@ impl FleetManager {
                     },
                     Err(e) => {
                         error!("CreateRunner command failed: {}", e);
+                        failures
+                            .record(
+                                &agent_id_clone,
+                                FailureKind::CommandFailed,
+                                Some(&runner_name_clone),
+                                None,
+                                &format!("CreateRunner: {e:#}"),
+                            )
+                            .await;
                         agent_registry.release_slot(&agent_id_clone).await;
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)

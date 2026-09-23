@@ -11,6 +11,7 @@ compile_error!("Cannot enable both 'sqlite' and 'postgres' features simultaneous
 compile_error!("At least one database feature must be enabled: 'sqlite' or 'postgres'");
 
 pub mod admin;
+pub mod agent_failures;
 pub mod agent_registry;
 pub mod auth;
 pub mod config;

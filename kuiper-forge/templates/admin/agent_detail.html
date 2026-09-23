@@ -109,5 +109,36 @@
         </table>
         {% endif %}
     </div>
+
+    <div class="card">
+        <div class="card-title">Recent Failures ({{ failures.len() }})</div>
+        {% if failures.is_empty() %}
+        <p style="color: #666;">No failures recorded for this agent.</p>
+        {% else %}
+        <table>
+            <thead>
+                <tr>
+                    <th>When</th>
+                    <th>Type</th>
+                    <th>Runner / Job</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for failure in failures %}
+                <tr>
+                    <td title="{{ failure.occurred_at }}" style="white-space: nowrap;">{{ failure.ago }} ago</td>
+                    <td style="white-space: nowrap;"><span class="badge badge-offline">{{ failure.kind }}</span></td>
+                    <td>
+                        {% if let Some(name) = failure.runner_name %}{{ name }}{% else %}-{% endif %}
+                        {% if let Some(job_id) = failure.job_id %}<div class="muted">job #{{ job_id }}</div>{% endif %}
+                    </td>
+                    <td><code class="failure-message">{% if failure.message.is_empty() %}(no error message){% else %}{{ failure.message }}{% endif %}</code></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
 </div>
 {% endblock %}

@@ -74,6 +74,18 @@ pub struct AgentDetailTemplate {
     pub base: BaseContext,
     pub agent: AgentSummary,
     pub runners: Vec<RunnerSummary>,
+    pub failures: Vec<FailureSummary>,
+}
+
+/// Recorded agent failure for the agent detail page
+pub struct FailureSummary {
+    pub occurred_at: DateTime<Utc>,
+    /// e.g. `4m 12s`
+    pub ago: String,
+    pub kind: &'static str,
+    pub runner_name: Option<String>,
+    pub job_id: Option<u64>,
+    pub message: String,
 }
 
 /// Admin user row for the users page

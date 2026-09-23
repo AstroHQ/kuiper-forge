@@ -17,6 +17,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 use kuiper_agent_proto::{RunnerEvent, RunnerEventType};
 use kuiper_forge::admin::{AdminAuthStore, AdminState, ApiTokenStore};
+use kuiper_forge::agent_failures::AgentFailureStore;
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
 use kuiper_forge::config::{self, Config, ProvisioningMode};
@@ -306,6 +307,7 @@ async fn serve(
 
     // Initialize persistent runner state for crash recovery (using shared database)
     let runner_state = Arc::new(runner_state::RunnerStateStore::new(db.pool()));
+    let agent_failures = Arc::new(AgentFailureStore::new(db.pool()));
     runner_state.load_and_log().await;
 
     // Initialize persistent pending job store for webhook mode (using shared database)
@@ -324,6 +326,7 @@ async fn serve(
             agent_registry: agent_registry.clone(),
             runner_state: runner_state.clone(),
             pending_jobs: pending_job_store.clone(),
+            agent_failures: agent_failures.clone(),
             server_trust: server_trust.clone(),
             coordinator_url: config.admin.coordinator_url.clone(),
         }))
@@ -356,6 +359,7 @@ async fn serve(
             agent_registry.clone(),
             runner_state.clone(),
             pending_job_store.clone(),
+            agent_failures.clone(),
         );
         (token_provider, Some(fm), Some(notifier), wh_notifier)
     } else {
@@ -383,6 +387,7 @@ async fn serve(
             agent_registry.clone(),
             runner_state.clone(),
             pending_job_store.clone(),
+            agent_failures.clone(),
         );
         (token_provider, Some(fm), Some(notifier), wh_notifier)
     };
