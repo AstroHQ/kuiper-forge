@@ -998,6 +998,7 @@ async fn handle_admin_command(
             }
 
             admin_store.update_password(&username, &password).await?;
+            admin_store.delete_user_sessions(&username, None).await?;
             println!("Password for '{username}' updated successfully.");
             Ok(())
         }

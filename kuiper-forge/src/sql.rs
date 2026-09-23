@@ -315,3 +315,11 @@ pub const DELETE_ADMIN_SESSIONS_BY_USER: &str = "DELETE FROM admin_sessions WHER
 
 #[cfg(feature = "postgres")]
 pub const DELETE_ADMIN_SESSIONS_BY_USER: &str = "DELETE FROM admin_sessions WHERE username = $1";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_OTHER_ADMIN_SESSIONS_BY_USER: &str =
+    "DELETE FROM admin_sessions WHERE username = ? AND session_id <> ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_OTHER_ADMIN_SESSIONS_BY_USER: &str =
+    "DELETE FROM admin_sessions WHERE username = $1 AND session_id <> $2";

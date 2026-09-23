@@ -287,6 +287,26 @@ impl AdminAuthStore {
         Ok(())
     }
 
+    /// Log a user out everywhere, optionally keeping one session (the caller's own).
+    pub async fn delete_user_sessions(
+        &self,
+        username: &str,
+        keep_session_id: Option<&str>,
+    ) -> Result<()> {
+        let query = match keep_session_id {
+            Some(keep) => sqlx::query(sql::DELETE_OTHER_ADMIN_SESSIONS_BY_USER)
+                .bind(username)
+                .bind(keep),
+            None => sqlx::query(sql::DELETE_ADMIN_SESSIONS_BY_USER).bind(username),
+        };
+        query
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete user sessions")?;
+
+        Ok(())
+    }
+
     /// Delete all expired sessions (background cleanup task).
     pub async fn cleanup_expired_sessions(&self) -> Result<u64> {
         let result = sqlx::query(sql::DELETE_EXPIRED_ADMIN_SESSIONS)

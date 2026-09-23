@@ -58,6 +58,24 @@ pub struct AgentDetailTemplate {
     pub runners: Vec<RunnerSummary>,
 }
 
+/// Admin user row for the users page
+pub struct UserSummary {
+    pub username: String,
+    pub created_at: DateTime<Utc>,
+    pub last_login: Option<DateTime<Utc>>,
+    pub is_self: bool,
+}
+
+/// Admin users page template
+#[derive(Template)]
+#[template(path = "admin/users.html")]
+pub struct UsersTemplate {
+    pub base: BaseContext,
+    pub users: Vec<UserSummary>,
+    pub notice: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Runner summary
 pub struct RunnerSummary {
     pub runner_name: String,
