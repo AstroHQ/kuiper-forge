@@ -6,7 +6,12 @@
 {% include "admin/nav.html" %}
 
 <div class="container">
-    <h1>Dashboard</h1>
+    <div class="page-header">
+        <h1 style="margin-bottom: 0;">Dashboard</h1>
+        <button type="button" class="btn btn-primary" onclick="document.getElementById('register-dialog').showModal()">
+            Register Agent{% if !tokens.is_empty() %} ({{ tokens.len() }} pending){% endif %}
+        </button>
+    </div>
 
     <div class="stats-grid">
         <div class="card stat-card">
@@ -25,52 +30,63 @@
         </div>
 
         <div class="card stat-card">
-            <div class="stat-value">{{ pending_jobs }}</div>
+            <div class="stat-value">{{ pending_jobs.len() }}</div>
             <div class="stat-label">Pending Jobs</div>
         </div>
     </div>
 
     <div class="card">
-        <div class="card-title">
-            Register New Agent
-            <form method="post" action="/admin/tokens/create" style="display: inline; float: right;">
-                <button type="submit" class="btn btn-primary">Create Token</button>
-            </form>
-        </div>
-        {% if let Some(bundle) = new_token %}
-        <div class="token-display">
-            <p><strong>New registration bundle created!</strong> Copy this bundle now - it will not be shown again.</p>
-            <code class="token-value">{{ bundle }}</code>
-            <p style="color: #666; margin-top: 10px;">Run on the agent: <code>kuiper-tart-agent register '{{ bundle }}'</code></p>
-        </div>
-        {% endif %}
-        {% if !tokens.is_empty() %}
+        <div class="card-title">Pending Jobs</div>
+        {% if pending_jobs.is_empty() %}
+        <p style="color: #666;">No jobs waiting.</p>
+        {% else %}
         <table>
             <thead>
                 <tr>
-                    <th>Token</th>
-                    <th>Created By</th>
-                    <th>Expires</th>
-                    <th>Actions</th>
+                    <th>Job</th>
+                    <th>Repository</th>
+                    <th>Labels</th>
+                    <th>Waiting</th>
+                    <th>Status</th>
+                    <th>Retries</th>
                 </tr>
             </thead>
             <tbody>
-                {% for token in tokens %}
+                {% for job in pending_jobs %}
                 <tr>
-                    <td><code>{{ token.token }}</code></td>
-                    <td>{{ token.created_by }}</td>
-                    <td>{{ token.expires_at }}</td>
                     <td>
-                        <form method="post" action="/admin/tokens/{{ token.token }}/delete" style="display: inline;">
-                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-                        </form>
+                        {% if let Some(w) = job.workflow_name %}{{ w }} / {% endif %}{% if let Some(n) = job.job_name %}{{ n }}{% else %}job{% endif %}
+                        <div class="muted">#{{ job.job_id }}</div>
+                    </td>
+                    <td>{% if let Some(r) = job.repository %}{{ r }}{% else %}-{% endif %}</td>
+                    <td>
+                        {% for label in job.labels %}
+                        <span class="badge badge-label">{{ label }}</span>
+                        {% endfor %}
+                    </td>
+                    <td>{{ job.waiting }}</td>
+                    <td>
+                        {% if let Some(agent_id) = job.assigned_agent %}
+                        <span class="badge badge-online">Runner starting</span>
+                        <div class="muted">on <a href="/admin/agents/{{ agent_id }}">{{ agent_id }}</a></div>
+                        {% else if job.matching_agents == 0 %}
+                        <span class="badge badge-offline">No matching agent</span>
+                        {% else if job.free_capacity == 0 %}
+                        <span class="badge badge-revoked">Agents busy</span>
+                        <div class="muted">{{ job.matching_agents }} matching, all full</div>
+                        {% else %}
+                        <span class="badge badge-label">Waiting</span>
+                        <div class="muted">{{ job.matching_agents }} matching, {{ job.free_capacity }} free</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {{ job.retry_count }}
+                        {% if job.failed_agents > 0 %}<div class="muted">{{ job.failed_agents }} agent(s) failed</div>{% endif %}
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
-        {% else if new_token.is_none() %}
-        <p style="color: #666; padding: 20px 0;">No pending registration tokens. Create one to register a new agent.</p>
         {% endif %}
     </div>
 
@@ -128,4 +144,63 @@
         {% endif %}
     </div>
 </div>
+
+<dialog id="register-dialog">
+    <div class="dialog-header">
+        <span class="card-title" style="margin: 0;">Register Agent</span>
+        <form method="dialog"><button class="dialog-close" aria-label="Close">&times;</button></form>
+    </div>
+
+    {% if let Some(bundle) = new_token %}
+    <div class="token-display">
+        <p><strong>Registration bundle created.</strong> Copy it now - it will not be shown again.</p>
+        <code class="token-value" id="register-bundle">{{ bundle }}</code>
+        <button type="button" class="btn btn-secondary btn-sm"
+            onclick="navigator.clipboard.writeText(document.getElementById('register-bundle').textContent); this.textContent = 'Copied';">Copy</button>
+        <p style="color: #666; margin-top: 10px;">Run on the agent: <code>kuiper-tart-agent register '{{ bundle }}'</code>
+            (or <code>kuiper-proxmox-agent</code>)</p>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/admin/tokens/create" style="margin-bottom: 15px;">
+        <button type="submit" class="btn btn-primary">Create Registration Token</button>
+        <span class="muted" style="margin-left: 10px;">valid for 1 hour</span>
+    </form>
+
+    {% if !tokens.is_empty() %}
+    <table>
+        <thead>
+            <tr>
+                <th>Pending Token</th>
+                <th>Created By</th>
+                <th>Expires</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for token in tokens %}
+            <tr>
+                <td><code>{{ token.token }}</code></td>
+                <td>{{ token.created_by }}</td>
+                <td>{{ token.expires_at.format("%Y-%m-%d %H:%M") }}</td>
+                <td>
+                    <form method="post" action="/admin/tokens/{{ token.token }}/delete" style="display: inline;">
+                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</dialog>
+
+<script>
+    const registerDialog = document.getElementById('register-dialog');
+    {% if new_token.is_some() %}registerDialog.showModal();{% endif %}
+    if (location.hash === '#register') registerDialog.showModal();
+
+    // drop the #register so a reload doesn't reopen it
+    registerDialog.addEventListener('close', () => history.replaceState(null, '', location.pathname));
+</script>
 {% endblock %}

@@ -6,7 +6,7 @@ use crate::admin::auth::AdminSession;
 use crate::admin::middleware::{AdminState, SESSION_COOKIE};
 use crate::admin::templates::{
     AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, LoginTemplate,
-    RunnerSummary, TokenSummary,
+    PendingJobSummary, RunnerSummary, TokenSummary,
 };
 use crate::admin::{api_token_routes, user_routes};
 use crate::agent_registry::AgentInfo;
@@ -19,7 +19,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::CookieJar;
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -177,18 +177,47 @@ async fn render_dashboard(
     };
 
     let connected_agents = state.agent_registry.count().await;
-    let active_runners = state
+    let runners = state
         .runner_state
         .get_all_runners()
         .await
-        .map(|r| r.len())
-        .unwrap_or(0);
-    let pending_jobs = state
+        .unwrap_or_default();
+
+    // jobs stay pending until their runner finishes, so tell apart the ones still waiting for an agent
+    let job_agents: HashMap<u64, String> = runners
+        .iter()
+        .filter_map(|(_, r)| Some((r.job_id?, r.agent_id.clone())))
+        .collect();
+    let mut pending = state
         .pending_jobs
         .get_all_pending_jobs()
         .await
-        .map(|j| j.len())
-        .unwrap_or(0);
+        .unwrap_or_default();
+    pending.sort_by_key(|(id, j)| (job_agents.contains_key(id), j.created_at));
+    let now = Utc::now();
+    let mut pending_jobs = Vec::with_capacity(pending.len());
+    for (job_id, job) in pending {
+        pending_jobs.push(PendingJobSummary {
+            job_id,
+            assigned_agent: job_agents.get(&job_id).cloned(),
+            waiting: format_age(now - job.created_at),
+            matching_agents: state
+                .agent_registry
+                .find_agents_by_labels(&job.agent_labels)
+                .await
+                .len(),
+            free_capacity: state
+                .agent_registry
+                .available_capacity(&job.agent_labels)
+                .await,
+            repository: job.repository,
+            workflow_name: job.workflow_name,
+            job_name: job.job_name,
+            labels: job.job_labels,
+            retry_count: job.retry_count,
+            failed_agents: job.failed_agents.len(),
+        });
+    }
 
     // Get agents
     let registered = state.auth_manager.list_agents().await;
@@ -199,12 +228,6 @@ async fn render_dashboard(
         .into_iter()
         .map(|a| (a.agent_id.clone(), a))
         .collect();
-    let runners = state
-        .runner_state
-        .get_all_runners()
-        .await
-        .unwrap_or_default();
-
     let agents: Vec<AgentSummary> = registered
         .into_iter()
         .map(|a| {
@@ -247,7 +270,7 @@ async fn render_dashboard(
     let template = DashboardTemplate {
         base,
         connected_agents,
-        active_runners,
+        active_runners: runners.len(),
         pending_jobs,
         agents,
         tokens,
@@ -342,7 +365,8 @@ async fn token_delete(
         error!("Failed to delete token: {}", e);
     }
 
-    Redirect::to("/admin/dashboard").into_response()
+    // the fragment tells the dashboard to reopen the register dialog
+    Redirect::to("/admin/dashboard#register").into_response()
 }
 
 /// Agent detail handler.
@@ -442,5 +466,34 @@ async fn agent_revoke(
             error!("Failed to revoke agent {}: {}", agent_id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to revoke agent").into_response()
         }
+    }
+}
+
+/// Short human age like `45s`, `4m 12s`, `3h 5m` or `2d 4h`.
+fn format_age(age: Duration) -> String {
+    let secs = age.num_seconds().max(0);
+    let (d, h, m, s) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{s}s"),
+        (0, 0, _) => format!("{m}m {s}s"),
+        (0, _, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_age() {
+        assert_eq!(format_age(Duration::seconds(-5)), "0s");
+        assert_eq!(format_age(Duration::seconds(45)), "45s");
+        assert_eq!(format_age(Duration::seconds(252)), "4m 12s");
+        assert_eq!(
+            format_age(Duration::seconds(3 * 3600 + 5 * 60 + 9)),
+            "3h 5m"
+        );
+        assert_eq!(format_age(Duration::seconds(2 * 86400 + 4 * 3600)), "2d 4h");
     }
 }

@@ -30,10 +30,28 @@ pub struct DashboardTemplate {
     pub base: BaseContext,
     pub connected_agents: usize,
     pub active_runners: usize,
-    pub pending_jobs: usize,
+    pub pending_jobs: Vec<PendingJobSummary>,
     pub agents: Vec<AgentSummary>,
     pub tokens: Vec<TokenSummary>,
     pub new_token: Option<String>,
+}
+
+/// Webhook job still waiting for a runner
+pub struct PendingJobSummary {
+    pub job_id: u64,
+    /// Agent running a runner for this job. None while it's still waiting for one
+    pub assigned_agent: Option<String>,
+    pub repository: Option<String>,
+    pub workflow_name: Option<String>,
+    pub job_name: Option<String>,
+    pub labels: Vec<String>,
+    /// How long ago the webhook arrived, e.g. `4m 12s`
+    pub waiting: String,
+    pub retry_count: i32,
+    pub failed_agents: usize,
+    /// Connected agents whose labels match, regardless of free capacity
+    pub matching_agents: usize,
+    pub free_capacity: usize,
 }
 
 /// Agent summary for list view

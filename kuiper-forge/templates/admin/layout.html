@@ -109,6 +109,18 @@
         .inline-form input { padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9em; }
         .detail-grid { display: grid; grid-template-columns: 150px 1fr; gap: 10px; }
         .detail-label { font-weight: 600; color: #555; }
+        .muted { color: #888; font-size: 0.85em; }
+        dialog {
+            border: none;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            padding: 20px;
+            width: min(800px, 90vw);
+            margin: auto;
+        }
+        dialog::backdrop { background: rgba(0,0,0,0.5); }
+        .dialog-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .dialog-close { background: none; border: none; font-size: 1.5em; cursor: pointer; color: #888; line-height: 1; }
     </style>
 </head>
 <body>
