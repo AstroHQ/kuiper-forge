@@ -76,6 +76,27 @@ pub struct UsersTemplate {
     pub error: Option<String>,
 }
 
+/// API token row for the API tokens page
+pub struct ApiTokenSummary {
+    pub id: String,
+    pub name: String,
+    pub token_prefix: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// API tokens page template
+#[derive(Template)]
+#[template(path = "admin/api_tokens.html")]
+pub struct ApiTokensTemplate {
+    pub base: BaseContext,
+    pub tokens: Vec<ApiTokenSummary>,
+    /// Plaintext of a just-created token, shown once
+    pub new_token: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Runner summary
 pub struct RunnerSummary {
     pub runner_name: String,

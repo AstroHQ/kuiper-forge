@@ -1,5 +1,6 @@
 //! Admin state and constants.
 
+use crate::admin::api_tokens::ApiTokenStore;
 use crate::admin::auth::AdminAuthStore;
 use crate::agent_registry::AgentRegistry;
 use crate::auth::AuthManager;
@@ -15,6 +16,8 @@ pub const SESSION_COOKIE: &str = "kuiper_admin_session";
 pub struct AdminState {
     /// Admin user/session authentication
     pub auth_store: AdminAuthStore,
+    /// API tokens for `/api/v1`
+    pub api_tokens: ApiTokenStore,
     /// Session timeout in seconds
     pub session_timeout_secs: u64,
     /// Agent certificate/registration management

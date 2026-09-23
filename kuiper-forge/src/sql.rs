@@ -323,3 +323,38 @@ pub const DELETE_OTHER_ADMIN_SESSIONS_BY_USER: &str =
 #[cfg(feature = "postgres")]
 pub const DELETE_OTHER_ADMIN_SESSIONS_BY_USER: &str =
     "DELETE FROM admin_sessions WHERE username = $1 AND session_id <> $2";
+
+// API tokens queries
+
+#[cfg(feature = "sqlite")]
+pub const INSERT_API_TOKEN: &str = r#"
+    INSERT INTO api_tokens (id, name, token_hash, token_prefix, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+"#;
+
+#[cfg(feature = "postgres")]
+pub const INSERT_API_TOKEN: &str = r#"
+    INSERT INTO api_tokens (id, name, token_hash, token_prefix, created_by, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6)
+"#;
+
+pub const SELECT_ALL_API_TOKENS: &str = "SELECT id, name, token_prefix, created_by, created_at, last_used_at FROM api_tokens ORDER BY created_at DESC";
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_API_TOKEN_BY_HASH: &str = "SELECT id, name, token_prefix, created_by, created_at, last_used_at FROM api_tokens WHERE token_hash = ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_API_TOKEN_BY_HASH: &str = "SELECT id, name, token_prefix, created_by, created_at, last_used_at FROM api_tokens WHERE token_hash = $1";
+
+#[cfg(feature = "sqlite")]
+pub const UPDATE_API_TOKEN_LAST_USED: &str = "UPDATE api_tokens SET last_used_at = ? WHERE id = ?";
+
+#[cfg(feature = "postgres")]
+pub const UPDATE_API_TOKEN_LAST_USED: &str =
+    "UPDATE api_tokens SET last_used_at = $1 WHERE id = $2";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_API_TOKEN: &str = "DELETE FROM api_tokens WHERE id = ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_API_TOKEN: &str = "DELETE FROM api_tokens WHERE id = $1";

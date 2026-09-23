@@ -217,7 +217,8 @@ pub fn http_router(
                 "/admin/",
                 get(|| async { Redirect::to("/admin/dashboard") }),
             )
-            .nest("/admin", crate::admin::admin_router(admin_state));
+            .nest("/admin", crate::admin::admin_router(admin_state.clone()))
+            .nest("/api/v1", crate::admin::api_router(admin_state));
     }
 
     router
@@ -236,7 +237,8 @@ pub fn admin_only_router(admin_state: Arc<crate::admin::AdminState>) -> Router {
             "/admin/",
             get(|| async { Redirect::to("/admin/dashboard") }),
         )
-        .nest("/admin", crate::admin::admin_router(admin_state))
+        .nest("/admin", crate::admin::admin_router(admin_state.clone()))
+        .nest("/api/v1", crate::admin::api_router(admin_state))
 }
 
 /// Handle incoming GitHub webhook.

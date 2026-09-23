@@ -16,7 +16,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use kuiper_agent_proto::{RunnerEvent, RunnerEventType};
-use kuiper_forge::admin::{AdminAuthStore, AdminState};
+use kuiper_forge::admin::{AdminAuthStore, AdminState, ApiTokenStore};
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
 use kuiper_forge::config::{self, Config, ProvisioningMode};
@@ -314,10 +314,11 @@ async fn serve(
 
     // Initialize admin UI state if enabled
     let admin_state = if config.admin.enabled {
-        info!("Admin UI enabled at /admin");
+        info!("Admin UI enabled at /admin, API at /api/v1");
         let admin_auth_store = AdminAuthStore::new(db.pool());
         Some(Arc::new(AdminState {
             auth_store: admin_auth_store,
+            api_tokens: ApiTokenStore::new(db.pool()),
             session_timeout_secs: config.admin.session_timeout_secs,
             auth_manager: auth_manager.clone(),
             agent_registry: agent_registry.clone(),
