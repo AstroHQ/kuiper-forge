@@ -37,6 +37,8 @@ pub struct VmState {
     pub state: VmStatus,
     /// IP address (if known)
     pub ip_address: Option<Ipv4Addr>,
+    /// Guest OS. From the image, or macOS until the clone tells us when the image wasn't pulled yet
+    pub os: GuestOs,
     /// When the VM was created
     pub created_at: Instant,
 }
@@ -85,13 +87,60 @@ impl From<&VmState> for VmInfo {
     }
 }
 
-/// Running tart VMs this agent doesn't manage (started by hand, another tool, a previous agent run). They use up
-/// the same host-wide limits as runner VMs.
+/// Guest OS of a tart VM, from `tart get`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestOs {
+    /// Counts against the macOS limit too. The runner runs in the GUI session through Terminal.app
+    MacOS,
+    /// Only counts against the total limit. The runner runs headless
+    Linux,
+}
+
+impl GuestOs {
+    /// Anything tart doesn't call linux counts as macOS, so we don't overbook the stricter limit
+    fn from_tart(os: &str) -> Self {
+        if os.eq_ignore_ascii_case("linux") {
+            GuestOs::Linux
+        } else {
+            GuestOs::MacOS
+        }
+    }
+
+    /// Names of the `limits()` a VM with this OS counts against.
+    pub fn limit_names(self) -> &'static [&'static str] {
+        match self {
+            GuestOs::MacOS => &[LIMIT_MACOS, LIMIT_TOTAL],
+            GuestOs::Linux => &[LIMIT_TOTAL],
+        }
+    }
+}
+
+const LIMIT_MACOS: &str = "macos";
+const LIMIT_TOTAL: &str = "total";
+
+/// VM counts against the host-wide limits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ExternalVms {
+pub struct VmCounts {
     pub macos: u32,
     /// Any OS, macOS included
     pub total: u32,
+}
+
+impl VmCounts {
+    fn add(&mut self, os: GuestOs) {
+        self.total += 1;
+        if os == GuestOs::MacOS {
+            self.macos += 1;
+        }
+    }
+
+    fn of<'a>(vms: impl IntoIterator<Item = &'a VmState>) -> Self {
+        let mut counts = Self::default();
+        for vm in vms {
+            counts.add(vm.os);
+        }
+        counts
+    }
 }
 
 #[derive(Deserialize)]
@@ -122,8 +171,11 @@ pub struct VmManager {
     /// Used by the agent's main loop to push immediate AgentStatus updates so
     /// the coordinator's view doesn't lag the agent's true capacity.
     state_changed: Arc<Notify>,
-    /// Last count from `refresh_external`
-    external: RwLock<ExternalVms>,
+    /// Running tart VMs this agent doesn't manage (started by hand, another tool, a previous agent run), from the
+    /// last `refresh_external`. They use up the same host-wide limits as runner VMs
+    external: RwLock<VmCounts>,
+    /// Guest OS per image, once `tart get` knows it. OCI images that aren't pulled yet stay unknown
+    image_os: RwLock<HashMap<String, GuestOs>>,
 }
 
 impl VmManager {
@@ -135,7 +187,8 @@ impl VmManager {
             active_vms: Arc::new(RwLock::new(HashMap::new())),
             log_dir,
             state_changed: Arc::new(Notify::new()),
-            external: RwLock::new(ExternalVms::default()),
+            external: RwLock::new(VmCounts::default()),
+            image_os: RwLock::new(HashMap::new()),
         }
     }
 
@@ -150,46 +203,50 @@ impl VmManager {
         self.active_vms.read().await.len()
     }
 
-    /// Get the number of available slots, after VMs this agent doesn't manage.
-    pub async fn available_slots(&self) -> u32 {
+    /// Get the number of slots free for a VM with this OS, after VMs this agent doesn't manage.
+    pub async fn available_slots(&self, os: GuestOs) -> u32 {
         let external = *self.external.read().await;
-        let active = self.active_vms.read().await.len();
-        self.free_slots(active, external)
+        let own = VmCounts::of(self.active_vms.read().await.values());
+        self.free_slots(os, own, external)
     }
 
-    /// Runner VMs are always macOS (the runner is started through the macOS GUI session), so each one counts
-    /// against both limits.
-    fn free_slots(&self, active: usize, external: ExternalVms) -> u32 {
-        let active = active as u32;
-        let macos = self
-            .config
-            .max_macos_vms
-            .saturating_sub(active + external.macos);
+    fn free_slots(&self, os: GuestOs, own: VmCounts, external: VmCounts) -> u32 {
         let total = self
             .config
             .max_total_vms
-            .saturating_sub(active + external.total);
-        macos.min(total)
+            .saturating_sub(own.total + external.total);
+        match os {
+            GuestOs::Linux => total,
+            GuestOs::MacOS => total.min(
+                self.config
+                    .max_macos_vms
+                    .saturating_sub(own.macos + external.macos),
+            ),
+        }
     }
 
-    /// Get maximum VM capacity when nothing else is running on the host.
+    /// Get maximum VM capacity of any OS when nothing else is running on the host. The macOS limit goes out
+    /// separately in `limits()`.
     pub fn max_vms(&self) -> u32 {
-        self.config.max_macos_vms.min(self.config.max_total_vms)
+        self.config.max_total_vms
     }
 
-    /// The host-wide limits with current external usage, for `AgentStatus`.
+    /// The host-wide limits with current usage, for `AgentStatus`.
     pub async fn limits(&self) -> Vec<CapacityLimit> {
         let external = *self.external.read().await;
+        let own = VmCounts::of(self.active_vms.read().await.values());
         vec![
             CapacityLimit {
-                name: "macos".to_string(),
+                name: LIMIT_MACOS.to_string(),
                 max: self.config.max_macos_vms,
                 external: external.macos,
+                active: own.macos,
             },
             CapacityLimit {
-                name: "total".to_string(),
+                name: LIMIT_TOTAL.to_string(),
                 max: self.config.max_total_vms,
                 external: external.total,
+                active: own.total,
             },
         ]
     }
@@ -197,21 +254,43 @@ impl VmManager {
     /// Current usage against both limits, e.g. for a capacity rejection.
     pub async fn capacity_summary(&self) -> String {
         let external = *self.external.read().await;
-        let active = self.active_vms.read().await.len();
-        self.format_capacity(active, external)
+        let own = VmCounts::of(self.active_vms.read().await.values());
+        self.format_capacity(own, external)
     }
 
-    fn format_capacity(&self, active: usize, external: ExternalVms) -> String {
-        let active = active as u32;
+    fn format_capacity(&self, own: VmCounts, external: VmCounts) -> String {
         format!(
             "macOS {}/{} ({} external), total {}/{} ({} external)",
-            active + external.macos,
+            own.macos + external.macos,
             self.config.max_macos_vms,
             external.macos,
-            active + external.total,
+            own.total + external.total,
             self.config.max_total_vms,
             external.total,
         )
+    }
+
+    /// Guest OS of an image. An image `tart get` doesn't know yet (an OCI image that isn't pulled) counts as macOS
+    /// until a clone of it tells us otherwise.
+    pub async fn image_os(&self, image: &str) -> GuestOs {
+        self.known_image_os(image).await.unwrap_or(GuestOs::MacOS)
+    }
+
+    async fn known_image_os(&self, image: &str) -> Option<GuestOs> {
+        if let Some(os) = self.image_os.read().await.get(image) {
+            return Some(*os);
+        }
+        match self.tart_os(image).await {
+            Ok(os) => {
+                let os = GuestOs::from_tart(&os);
+                self.image_os.write().await.insert(image.to_string(), os);
+                Some(os)
+            }
+            Err(e) => {
+                debug!("OS of image {} not known yet: {}", image, e);
+                None
+            }
+        }
     }
 
     /// Re-count running tart VMs this agent doesn't manage. Keeps the last count if tart fails.
@@ -233,27 +312,22 @@ impl VmManager {
         }
     }
 
-    async fn count_external(&self) -> Result<ExternalVms> {
+    async fn count_external(&self) -> Result<VmCounts> {
         // ours can start or finish while `tart list` runs, so take our names from both sides of it
         let mut ours: HashSet<String> = self.active_vms.read().await.keys().cloned().collect();
         let running = self.tart_running_vms().await?;
         ours.extend(self.active_vms.read().await.keys().cloned());
 
-        let mut external = ExternalVms::default();
+        let mut external = VmCounts::default();
         for name in running.iter().filter(|name| !ours.contains(*name)) {
-            external.total += 1;
-
-            // unknown counts as macOS so we don't overbook the stricter limit
-            let is_macos = match self.tart_os(name).await {
-                Ok(os) => os == "darwin",
+            let os = match self.tart_os(name).await {
+                Ok(os) => GuestOs::from_tart(&os),
                 Err(e) => {
                     warn!("Couldn't get OS of tart VM {}, assuming macOS: {}", name, e);
-                    true
+                    GuestOs::MacOS
                 }
             };
-            if is_macos {
-                external.macos += 1;
-            }
+            external.add(os);
         }
         Ok(external)
     }
@@ -272,14 +346,16 @@ impl VmManager {
     ///
     /// Returns the VM ID on success.
     pub async fn create_vm(&self, vm_name: &str, template: &str) -> Result<String> {
+        let known_os = self.known_image_os(template).await;
+        let os = known_os.unwrap_or(GuestOs::MacOS);
+
         // check and insert under one lock so two creates can't both take the last slot
         {
             let external = *self.external.read().await;
             let mut active = self.active_vms.write().await;
-            if self.free_slots(active.len(), external) == 0 {
-                return Err(Error::CapacityExceeded(
-                    self.format_capacity(active.len(), external),
-                ));
+            let own = VmCounts::of(active.values());
+            if self.free_slots(os, own, external) == 0 {
+                return Err(Error::CapacityExceeded(self.format_capacity(own, external)));
             }
             if active.contains_key(vm_name) {
                 return Err(Error::VmAlreadyRunning(vm_name.to_string()));
@@ -293,6 +369,7 @@ impl VmManager {
                     name: vm_name.to_string(),
                     state: VmStatus::Creating,
                     ip_address: None,
+                    os,
                     created_at: Instant::now(),
                 },
             );
@@ -312,6 +389,11 @@ impl VmManager {
             }
         }
 
+        // the clone pulled the image if it wasn't local, so now tart knows its OS
+        if known_os.is_none() {
+            self.learn_os_from_clone(vm_name, template).await;
+        }
+
         // Start the VM
         self.update_state(vm_name, VmStatus::Booting).await;
 
@@ -329,6 +411,22 @@ impl VmManager {
         }
 
         Ok(vm_name.to_string())
+    }
+
+    async fn learn_os_from_clone(&self, vm_name: &str, template: &str) {
+        let os = match self.tart_os(vm_name).await {
+            Ok(os) => GuestOs::from_tart(&os),
+            Err(e) => {
+                warn!("Couldn't get OS of VM {}, assuming macOS: {}", vm_name, e);
+                return;
+            }
+        };
+        info!("Image {} is {:?}", template, os);
+        self.image_os.write().await.insert(template.to_string(), os);
+        if let Some(state) = self.active_vms.write().await.get_mut(vm_name) {
+            state.os = os;
+        }
+        self.state_changed.notify_one();
     }
 
     /// Wait for VM to be ready (IP available and SSH accessible).
@@ -385,12 +483,7 @@ impl VmManager {
         runner_scope_url: &str,
         jit_config: &str,
     ) -> Result<()> {
-        let ip = {
-            let vms = self.active_vms.read().await;
-            vms.get(vm_id)
-                .and_then(|s| s.ip_address)
-                .ok_or_else(|| Error::VmNotFound(vm_id.to_string()))?
-        };
+        let (ip, os) = self.ip_and_os(vm_id).await?;
 
         self.update_state(vm_id, VmStatus::ConfiguringRunner).await;
 
@@ -401,7 +494,8 @@ impl VmManager {
                 "JIT mode: ensuring runner is installed on VM {} (skipping config.sh)",
                 vm_id
             );
-            ssh::ensure_runner_installed(ip, &self.ssh_config, &self.config.runner_version).await?;
+            ssh::ensure_runner_installed(ip, &self.ssh_config, &self.config.runner_version, os)
+                .await?;
         } else {
             // Legacy path: install + config.sh
             ssh::configure_runner(
@@ -412,6 +506,7 @@ impl VmManager {
                 runner_scope_url,
                 vm_id,
                 &self.config.runner_version,
+                os,
             )
             .await?;
         }
@@ -423,28 +518,21 @@ impl VmManager {
 
     /// Wait for the runner to complete its job.
     ///
-    /// Uses Terminal.app GUI context for macOS services (code signing, keychain, notarization).
-    /// If `jit_config` is non-empty, it's written to the VM and passed to run.sh --jitconfig.
+    /// On macOS the runner runs in the Terminal.app GUI context for macOS services (code signing, keychain,
+    /// notarization). If `jit_config` is non-empty, it's written to the VM and passed to run.sh --jitconfig.
     pub async fn wait_for_runner_exit(&self, vm_id: &str, jit_config: &str) -> Result<()> {
-        let ip = {
-            let vms = self.active_vms.read().await;
-            vms.get(vm_id)
-                .and_then(|s| s.ip_address)
-                .ok_or_else(|| Error::VmNotFound(vm_id.to_string()))?
-        };
+        let (ip, os) = self.ip_and_os(vm_id).await?;
 
         info!(
-            "Starting runner in GUI mode and waiting for completion on VM {}",
-            vm_id
+            "Starting runner ({:?}) and waiting for completion on VM {}",
+            os, vm_id
         );
 
         // Create log file path for this runner with date
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
         let log_file = self.log_dir.join(format!("runner-{vm_id}-{timestamp}.log"));
 
-        // Start the runner in GUI context and wait for it to complete
-        // GUI mode enables code signing, keychain access, and other macOS GUI services
-        ssh::start_runner_gui_and_wait(ip, &self.ssh_config, &log_file, jit_config).await?;
+        ssh::start_runner_and_wait(ip, &self.ssh_config, &log_file, jit_config, os).await?;
 
         info!(
             "Runner completed on VM {} (log: {})",
@@ -452,6 +540,13 @@ impl VmManager {
             log_file.display()
         );
         Ok(())
+    }
+
+    async fn ip_and_os(&self, vm_id: &str) -> Result<(Ipv4Addr, GuestOs)> {
+        let vms = self.active_vms.read().await;
+        vms.get(vm_id)
+            .and_then(|s| Some((s.ip_address?, s.os)))
+            .ok_or_else(|| Error::VmNotFound(vm_id.to_string()))
     }
 
     /// Destroy a VM.
@@ -705,8 +800,9 @@ mod tests {
         let log_dir = std::env::temp_dir().join("kuiper-tart-agent-test-logs");
         let manager = VmManager::new(config, SshConfig::default(), log_dir);
 
-        assert_eq!(manager.max_vms(), 2);
-        assert_eq!(manager.available_slots().await, 2);
+        assert_eq!(manager.max_vms(), 3);
+        assert_eq!(manager.available_slots(GuestOs::MacOS).await, 2);
+        assert_eq!(manager.available_slots(GuestOs::Linux).await, 3);
         assert_eq!(manager.active_count().await, 0);
     }
 
@@ -722,18 +818,54 @@ mod tests {
             image_mappings: Vec::new(),
         };
         let manager = VmManager::new(config, SshConfig::default(), std::env::temp_dir());
-        let ext = |macos, total| ExternalVms { macos, total };
+        let counts = |macos, total| VmCounts { macos, total };
+        let none = VmCounts::default();
+        let mac = GuestOs::MacOS;
 
         // one external mac leaves one mac slot
-        assert_eq!(manager.free_slots(0, ext(1, 1)), 1);
-        assert_eq!(manager.free_slots(1, ext(1, 1)), 0);
+        assert_eq!(manager.free_slots(mac, none, counts(1, 1)), 1);
+        assert_eq!(manager.free_slots(mac, counts(1, 1), counts(1, 1)), 0);
 
         // external linux VMs only use up the total limit
-        assert_eq!(manager.free_slots(0, ext(0, 2)), 1);
-        assert_eq!(manager.free_slots(0, ext(0, 3)), 0);
+        assert_eq!(manager.free_slots(mac, none, counts(0, 2)), 1);
+        assert_eq!(manager.free_slots(mac, none, counts(0, 3)), 0);
 
         // over the limit doesn't underflow
-        assert_eq!(manager.free_slots(2, ext(2, 4)), 0);
+        assert_eq!(manager.free_slots(mac, counts(2, 2), counts(2, 4)), 0);
+    }
+
+    #[test]
+    fn test_free_slots_linux_skips_macos_limit() {
+        let config = TartConfig {
+            base_image: "test".to_string(),
+            max_macos_vms: 2,
+            max_total_vms: 4,
+            shared_cache_dir: None,
+            ssh: Default::default(),
+            runner_version: "latest".to_string(),
+            image_mappings: Vec::new(),
+        };
+        let manager = VmManager::new(config, SshConfig::default(), std::env::temp_dir());
+        let counts = |macos, total| VmCounts { macos, total };
+        let none = VmCounts::default();
+
+        // both mac slots taken: no more mac, linux still fits
+        assert_eq!(manager.free_slots(GuestOs::MacOS, counts(2, 2), none), 0);
+        assert_eq!(manager.free_slots(GuestOs::Linux, counts(2, 2), none), 2);
+
+        // linux VMs use up mac slots only through the total limit
+        assert_eq!(manager.free_slots(GuestOs::MacOS, counts(0, 3), none), 1);
+        assert_eq!(
+            manager.free_slots(GuestOs::Linux, counts(1, 3), counts(0, 1)),
+            0
+        );
+    }
+
+    #[test]
+    fn test_guest_os_from_tart() {
+        assert_eq!(GuestOs::from_tart("linux"), GuestOs::Linux);
+        assert_eq!(GuestOs::from_tart("darwin"), GuestOs::MacOS);
+        assert_eq!(GuestOs::from_tart(""), GuestOs::MacOS);
     }
 
     #[test]

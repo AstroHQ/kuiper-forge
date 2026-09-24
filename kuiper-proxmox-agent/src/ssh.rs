@@ -9,8 +9,8 @@ use crate::config::SshConfig;
 use crate::error::{Error, Result};
 use russh::ChannelMsg;
 use russh::client::{self, Config, Handle, Handler};
-use russh::keys::PrivateKey;
 use russh::keys::key::PrivateKeyWithHashAlg;
+use russh::keys::{HashAlg, PrivateKey};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -201,7 +201,8 @@ impl SshClient {
         private_key: Arc<PrivateKey>,
         connect_timeout: Duration,
     ) -> Result<bool> {
-        let key_with_hash = PrivateKeyWithHashAlg::new(private_key, None);
+        let hash = rsa_hash(handle, &private_key).await;
+        let key_with_hash = PrivateKeyWithHashAlg::new(private_key, hash);
         let result = timeout(
             connect_timeout,
             handle.authenticate_publickey(&self.config.username, key_with_hash),
@@ -556,6 +557,20 @@ impl RunnerConfigBuilder {
         } else {
             cmd
         }
+    }
+}
+
+/// RSA keys need a SHA-2 signature: OpenSSH 8.8+ turned off `ssh-rsa` (SHA-1) by default, and russh uses SHA-1 when
+/// the hash is `None`. Other key types ignore the hash.
+async fn rsa_hash<H: Handler>(session: &Handle<H>, key: &PrivateKey) -> Option<HashAlg> {
+    if !key.algorithm().is_rsa() {
+        return None;
+    }
+    match session.best_supported_rsa_hash().await {
+        Ok(Some(hash)) => hash,
+
+        // server didn't list its algorithms, assume a modern one
+        _ => Some(HashAlg::Sha256),
     }
 }
 

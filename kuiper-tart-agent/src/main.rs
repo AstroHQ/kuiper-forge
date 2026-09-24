@@ -1,4 +1,4 @@
-//! Tart Agent - manages macOS VMs via Tart CLI for CI runners.
+//! Tart Agent - manages macOS and linux VMs via Tart CLI for CI runners.
 //!
 //! This daemon runs on each Mac host and:
 //! - Connects outbound to the coordinator via gRPC with mTLS
@@ -43,7 +43,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 use config::Config;
 use error::Error;
 use ssh::SshConfig;
-use vm_manager::VmManager;
+use vm_manager::{GuestOs, VmManager};
 
 /// Tart VM Agent for CI Runner Coordination
 #[derive(Parser, Debug)]
@@ -633,10 +633,23 @@ impl TartAgent {
 }
 
 impl TartAgent {
-    async fn has_capacity(&self) -> bool {
+    async fn has_capacity(&self, os: GuestOs) -> bool {
         // an external VM may have started since the last poll
         self.vm_manager.refresh_external().await;
-        self.vm_manager.available_slots().await > 0
+        self.vm_manager.available_slots(os).await > 0
+    }
+
+    /// The image behind each of `label_sets`, same order.
+    fn label_set_images(&self) -> Vec<&str> {
+        let tart = &self.config.tart;
+        if tart.image_mappings.is_empty() {
+            vec![tart.base_image.as_str()]
+        } else {
+            tart.image_mappings
+                .iter()
+                .map(|m| m.image.as_str())
+                .collect()
+        }
     }
 
     /// Read commands from the coordinator and act on them: check capacity, ack,
@@ -645,7 +658,9 @@ impl TartAgent {
         while let Some(command) = connection.commands.recv().await {
             match command {
                 runtime::RunnerCommand::Create(cmd) => {
-                    if !self.has_capacity().await {
+                    let image = self.select_image(&cmd.labels);
+                    let os = self.vm_manager.image_os(&image).await;
+                    if !self.has_capacity(os).await {
                         let summary = self.vm_manager.capacity_summary().await;
                         warn!(
                             "Rejecting CreateRunner for vm={}: at capacity ({})",
@@ -667,7 +682,9 @@ impl TartAgent {
                         .await;
                     let agent = self.clone();
                     let events = connection.events.clone();
-                    tokio::spawn(async move { agent.handle_create_runner(cmd, events).await });
+                    tokio::spawn(
+                        async move { agent.handle_create_runner(cmd, image, events).await },
+                    );
                 }
                 runtime::RunnerCommand::Destroy(cmd) => {
                     let _ = connection
@@ -685,7 +702,12 @@ impl TartAgent {
     /// Run a runner VM's full lifecycle to completion, reporting runner events.
     /// Status updates are emitted automatically as the VM set changes (see the
     /// status bridge in `main`), so this only sends lifecycle events.
-    async fn handle_create_runner(&self, cmd: CreateRunnerCommand, events: runtime::EventSender) {
+    async fn handle_create_runner(
+        &self,
+        cmd: CreateRunnerCommand,
+        selected_image: String,
+        events: runtime::EventSender,
+    ) {
         let vm_name = cmd.vm_name.clone();
 
         // Validate inputs early and warn about suspicious values
@@ -709,9 +731,6 @@ impl TartAgent {
                 &cmd.runner_scope_url
             }
         );
-
-        // Select image based on job labels
-        let selected_image = self.select_image(&cmd.labels);
 
         let result: std::result::Result<(String, String), Error> = async {
             // 1. Clone and start VM from selected image
@@ -851,16 +870,21 @@ impl TartAgent {
     async fn build_status(&self) -> AgentStatus {
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
-        // Convert Vec<Vec<String>> to Vec<LabelSet>
-        let label_sets: Vec<LabelSet> = self
-            .label_sets
-            .iter()
-            .map(|ls| LabelSet { labels: ls.clone() })
-            .collect();
+        // each set also says which limits its VMs use, so the coordinator doesn't hold linux jobs to the macOS limit
+        let mut label_sets = Vec::with_capacity(self.label_sets.len());
+        let mut available_slots = 0;
+        for (labels, image) in self.label_sets.iter().zip(self.label_set_images()) {
+            let os = self.vm_manager.image_os(image).await;
+            available_slots = available_slots.max(self.vm_manager.available_slots(os).await);
+            label_sets.push(LabelSet {
+                labels: labels.clone(),
+                limits: os.limit_names().iter().map(|l| l.to_string()).collect(),
+            });
+        }
 
         AgentStatus {
             active_vms: self.vm_manager.active_count().await as u32,
-            available_slots: self.vm_manager.available_slots().await,
+            available_slots,
             vms: self.vm_manager.get_vms().await,
             // Identity fields - required for first message
             agent_id: self.cert_store.get_agent_id().unwrap_or_default(),

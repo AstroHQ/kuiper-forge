@@ -95,8 +95,8 @@ message AgentStatus {
     repeated LabelSet label_sets = 9;
     // Agent build version, e.g. "0.4.0". Empty from agents that predate this field
     string agent_version = 10;
-    // Extra host-wide limits on top of max_vms. Every VM this agent runs counts against every limit. Empty from agents
-    // that only have max_vms
+    // Extra host-wide limits on top of max_vms. Which VMs count against which limit comes from LabelSet.limits. Empty
+    // from agents that only have max_vms
     repeated CapacityLimit limits = 11;
 }
 
@@ -105,11 +105,15 @@ message CapacityLimit {
     string name = 1;      // "macos", "total"
     uint32 max = 2;
     uint32 external = 3;  // VMs counted against this limit that the agent doesn't manage
+    uint32 active = 4;    // the agent's own VMs counted against this limit
 }
 
 // A set of labels representing one capability an agent can fulfill.
 message LabelSet {
     repeated string labels = 1;
+    // Names of the CapacityLimits a VM for this set counts against, e.g. ["macos", "total"] for a macOS image,
+    // ["total"] for a linux one. When every set leaves this empty (older agents), every VM counts against every limit
+    repeated string limits = 2;
 }
 
 message VmInfo {

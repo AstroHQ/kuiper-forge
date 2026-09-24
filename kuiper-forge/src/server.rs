@@ -39,7 +39,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::admin::AdminState;
 use crate::agent_logs::{self, AgentLogStore};
-use crate::agent_registry::{AgentRegistry, AgentType, VmLimit};
+use crate::agent_registry::{AgentLimits, AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::{TlsConfig, WebhookConfig};
 use crate::fleet::FleetNotifier;
@@ -442,7 +442,7 @@ impl AgentService for AgentServiceImpl {
                     vm_names,
                     // older agents leave this empty
                     Some(status.agent_version.clone()).filter(|v| !v.is_empty()),
-                    status.limits.iter().map(VmLimit::from).collect::<Vec<_>>(),
+                    AgentLimits::from(status),
                 )
             }
             _ => {
@@ -691,7 +691,7 @@ async fn handle_agent_message(
 
             // before update_status, its reserved_slots clamp uses them
             registry
-                .set_limits(agent_id, status.limits.iter().map(VmLimit::from).collect())
+                .set_limits(agent_id, AgentLimits::from(&status))
                 .await;
             registry
                 .update_status(

@@ -41,14 +41,15 @@ impl std::str::FromStr for AgentType {
     }
 }
 
-/// A host-wide limit an agent reports on top of `max_vms`, e.g. tart's macOS guest limit. Every VM the agent runs
-/// counts against it.
+/// A host-wide limit an agent reports on top of `max_vms`, e.g. tart's macOS guest limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmLimit {
     pub name: String,
     pub max: usize,
     /// VMs using up this limit that the agent doesn't manage
     pub external: usize,
+    /// The agent's own VMs using up this limit. Always 0 from older agents, use `ConnectedAgent::limit_active`
+    pub active: usize,
 }
 
 impl From<&kuiper_agent_proto::CapacityLimit> for VmLimit {
@@ -57,8 +58,38 @@ impl From<&kuiper_agent_proto::CapacityLimit> for VmLimit {
             name: l.name.clone(),
             max: l.max as usize,
             external: l.external as usize,
+            active: l.active as usize,
         }
     }
+}
+
+/// An agent's limits and which of them each label set's VMs count against, from its latest status.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentLimits {
+    pub limits: Vec<VmLimit>,
+    /// Limit names per label set, same order as `label_sets`. All empty from older agents, where every VM counts
+    /// against every limit
+    pub label_set_limits: Vec<Vec<String>>,
+}
+
+impl From<&kuiper_agent_proto::AgentStatus> for AgentLimits {
+    fn from(status: &kuiper_agent_proto::AgentStatus) -> Self {
+        Self {
+            limits: status.limits.iter().map(VmLimit::from).collect(),
+            label_set_limits: status
+                .label_sets
+                .iter()
+                .map(|ls| ls.limits.clone())
+                .collect(),
+        }
+    }
+}
+
+/// Returns true if every label in `required` is in `set` (case-insensitive).
+fn set_covers(set: &[String], required: &[String]) -> bool {
+    required
+        .iter()
+        .all(|r| set.iter().any(|label| label.eq_ignore_ascii_case(r)))
 }
 
 /// Information about a connected agent
@@ -81,6 +112,9 @@ pub struct ConnectedAgent {
 
     /// Extra limits from the agent's last status, empty for agents that only have `max_vms`
     pub limits: Vec<VmLimit>,
+
+    /// Which `limits` each label set's VMs count against, same order as `label_sets`
+    label_set_limits: Vec<Vec<String>>,
 
     /// Reserved slots (commands sent but not yet reflected in active_vms)
     /// This prevents over-scheduling when sending multiple commands quickly
@@ -125,6 +159,7 @@ impl ConnectedAgent {
             max_vms,
             active_vms,
             limits: Vec::new(),
+            label_set_limits: Vec::new(),
             reserved_slots: 0,
             labels,
             label_sets,
@@ -134,31 +169,80 @@ impl ConnectedAgent {
         }
     }
 
-    /// How many VMs this agent can run right now: `max_vms`, lowered by any limit that VMs outside the agent use up.
-    pub fn effective_max(&self) -> usize {
+    /// Returns true if the agent says which limits each label set's VMs count against. Older agents don't, and every
+    /// VM counts against every limit.
+    fn limits_per_set(&self) -> bool {
+        self.label_set_limits.iter().any(|l| !l.is_empty())
+    }
+
+    /// The agent's own VMs counted against `limit`.
+    fn limit_active(&self, limit: &VmLimit) -> usize {
+        if self.limits_per_set() {
+            limit.active
+        } else {
+            self.active_vms
+        }
+    }
+
+    /// Limits a job with these labels counts against. We can't tell which matching set the agent will pick, so it's
+    /// the union over all of them.
+    fn limits_for(&self, labels: &[String]) -> impl Iterator<Item = &VmLimit> {
+        let names: Option<Vec<&String>> = self.limits_per_set().then(|| {
+            self.label_sets
+                .iter()
+                .zip(&self.label_set_limits)
+                .filter(|(set, _)| set_covers(set, labels))
+                .flat_map(|(_, names)| names)
+                .collect()
+        });
         self.limits
             .iter()
+            .filter(move |l| names.as_ref().is_none_or(|names| names.contains(&&l.name)))
+    }
+
+    /// How many VMs of any kind this agent can run right now: `max_vms`, lowered by the limits every VM counts against
+    /// that VMs outside the agent use up.
+    pub fn effective_max(&self) -> usize {
+        let per_set = self.limits_per_set();
+        self.limits
+            .iter()
+            .filter(|l| {
+                !per_set
+                    || self
+                        .label_set_limits
+                        .iter()
+                        .all(|names| names.contains(&l.name))
+            })
             .map(|l| l.max.saturating_sub(l.external))
             .fold(self.max_vms, usize::min)
     }
 
-    /// Check if this agent has capacity for more VMs
+    /// Check if this agent has capacity for a job with these labels
     /// Takes into account both active VMs and reserved slots
-    pub fn has_capacity(&self) -> bool {
-        self.active_vms + self.reserved_slots < self.effective_max()
+    pub fn has_capacity(&self, labels: &[String]) -> bool {
+        self.available_capacity(labels) > 0
     }
 
-    /// Get available capacity (number of VMs that can still be created)
+    /// Get available capacity for a job with these labels (number of VMs that can still be created)
     /// Takes into account both active VMs and reserved slots
-    pub fn available_capacity(&self) -> usize {
-        self.effective_max()
-            .saturating_sub(self.active_vms + self.reserved_slots)
+    pub fn available_capacity(&self, labels: &[String]) -> usize {
+        // reservations don't know their limits, so each one counts against every limit until the next status
+        self.limits_for(labels)
+            .map(|l| {
+                l.max
+                    .saturating_sub(l.external + self.limit_active(l) + self.reserved_slots)
+            })
+            .fold(
+                self.max_vms
+                    .saturating_sub(self.active_vms + self.reserved_slots),
+                usize::min,
+            )
     }
 
     /// Reserve a slot for an upcoming VM creation
     /// Returns true if reservation succeeded, false if no capacity
-    pub fn reserve_slot(&mut self) -> bool {
-        if self.has_capacity() {
+    pub fn reserve_slot(&mut self, labels: &[String]) -> bool {
+        if self.has_capacity(labels) {
             self.reserved_slots += 1;
             true
         } else {
@@ -180,20 +264,12 @@ impl ConnectedAgent {
     pub fn matches_labels(&self, required_labels: &[String]) -> bool {
         if !self.label_sets.is_empty() {
             // New capability-based matching: job labels must be subset of ANY label set
-            self.label_sets.iter().any(|label_set| {
-                required_labels.iter().all(|required| {
-                    label_set
-                        .iter()
-                        .any(|label| label.eq_ignore_ascii_case(required))
-                })
-            })
+            self.label_sets
+                .iter()
+                .any(|label_set| set_covers(label_set, required_labels))
         } else {
             // Legacy flat labels matching
-            required_labels.iter().all(|required| {
-                self.labels
-                    .iter()
-                    .any(|label| label.eq_ignore_ascii_case(required))
-            })
+            set_covers(&self.labels, required_labels)
         }
     }
 
@@ -368,13 +444,13 @@ impl AgentRegistry {
         let mut candidates: Vec<(bool, usize, usize, String)> = Vec::new();
         for (id, agent) in agents.iter() {
             let agent = agent.read().await;
-            let has_cap = agent.has_capacity();
+            let has_cap = agent.has_capacity(labels);
             let matches = agent.matches_labels(labels);
             if has_cap && matches {
                 let in_use = agent.active_vms + agent.reserved_slots;
                 candidates.push((
                     avoid.contains(id),
-                    agent.available_capacity(),
+                    agent.available_capacity(labels),
                     in_use,
                     id.clone(),
                 ));
@@ -449,7 +525,7 @@ impl AgentRegistry {
         for agent in agents.values() {
             let agent = agent.read().await;
             if agent.matches_labels(labels) {
-                total += agent.available_capacity();
+                total += agent.available_capacity(labels);
             }
         }
         total
@@ -603,12 +679,13 @@ impl AgentRegistry {
     }
 
     /// Replace the agent's extra limits with the ones from its latest status.
-    pub async fn set_limits(&self, agent_id: &str, limits: Vec<VmLimit>) {
+    pub async fn set_limits(&self, agent_id: &str, limits: AgentLimits) {
         if let Some(agent) = self.get(agent_id).await {
             let mut agent = agent.write().await;
-            if agent.limits != limits {
+            if agent.limits != limits.limits || agent.label_set_limits != limits.label_set_limits {
                 debug!(agent_id = %agent_id, limits = ?limits, "Agent limits changed");
-                agent.limits = limits;
+                agent.limits = limits.limits;
+                agent.label_set_limits = limits.label_set_limits;
             }
         }
     }
@@ -624,11 +701,11 @@ impl AgentRegistry {
 
     /// Reserve a slot on an agent for an upcoming VM creation
     /// Returns true if reservation succeeded
-    pub async fn reserve_slot(&self, agent_id: &str) -> bool {
+    pub async fn reserve_slot(&self, agent_id: &str, labels: &[String]) -> bool {
         match self.get(agent_id).await {
             Some(agent) => {
                 let mut agent = agent.write().await;
-                let reserved = agent.reserve_slot();
+                let reserved = agent.reserve_slot(labels);
                 if reserved {
                     debug!(
                         agent_id = %agent_id,
@@ -698,7 +775,14 @@ impl AgentRegistry {
                 label_sets: agent.label_sets.clone(),
                 max_vms: agent.max_vms,
                 active_vms: agent.active_vms,
-                limits: agent.limits.clone(),
+                limits: agent
+                    .limits
+                    .iter()
+                    .map(|l| VmLimit {
+                        active: agent.limit_active(l),
+                        ..l.clone()
+                    })
+                    .collect(),
                 last_seen_secs: agent.last_seen.elapsed().as_secs(),
             });
         }
@@ -779,6 +863,7 @@ pub struct AgentInfo {
     pub label_sets: Vec<Vec<String>>,
     pub max_vms: usize,
     pub active_vms: usize,
+    /// `active` is filled in for older agents too
     pub limits: Vec<VmLimit>,
     pub last_seen_secs: u64,
 }
@@ -883,27 +968,110 @@ mod tests {
             name: name.to_string(),
             max,
             external,
+            active: 0,
+        };
+        let limits = |limits| AgentLimits {
+            limits,
+            label_set_limits: Vec::new(),
         };
         let labels = ["macos".to_string()];
 
         // someone runs a mac VM by hand: one macOS slot left
         registry
-            .set_limits("agent_1", vec![limit("macos", 2, 1), limit("total", 5, 1)])
+            .set_limits(
+                "agent_1",
+                limits(vec![limit("macos", 2, 1), limit("total", 5, 1)]),
+            )
             .await;
         assert_eq!(registry.available_capacity(&labels).await, 1);
 
         // plus four linux VMs: total limit is full
         registry
-            .set_limits("agent_1", vec![limit("macos", 2, 1), limit("total", 5, 5)])
+            .set_limits(
+                "agent_1",
+                limits(vec![limit("macos", 2, 1), limit("total", 5, 5)]),
+            )
             .await;
         assert_eq!(registry.available_capacity(&labels).await, 0);
         assert!(registry.find_available_agent(&labels).await.is_none());
 
         // external VMs gone, back to max_vms
         registry
-            .set_limits("agent_1", vec![limit("macos", 2, 0), limit("total", 5, 0)])
+            .set_limits(
+                "agent_1",
+                limits(vec![limit("macos", 2, 0), limit("total", 5, 0)]),
+            )
             .await;
         assert_eq!(registry.available_capacity(&labels).await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_linux_jobs_skip_macos_limit() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        let strings = |labels: &[&str]| labels.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                4,
+                2, // active_vms: both macOS
+                strings(&["self-hosted"]),
+                vec![
+                    strings(&["self-hosted", "macos"]),
+                    strings(&["self-hosted", "linux"]),
+                ],
+                tx,
+            )
+            .await;
+        let limit = |name: &str, max, active| VmLimit {
+            name: name.to_string(),
+            max,
+            external: 0,
+            active,
+        };
+        let set_limits = |macos_active, total_active| AgentLimits {
+            limits: vec![
+                limit("macos", 2, macos_active),
+                limit("total", 4, total_active),
+            ],
+            label_set_limits: vec![strings(&["macos", "total"]), strings(&["total"])],
+        };
+        registry.set_limits("agent_1", set_limits(2, 2)).await;
+        let macos = strings(&["macos"]);
+        let linux = strings(&["linux"]);
+
+        // macOS limit is full, linux still has the rest of the total
+        assert_eq!(registry.available_capacity(&macos).await, 0);
+        assert_eq!(registry.available_capacity(&linux).await, 2);
+        assert!(registry.find_available_agent(&macos).await.is_none());
+
+        // labels matching both sets count against both
+        assert_eq!(
+            registry
+                .available_capacity(&strings(&["self-hosted"]))
+                .await,
+            0
+        );
+
+        // a pending linux reservation holds a slot on every limit until the next status
+        registry
+            .update_status(
+                "agent_1",
+                1,
+                4,
+                strings(&["self-hosted"]),
+                vec![
+                    strings(&["self-hosted", "macos"]),
+                    strings(&["self-hosted", "linux"]),
+                ],
+            )
+            .await;
+        registry.set_limits("agent_1", set_limits(1, 1)).await;
+        assert!(registry.reserve_slot("agent_1", &linux).await);
+        assert_eq!(registry.available_capacity(&macos).await, 0);
+        assert_eq!(registry.available_capacity(&linux).await, 2);
     }
 
     #[tokio::test]
@@ -957,8 +1125,8 @@ mod tests {
             .await;
 
         // Reserve both slots (simulating coordinator sending 2 CreateRunner commands)
-        assert!(registry.reserve_slot("agent_1").await);
-        assert!(registry.reserve_slot("agent_1").await);
+        assert!(registry.reserve_slot("agent_1", &[]).await);
+        assert!(registry.reserve_slot("agent_1", &[]).await);
 
         // Now at capacity (0 active, 2 reserved)
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
@@ -1098,7 +1266,7 @@ mod tests {
             .await;
 
         // Reserve a slot (simulating coordinator sending CreateRunner)
-        assert!(registry.reserve_slot("agent_1").await);
+        assert!(registry.reserve_slot("agent_1", &[]).await);
         // Now: 1 active + 1 reserved = 2 = max_vms, capacity = 0
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
@@ -1117,7 +1285,7 @@ mod tests {
         // reports 2 (both came from external sources, not our reservations).
         // total = 2 active + 2 reserved = 4 > max_vms, must clamp.
         // First, reserve the remaining capacity
-        assert!(registry.reserve_slot("agent_1").await);
+        assert!(registry.reserve_slot("agent_1", &[]).await);
         // reserved=2, active=0, capacity=0
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 0);
 
@@ -1162,8 +1330,8 @@ mod tests {
             .await;
 
         // Reserve 2 slots
-        assert!(registry.reserve_slot("agent_1").await);
-        assert!(registry.reserve_slot("agent_1").await);
+        assert!(registry.reserve_slot("agent_1", &[]).await);
+        assert!(registry.reserve_slot("agent_1", &[]).await);
         // active=1, reserved=2, capacity=0
 
         // DB says there's only 1 runner for this agent (the other was cleaned up)
@@ -1172,7 +1340,7 @@ mod tests {
         assert_eq!(registry.available_capacity(&["macos".to_string()]).await, 2);
 
         // Reserve again
-        assert!(registry.reserve_slot("agent_1").await);
+        assert!(registry.reserve_slot("agent_1", &[]).await);
         // active=1, reserved=1, capacity=1
 
         // DB has 2 runners (1 active + 1 in-flight) - reserved=1 is correct, no change
@@ -1277,8 +1445,8 @@ mod tests {
         );
 
         // a reservation counts as load too
-        assert!(registry.reserve_slot("idle").await);
-        assert!(registry.reserve_slot("idle").await);
+        assert!(registry.reserve_slot("idle", &[]).await);
+        assert!(registry.reserve_slot("idle", &[]).await);
         assert_eq!(
             registry.select_agent(&labels, &[]).await,
             Some("busy".to_string())
@@ -1323,8 +1491,8 @@ mod tests {
             Some("a".to_string())
         );
         // a full non-failed agent doesn't count as an alternative
-        assert!(registry.reserve_slot("b").await);
-        assert!(registry.reserve_slot("b").await);
+        assert!(registry.reserve_slot("b", &[]).await);
+        assert!(registry.reserve_slot("b", &[]).await);
         assert_eq!(
             registry.select_agent(&labels, &["a".to_string()]).await,
             Some("a".to_string())

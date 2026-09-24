@@ -1,6 +1,6 @@
 #!/bin/bash
-# GitHub Actions Runner GUI wrapper script for macOS
-# Runs the runner in Terminal.app context for GUI service access (code signing, keychain, etc.)
+# GitHub Actions Runner wrapper script. The tart agent launches it in Terminal.app on macOS for GUI service access
+# (code signing, keychain, etc.), and detached on linux
 
 LOG_FILE="$HOME/runner.log"
 EXIT_FILE="$HOME/runner-exit-status"

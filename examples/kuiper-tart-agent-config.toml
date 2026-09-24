@@ -107,6 +107,13 @@ max_total_vms = 5
 # labels = ["xcode-15"]
 # image = "macos-sonoma-xcode15"
 
+# Example 5: Linux guest. The agent asks tart for each image's OS, and linux VMs only count against max_total_vms.
+# Agent labels go on every mapping, so keep OS labels like "macOS" out of [agent] labels when mixing OSes.
+# The image needs the runner's dependencies installed already (./bin/installdependencies.sh, e.g. libicu)
+# [[tart.image_mappings]]
+# labels = ["linux"]
+# image = "ghcr.io/cirruslabs/ubuntu:latest"
+
 # =============================================================================
 # SSH Configuration for VM Access
 # =============================================================================

@@ -753,7 +753,7 @@ impl FleetManager {
         );
 
         // Reserve a slot on the agent
-        if !self.agent_registry.reserve_slot(&agent_id).await {
+        if !self.agent_registry.reserve_slot(&agent_id, labels).await {
             anyhow::bail!("Failed to reserve slot on agent {agent_id} (might be at capacity)");
         }
 
@@ -1648,7 +1648,11 @@ impl FleetManager {
             };
 
             // Reserve a slot on the agent to prevent over-scheduling
-            if !self.agent_registry.reserve_slot(&agent_id).await {
+            if !self
+                .agent_registry
+                .reserve_slot(&agent_id, &pool_def.labels)
+                .await
+            {
                 warn!(
                     "Failed to reserve slot on agent {} (might be at capacity now)",
                     agent_id

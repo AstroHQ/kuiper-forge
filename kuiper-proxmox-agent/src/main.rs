@@ -774,7 +774,10 @@ impl ProxmoxAgent {
         let label_sets: Vec<LabelSet> =
             kuiper_agent_lib::labels::label_sets(&labels, &self.config.vm.template_mappings)
                 .into_iter()
-                .map(|labels| LabelSet { labels })
+                .map(|labels| LabelSet {
+                    labels,
+                    limits: Vec::new(),
+                })
                 .collect();
 
         AgentStatus {

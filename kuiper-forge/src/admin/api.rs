@@ -141,6 +141,8 @@ struct LimitResponse {
     max: usize,
     /// VMs using up this limit that the agent doesn't manage
     external: usize,
+    /// The agent's own VMs using up this limit
+    active: usize,
 }
 
 async fn agents(State(state): State<Arc<AdminState>>) -> Response {
@@ -185,6 +187,7 @@ async fn agents(State(state): State<Arc<AdminState>>) -> Response {
                                 name: l.name.clone(),
                                 max: l.max,
                                 external: l.external,
+                                active: l.active,
                             })
                             .collect()
                     })

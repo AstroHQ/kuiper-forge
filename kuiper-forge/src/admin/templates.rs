@@ -87,7 +87,7 @@ impl LimitView {
             .iter()
             .map(|l| Self {
                 name: l.name.clone(),
-                used: agent.active_vms + l.external,
+                used: l.active + l.external,
                 max: l.max,
                 external: l.external,
             })
