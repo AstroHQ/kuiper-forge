@@ -182,6 +182,10 @@ impl AgentLogStore {
 
     /// Drop lines past the retention window, then trim each agent down to its line cap.
     pub async fn prune(&self) -> Result<u64> {
+        self.prune_with_cap(MAX_LINES_PER_AGENT).await
+    }
+
+    async fn prune_with_cap(&self, max_lines: i64) -> Result<u64> {
         let cutoff = (Utc::now() - chrono::Duration::days(RETENTION_DAYS)).timestamp_micros();
         let mut removed = sqlx::query(sql::DELETE_AGENT_LOGS_OLDER_THAN)
             .bind(cutoff)
@@ -198,17 +202,20 @@ impl AgentLogStore {
             .map(|row| row.get("agent_id"))
             .collect();
         for agent_id in agents {
-            let cutoff: Option<i64> = sqlx::query(sql::SELECT_AGENT_LOG_CUTOFF)
+            // first line past the cap, it and everything older goes
+            let cutoff: Option<(i64, i64)> = sqlx::query(sql::SELECT_AGENT_LOG_CUTOFF)
                 .bind(&agent_id)
-                .bind(MAX_LINES_PER_AGENT)
+                .bind(max_lines)
                 .fetch_optional(&self.pool)
                 .await
                 .context("Failed to find agent log cutoff")?
-                .map(|row| row.get("ts"));
-            if let Some(cutoff) = cutoff {
+                .map(|row| (row.get("ts"), row.get("seq")));
+            if let Some((ts, seq)) = cutoff {
                 removed += sqlx::query(sql::DELETE_AGENT_LOGS_BEFORE)
                     .bind(&agent_id)
-                    .bind(cutoff)
+                    .bind(ts)
+                    .bind(ts)
+                    .bind(seq)
                     .execute(&self.pool)
                     .await
                     .context("Failed to trim agent logs")?
@@ -329,6 +336,20 @@ mod tests {
         assert_eq!(store.prune().await.unwrap(), 1);
         let lines = store.recent("a1", LogLevel::Trace, None, 10).await.unwrap();
         assert_eq!(messages(&lines), vec!["new"]);
+    }
+
+    #[tokio::test]
+    async fn test_prune_to_cap_with_equal_timestamps() {
+        let (_temp, store) = store().await;
+        let now = Utc::now().timestamp_micros();
+        let batch: Vec<_> = (0..5)
+            .map(|seq| record(now, seq, "INFO", &format!("line {seq}")))
+            .collect();
+        store.insert_batch("a1", &batch, 0).await.unwrap();
+
+        assert_eq!(store.prune_with_cap(2).await.unwrap(), 3);
+        let lines = store.recent("a1", LogLevel::Trace, None, 10).await.unwrap();
+        assert_eq!(messages(&lines), vec!["line 4", "line 3"]);
     }
 
     #[test]

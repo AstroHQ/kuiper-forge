@@ -1,6 +1,6 @@
 //! Admin UI handlers for managing admin users.
 
-use crate::admin::auth::AdminSession;
+use crate::admin::auth::{AdminSession, LastAdminError};
 use crate::admin::middleware::AdminState;
 use crate::admin::routes::check_auth;
 use crate::admin::templates::{BaseContext, UserSummary, UsersTemplate};
@@ -228,7 +228,6 @@ pub(crate) async fn user_delete(
         return Redirect::to("/admin/login").into_response();
     };
 
-    // also guarantees at least one admin always remains
     if form.username == session.username {
         return render_users(
             &state,
@@ -248,6 +247,7 @@ pub(crate) async fn user_delete(
             );
             UsersMessage::Notice(format!("User '{}' deleted", form.username))
         }
+        Err(e) if e.is::<LastAdminError>() => UsersMessage::Error(e.to_string()),
         Err(e) => {
             error!("Failed to delete admin user '{}': {:#}", form.username, e);
             UsersMessage::Error("Failed to delete user".to_string())

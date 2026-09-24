@@ -36,6 +36,11 @@ pub struct AdminSession {
     pub user_agent: Option<String>,
 }
 
+/// Returned by [`AdminAuthStore::delete_user`] when the user is the only admin left.
+#[derive(Debug, thiserror::Error)]
+#[error("Cannot delete the last admin user")]
+pub struct LastAdminError;
+
 /// Database-backed storage for admin users and sessions.
 pub struct AdminAuthStore {
     pool: DbPool,
@@ -166,19 +171,31 @@ impl AdminAuthStore {
         Ok(())
     }
 
-    /// Delete an admin user.
+    /// Delete an admin user. Fails with [`LastAdminError`] if no other admin would remain.
     pub async fn delete_user(&self, username: &str) -> Result<()> {
-        // First delete all sessions for this user
+        // two admins deleting each other at once must not both succeed, so the count check and the delete share
+        // a transaction that other deletes wait on
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin transaction")?;
+
+        #[cfg(feature = "postgres")]
+        sqlx::query(sql::LOCK_ADMIN_USERS)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to lock admin users")?;
+
         sqlx::query(sql::DELETE_ADMIN_SESSIONS_BY_USER)
             .bind(username)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("Failed to delete user sessions")?;
 
-        // Then delete the user
         let result = sqlx::query(sql::DELETE_ADMIN_USER)
             .bind(username)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("Failed to delete admin user")?;
 
@@ -186,6 +203,16 @@ impl AdminAuthStore {
             return Err(anyhow!("User not found: {username}"));
         }
 
+        let remaining: i64 = sqlx::query(sql::COUNT_ADMIN_USERS)
+            .fetch_one(&mut *tx)
+            .await
+            .context("Failed to count admin users")?
+            .get("count");
+        if remaining == 0 {
+            return Err(LastAdminError.into());
+        }
+
+        tx.commit().await.context("Failed to commit user delete")?;
         Ok(())
     }
 
@@ -336,5 +363,24 @@ mod tests {
 
         // Wrong password should fail
         assert!(!AdminAuthStore::verify_password("wrong_password", &hash));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_cannot_delete_last_admin() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Database::new(&crate::config::DatabaseConfig::default(), temp.path())
+            .await
+            .unwrap();
+        let store = AdminAuthStore::new(db.pool());
+        store.create_user("a", "password-a").await.unwrap();
+        store.create_user("b", "password-b").await.unwrap();
+
+        store.delete_user("a").await.unwrap();
+        let err = store.delete_user("b").await.unwrap_err();
+        assert!(err.is::<LastAdminError>());
+
+        // rolled back, so b is still there
+        assert!(store.get_user("b").await.unwrap().is_some());
     }
 }

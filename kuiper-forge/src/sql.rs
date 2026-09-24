@@ -277,6 +277,12 @@ pub const DELETE_ADMIN_USER: &str = "DELETE FROM admin_users WHERE username = ?"
 #[cfg(feature = "postgres")]
 pub const DELETE_ADMIN_USER: &str = "DELETE FROM admin_users WHERE username = $1";
 
+pub const COUNT_ADMIN_USERS: &str = "SELECT COUNT(*) as count FROM admin_users";
+
+// sqlite has no row locks, the first write in a transaction takes the database lock instead
+#[cfg(feature = "postgres")]
+pub const LOCK_ADMIN_USERS: &str = "SELECT username FROM admin_users FOR UPDATE";
+
 // Admin sessions queries
 
 #[cfg(feature = "sqlite")]
@@ -418,14 +424,15 @@ pub const SELECT_AGENT_LOG_AGENTS: &str = "SELECT DISTINCT agent_id FROM agent_l
 
 #[cfg(feature = "sqlite")]
 pub const SELECT_AGENT_LOG_CUTOFF: &str =
-    "SELECT ts FROM agent_logs WHERE agent_id = ? ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET ?";
+    "SELECT ts, seq FROM agent_logs WHERE agent_id = ? ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_AGENT_LOG_CUTOFF: &str =
-    "SELECT ts FROM agent_logs WHERE agent_id = $1 ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET $2";
+pub const SELECT_AGENT_LOG_CUTOFF: &str = "SELECT ts, seq FROM agent_logs WHERE agent_id = $1 ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET $2";
 
 #[cfg(feature = "sqlite")]
-pub const DELETE_AGENT_LOGS_BEFORE: &str = "DELETE FROM agent_logs WHERE agent_id = ? AND ts < ?";
+pub const DELETE_AGENT_LOGS_BEFORE: &str =
+    "DELETE FROM agent_logs WHERE agent_id = ? AND (ts < ? OR (ts = ? AND seq <= ?))";
 
 #[cfg(feature = "postgres")]
-pub const DELETE_AGENT_LOGS_BEFORE: &str = "DELETE FROM agent_logs WHERE agent_id = $1 AND ts < $2";
+pub const DELETE_AGENT_LOGS_BEFORE: &str =
+    "DELETE FROM agent_logs WHERE agent_id = $1 AND (ts < $2 OR (ts = $3 AND seq <= $4))";
