@@ -18,8 +18,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HttpBuilder;
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentService, AgentServiceServer, CoordinatorMessage,
-    CoordinatorPayload, Ping, RegisterRequest, RegisterResponse, RegistrationService,
-    RegistrationServiceServer, RunnerEvent, RunnerEventType,
+    CoordinatorPayload, LogBatch, Ping, RegisterRequest, RegisterResponse, RegistrationService,
+    RegistrationServiceServer, RunnerEvent, RunnerEventType, UploadLogsResponse,
 };
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -38,6 +38,7 @@ use tower::Service;
 use tracing::{debug, error, info, warn};
 
 use crate::admin::AdminState;
+use crate::agent_logs::{self, AgentLogStore};
 use crate::agent_registry::{AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::{TlsConfig, WebhookConfig};
@@ -251,6 +252,8 @@ pub struct AgentServiceImpl {
     fleet_notifier: Option<FleetNotifier>,
     runner_state: Option<Arc<RunnerStateStore>>,
     pending_job_store: Option<Arc<PendingJobStore>>,
+    /// Where uploaded agent logs go. None just discards them
+    agent_logs: Option<Arc<AgentLogStore>>,
 }
 
 impl AgentServiceImpl {
@@ -267,7 +270,13 @@ impl AgentServiceImpl {
             fleet_notifier,
             runner_state,
             pending_job_store,
+            agent_logs: None,
         }
+    }
+
+    pub fn with_agent_logs(mut self, agent_logs: Option<Arc<AgentLogStore>>) -> Self {
+        self.agent_logs = agent_logs;
+        self
     }
 
     /// Extract agent ID from mTLS client certificate CN.
@@ -329,6 +338,38 @@ impl AgentServiceImpl {
 impl AgentService for AgentServiceImpl {
     type AgentStreamStream = Pin<Box<dyn Stream<Item = Result<CoordinatorMessage, Status>> + Send>>;
 
+    async fn upload_logs(
+        &self,
+        request: Request<LogBatch>,
+    ) -> Result<Response<UploadLogsResponse>, Status> {
+        let agent_id = self.extract_agent_id_from_cert(&request)?;
+        if !self.auth_manager.is_agent_valid(&agent_id).await {
+            return Err(Status::unauthenticated(
+                "Agent not registered or has been revoked",
+            ));
+        }
+
+        let batch = request.into_inner();
+        if batch.records.len() > agent_logs::MAX_BATCH {
+            return Err(Status::invalid_argument(format!(
+                "Too many log records in one batch (max {})",
+                agent_logs::MAX_BATCH
+            )));
+        }
+
+        if let Some(store) = &self.agent_logs
+            && let Err(e) = store
+                .insert_batch(&agent_id, &batch.records, batch.dropped)
+                .await
+        {
+            // the agent requeues on a non-refusal error, so a db hiccup just delays the lines
+            warn!(agent_id = %agent_id, "Failed to store agent logs: {:#}", e);
+            return Err(Status::unavailable("Failed to store logs"));
+        }
+
+        Ok(Response::new(UploadLogsResponse {}))
+    }
+
     async fn agent_stream(
         &self,
         request: Request<Streaming<AgentMessage>>,
@@ -358,47 +399,56 @@ impl AgentService for AgentServiceImpl {
             .map_err(|e| Status::internal(format!("Stream error: {e}")))?;
 
         // Extract metadata from status message (identity comes from cert, not message)
-        let (hostname, agent_type, labels, label_sets, max_vms, active_vms, vm_names) =
-            match &first_msg.payload {
-                Some(AgentPayload::Status(status)) => {
-                    let agent_type = match status.agent_type.to_lowercase().as_str() {
-                        "tart" => AgentType::Tart,
-                        "proxmox" => AgentType::Proxmox,
-                        _ => {
-                            return Err(Status::invalid_argument(format!(
-                                "Unknown agent type: {}",
-                                status.agent_type
-                            )));
-                        }
-                    };
+        let (
+            hostname,
+            agent_type,
+            labels,
+            label_sets,
+            max_vms,
+            active_vms,
+            vm_names,
+            agent_version,
+        ) = match &first_msg.payload {
+            Some(AgentPayload::Status(status)) => {
+                let agent_type = match status.agent_type.to_lowercase().as_str() {
+                    "tart" => AgentType::Tart,
+                    "proxmox" => AgentType::Proxmox,
+                    _ => {
+                        return Err(Status::invalid_argument(format!(
+                            "Unknown agent type: {}",
+                            status.agent_type
+                        )));
+                    }
+                };
 
-                    // Extract VM names for recovery
-                    let vm_names: Vec<String> =
-                        status.vms.iter().map(|vm| vm.name.clone()).collect();
+                // Extract VM names for recovery
+                let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
 
-                    // Extract label_sets (capability sets) - each LabelSet becomes a Vec<String>
-                    let label_sets: Vec<Vec<String>> = status
-                        .label_sets
-                        .iter()
-                        .map(|ls| ls.labels.clone())
-                        .collect();
+                // Extract label_sets (capability sets) - each LabelSet becomes a Vec<String>
+                let label_sets: Vec<Vec<String>> = status
+                    .label_sets
+                    .iter()
+                    .map(|ls| ls.labels.clone())
+                    .collect();
 
-                    (
-                        status.hostname.clone(),
-                        agent_type,
-                        status.labels.clone(),
-                        label_sets,
-                        status.max_vms as usize,
-                        status.active_vms as usize,
-                        vm_names,
-                    )
-                }
-                _ => {
-                    return Err(Status::invalid_argument(
-                        "First message must be a status message",
-                    ));
-                }
-            };
+                (
+                    status.hostname.clone(),
+                    agent_type,
+                    status.labels.clone(),
+                    label_sets,
+                    status.max_vms as usize,
+                    status.active_vms as usize,
+                    vm_names,
+                    // older agents leave this empty
+                    Some(status.agent_version.clone()).filter(|v| !v.is_empty()),
+                )
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "First message must be a status message",
+                ));
+            }
+        };
 
         info!(
             agent_id = %agent_id,
@@ -408,6 +458,7 @@ impl AgentService for AgentServiceImpl {
             label_sets = ?label_sets,
             max_vms = max_vms,
             active_vms = active_vms,
+            agent_version = agent_version.as_deref().unwrap_or("unknown"),
             "Agent stream connected"
         );
 
@@ -424,17 +475,22 @@ impl AgentService for AgentServiceImpl {
             let new_max = max_vms as u32;
             let labels_changed = stored.labels != labels;
             let max_changed = stored.max_vms != new_max;
-            if labels_changed || max_changed {
+
+            // an agent downgraded to one that doesn't report a version clears it rather than keeping a stale one
+            let version_changed = stored.agent_version != agent_version;
+            if labels_changed || max_changed || version_changed {
                 info!(
                     agent_id = %agent_id,
                     old_max = stored.max_vms,
                     new_max = new_max,
                     labels_changed = labels_changed,
+                    old_version = ?stored.agent_version,
+                    new_version = ?agent_version,
                     "Syncing persisted agent record from live status"
                 );
                 if let Err(e) = self
                     .auth_manager
-                    .update_agent_metadata(&agent_id, &labels, new_max)
+                    .update_agent_metadata(&agent_id, &labels, new_max, agent_version.as_deref())
                     .await
                 {
                     warn!(error = %e, agent_id = %agent_id,
@@ -757,6 +813,9 @@ pub struct ServerConfig {
 
     /// Enable PROXY protocol support (v1 and v2)
     pub proxy_protocol: bool,
+
+    /// Store for logs agents upload. None accepts uploads and throws them away
+    pub agent_logs: Option<Arc<AgentLogStore>>,
 }
 
 /// Start the gRPC server with optional mTLS.
@@ -870,7 +929,8 @@ pub async fn run_server(
         fleet_notifier,
         runner_state,
         pending_job_store_for_grpc,
-    );
+    )
+    .with_agent_logs(config.agent_logs.clone());
 
     // Build gRPC service using tonic Routes
     let grpc_service = Routes::new(RegistrationServiceServer::new(registration_service))
@@ -1070,7 +1130,8 @@ async fn run_grpc_only_server(
         fleet_notifier,
         runner_state,
         None, // No pending_job_store in gRPC-only mode
-    );
+    )
+    .with_agent_logs(config.agent_logs.clone());
 
     // If PROXY protocol is enabled, we need manual connection handling
     if config.proxy_protocol {

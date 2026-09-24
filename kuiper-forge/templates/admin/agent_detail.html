@@ -1,34 +1,13 @@
 {% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
 
 {% block title %}Agent: {{ agent.agent_id }}{% endblock %}
 
 {% block body %}
-<nav>
-    <div class="nav-links">
-        <span class="nav-brand">KuiperForge</span>
-        <a href="/admin/dashboard">Dashboard</a>
-    </div>
-    <div class="nav-user">
-        {{ base.username }}
-        <form method="post" action="/admin/logout" style="display: inline;">
-            <button type="submit" style="background: none; border: none; color: #aaa; cursor: pointer; margin-left: 10px;">Logout</button>
-        </form>
-    </div>
-</nav>
+{% include "admin/nav.html" %}
 
 <div class="container">
-    <div class="page-header">
-        <h1>Agent: {{ agent.agent_id }}</h1>
-        <div>
-            <a href="/admin/dashboard" class="btn btn-secondary">Back to Dashboard</a>
-            {% if !agent.revoked %}
-            <form method="post" action="/admin/agents/{{ agent.agent_id }}/revoke" style="display: inline;"
-                onsubmit="return confirm('Are you sure you want to revoke this agent? This will disconnect the agent and require re-registration.');">
-                <button type="submit" class="btn btn-danger">Revoke Certificate</button>
-            </form>
-            {% endif %}
-        </div>
-    </div>
+    {% include "admin/agent_header.html" %}
 
     <div class="card">
         <div class="card-title">Agent Details</div>
@@ -41,6 +20,9 @@
 
             <div class="detail-label">Type</div>
             <div>{{ agent.agent_type }}</div>
+
+            <div class="detail-label">Version</div>
+            <div>{% if let Some(v) = agent.version %}{{ v }}{% else %}<span class="muted">unknown, this agent version doesn't report it</span>{% endif %}</div>
 
             <div class="detail-label">Status</div>
             <div>
@@ -68,7 +50,7 @@
             </div>
 
             <div class="detail-label">Registered</div>
-            <div>{{ agent.created_at }}</div>
+            <div>{% call m::ts(agent.created_at) %}{% endcall %}</div>
         </div>
     </div>
 
@@ -113,7 +95,38 @@
                             <span style="color: #666;">-</span>
                         {% endif %}
                     </td>
-                    <td>{{ runner.created_at }}</td>
+                    <td>{% call m::ts(runner.created_at) %}{% endcall %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-title">Recent Failures ({{ failures.len() }})</div>
+        {% if failures.is_empty() %}
+        <p style="color: #666;">No failures recorded for this agent.</p>
+        {% else %}
+        <table>
+            <thead>
+                <tr>
+                    <th>When</th>
+                    <th>Type</th>
+                    <th>Runner / Job</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for failure in failures %}
+                <tr>
+                    <td style="white-space: nowrap;">{% call m::ts_title(failure.occurred_at, failure.ago ~ " ago") %}{% endcall %}</td>
+                    <td style="white-space: nowrap;"><span class="badge badge-offline">{{ failure.kind }}</span></td>
+                    <td>
+                        {% if let Some(name) = failure.runner_name %}{{ name }}{% else %}-{% endif %}
+                        {% if let Some(job_id) = failure.job_id %}<div class="muted">job #{{ job_id }}</div>{% endif %}
+                    </td>
+                    <td><code class="failure-message">{% if failure.message.is_empty() %}(no error message){% else %}{{ failure.message }}{% endif %}</code></td>
                 </tr>
                 {% endfor %}
             </tbody>

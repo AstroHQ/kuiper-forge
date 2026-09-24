@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use kuiper_agent_lib::{AgentCertStore, AgentConfig, RegistrationBundle, runtime};
+use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture, RegistrationBundle, runtime};
 use kuiper_agent_proto::{
     AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType,
 };
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = Config::default_data_dir();
 
     // Initialize logging with file output (retention applied after config load)
-    init_logging(
+    let log_capture = init_logging(
         &data_dir,
         config::LoggingConfig::default().retention_days as usize,
     )?;
@@ -281,12 +281,16 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Hand the connection off to the runtime, which drives the coordinator loop.
-    let connection = runtime::connect(
+    if !config.logging.upload {
+        log_capture.disable();
+    }
+    let connection = runtime::connect_with_logs(
         agent.agent_config.clone(),
         agent.cert_store.clone(),
         status_rx,
         Duration::from_secs(config.reconnect.initial_delay_secs),
         Duration::from_secs(config.reconnect.max_delay_secs),
+        config.logging.upload.then_some(log_capture),
     );
 
     // Run the command loop with graceful shutdown handling.
@@ -854,12 +858,13 @@ impl TartAgent {
             labels: self.labels.clone(),
             max_vms: self.config.tart.max_concurrent_vms,
             label_sets,
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 }
 
 /// Initialize logging with file output and stdout.
-fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
+fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<LogCapture> {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
@@ -884,8 +889,10 @@ fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
         Err(_) => EnvFilter::new(format!("{base},info")),
     };
 
+    let capture = LogCapture::new();
     tracing_subscriber::registry()
         .with(filter)
+        .with(capture.layer()) // uploaded to the coordinator once connected
         .with(fmt::layer().with_target(false)) // stdout
         .with(
             fmt::layer()
@@ -896,7 +903,7 @@ fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
         .init();
 
     info!("Logging to: {}", log_dir.display());
-    Ok(())
+    Ok(capture)
 }
 
 /// Remove runner log files older than the configured retention period.

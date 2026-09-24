@@ -1,0 +1,15 @@
+{#- timestamps render as UTC, the script in layout.html rewrites them into the browser's timezone -#}
+
+{% macro ts(t) -%}
+<time class="local-time" data-ms="{{ t.timestamp_millis() }}">{{ t.format("%Y-%m-%d %H:%M") }} UTC</time>
+{%- endmacro %}
+
+{#- millisecond precision, for log lines -#}
+{% macro ts_ms(t) -%}
+<time class="local-time" data-ms="{{ t.timestamp_millis() }}" data-fmt="ms">{{ t.format("%Y-%m-%d %H:%M:%S%.3f") }}</time>
+{%- endmacro %}
+
+{#- shows `text` (e.g. "3m ago") and only puts the time on hover -#}
+{% macro ts_title(t, text) -%}
+<time class="local-time" data-ms="{{ t.timestamp_millis() }}" data-fmt="title" title="{{ t.format("%Y-%m-%d %H:%M:%S") }} UTC">{{ text }}</time>
+{%- endmacro %}

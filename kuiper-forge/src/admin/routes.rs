@@ -5,9 +5,11 @@
 use crate::admin::auth::AdminSession;
 use crate::admin::middleware::{AdminState, SESSION_COOKIE};
 use crate::admin::templates::{
-    AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, LoginTemplate,
-    RunnerSummary, TokenSummary,
+    AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, FailureSummary,
+    LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary,
 };
+use crate::admin::{agent_log_routes, api_token_routes, user_routes};
+use crate::agent_failures::FailureKind;
 use crate::agent_registry::AgentInfo;
 use askama::Template;
 use axum::{
@@ -18,7 +20,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::CookieJar;
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,11 +37,25 @@ pub fn admin_router(state: Arc<AdminState>) -> Router {
         .route("/tokens/{token}/delete", post(token_delete))
         .route("/agents/{agent_id}", get(agent_detail))
         .route("/agents/{agent_id}/revoke", post(agent_revoke))
+        .route("/agents/{agent_id}/logs", get(agent_log_routes::agent_logs))
+        .route("/users", get(user_routes::users_page))
+        .route("/users/create", post(user_routes::user_create))
+        .route("/users/password", post(user_routes::user_set_password))
+        .route("/users/delete", post(user_routes::user_delete))
+        .route("/api-tokens", get(api_token_routes::api_tokens_page))
+        .route(
+            "/api-tokens/create",
+            post(api_token_routes::api_token_create),
+        )
+        .route(
+            "/api-tokens/delete",
+            post(api_token_routes::api_token_delete),
+        )
         .with_state(state)
 }
 
 /// Check session and return user if authenticated.
-async fn check_auth(state: &AdminState, jar: &CookieJar) -> Option<AdminSession> {
+pub(crate) async fn check_auth(state: &AdminState, jar: &CookieJar) -> Option<AdminSession> {
     let session_id = jar.get(SESSION_COOKIE)?.value().to_string();
     state.auth_store.validate_session(&session_id).await.ok()?
 }
@@ -163,18 +179,47 @@ async fn render_dashboard(
     };
 
     let connected_agents = state.agent_registry.count().await;
-    let active_runners = state
+    let runners = state
         .runner_state
         .get_all_runners()
         .await
-        .map(|r| r.len())
-        .unwrap_or(0);
-    let pending_jobs = state
+        .unwrap_or_default();
+
+    // jobs stay pending until their runner finishes, so tell apart the ones still waiting for an agent
+    let job_agents: HashMap<u64, String> = runners
+        .iter()
+        .filter_map(|(_, r)| Some((r.job_id?, r.agent_id.clone())))
+        .collect();
+    let mut pending = state
         .pending_jobs
         .get_all_pending_jobs()
         .await
-        .map(|j| j.len())
-        .unwrap_or(0);
+        .unwrap_or_default();
+    pending.sort_by_key(|(id, j)| (job_agents.contains_key(id), j.created_at));
+    let now = Utc::now();
+    let mut pending_jobs = Vec::with_capacity(pending.len());
+    for (job_id, job) in pending {
+        pending_jobs.push(PendingJobSummary {
+            job_id,
+            assigned_agent: job_agents.get(&job_id).cloned(),
+            waiting: format_age(now - job.created_at),
+            matching_agents: state
+                .agent_registry
+                .find_agents_by_labels(&job.agent_labels)
+                .await
+                .len(),
+            free_capacity: state
+                .agent_registry
+                .available_capacity(&job.agent_labels)
+                .await,
+            repository: job.repository,
+            workflow_name: job.workflow_name,
+            job_name: job.job_name,
+            labels: job.job_labels,
+            retry_count: job.retry_count,
+            failed_agents: job.failed_agents.len(),
+        });
+    }
 
     // Get agents
     let registered = state.auth_manager.list_agents().await;
@@ -185,12 +230,6 @@ async fn render_dashboard(
         .into_iter()
         .map(|a| (a.agent_id.clone(), a))
         .collect();
-    let runners = state
-        .runner_state
-        .get_all_runners()
-        .await
-        .unwrap_or_default();
-
     let agents: Vec<AgentSummary> = registered
         .into_iter()
         .map(|a| {
@@ -212,6 +251,7 @@ async fn render_dashboard(
                 active_vms,
                 created_at: a.created_at,
                 revoked: a.revoked,
+                version: a.agent_version,
             }
         })
         .collect();
@@ -233,7 +273,7 @@ async fn render_dashboard(
     let template = DashboardTemplate {
         base,
         connected_agents,
-        active_runners,
+        active_runners: runners.len(),
         pending_jobs,
         agents,
         tokens,
@@ -328,7 +368,8 @@ async fn token_delete(
         error!("Failed to delete token: {}", e);
     }
 
-    Redirect::to("/admin/dashboard").into_response()
+    // the fragment tells the dashboard to reopen the register dialog
+    Redirect::to("/admin/dashboard#register").into_response()
 }
 
 /// Agent detail handler.
@@ -395,12 +436,35 @@ async fn agent_detail(
         active_vms: runners.len(),
         created_at: agent.created_at,
         revoked: agent.revoked,
+        version: agent.agent_version,
     };
+
+    let now = Utc::now();
+    let failures = state
+        .agent_failures
+        .recent(&agent_id, 25)
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to load failures for agent {}: {}", agent_id, e);
+            Vec::new()
+        })
+        .into_iter()
+        .map(|f| FailureSummary {
+            ago: format_age(now - f.occurred_at),
+            occurred_at: f.occurred_at,
+            kind: FailureKind::label(&f.kind),
+            runner_name: f.runner_name,
+            job_id: f.job_id,
+            message: f.message,
+        })
+        .collect();
 
     let template = AgentDetailTemplate {
         base,
         agent: agent_summary,
         runners,
+        failures,
+        tab: "overview",
     };
 
     Html(
@@ -428,5 +492,34 @@ async fn agent_revoke(
             error!("Failed to revoke agent {}: {}", agent_id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to revoke agent").into_response()
         }
+    }
+}
+
+/// Short human age like `45s`, `4m 12s`, `3h 5m` or `2d 4h`.
+fn format_age(age: Duration) -> String {
+    let secs = age.num_seconds().max(0);
+    let (d, h, m, s) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{s}s"),
+        (0, 0, _) => format!("{m}m {s}s"),
+        (0, _, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_age() {
+        assert_eq!(format_age(Duration::seconds(-5)), "0s");
+        assert_eq!(format_age(Duration::seconds(45)), "45s");
+        assert_eq!(format_age(Duration::seconds(252)), "4m 12s");
+        assert_eq!(
+            format_age(Duration::seconds(3 * 3600 + 5 * 60 + 9)),
+            "3h 5m"
+        );
+        assert_eq!(format_age(Duration::seconds(2 * 86400 + 4 * 3600)), "2d 4h");
     }
 }

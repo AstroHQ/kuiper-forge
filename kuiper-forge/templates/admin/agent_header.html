@@ -1,0 +1,17 @@
+<div class="page-header">
+    <h1 style="margin-bottom: 0;">Agent: {{ agent.agent_id }}</h1>
+    <div class="btn-group">
+        <a href="/admin/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+        {% if !agent.revoked %}
+        <form method="post" action="/admin/agents/{{ agent.agent_id }}/revoke"
+            onsubmit="return confirm('Are you sure you want to revoke this agent? This will disconnect the agent and require re-registration.');">
+            <button type="submit" class="btn btn-danger">Revoke Certificate</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+<div class="tabs">
+    <a href="/admin/agents/{{ agent.agent_id }}" class="tab{% if tab == "overview" %} tab-active{% endif %}">Overview</a>
+    <a href="/admin/agents/{{ agent.agent_id }}/logs" class="tab{% if tab == "logs" %} tab-active{% endif %}">Logs</a>
+</div>

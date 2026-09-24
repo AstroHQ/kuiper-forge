@@ -4,6 +4,7 @@
 //! - gRPC works over TLS (ALPN h2 negotiation)
 //! - Registration service works without client cert
 //! - Agent service requires mTLS (rejects requests without client cert)
+//! - Agents can upload their own logs over mTLS
 //! - Both gRPC-only and webhook modes work correctly
 //! - PROXY protocol v1/v2 support works correctly
 
@@ -12,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kuiper_agent_proto::{
-    AgentMessage, AgentPayload, AgentServiceClient, AgentStatus, RegisterRequest,
-    RegistrationServiceClient,
+    AgentMessage, AgentPayload, AgentServiceClient, AgentStatus, LogBatch, LogRecord,
+    RegisterRequest, RegistrationServiceClient,
 };
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
@@ -21,7 +22,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::{CertificateDer, pem::PemObject};
-use tonic::transport::{Certificate, Channel, ClientTlsConfig};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 // Install default crypto provider for rustls
 fn install_crypto_provider() {
@@ -37,6 +38,8 @@ struct TestFixture {
     _temp_dir: TempDir,
     ca_cert_pem: String,
     server_addr: SocketAddr,
+    auth_manager: Arc<kuiper_forge::auth::AuthManager>,
+    agent_logs: Arc<kuiper_forge::agent_logs::AgentLogStore>,
     /// Channel for signaling server shutdown
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
@@ -82,6 +85,8 @@ impl TestFixture {
         let auth_manager =
             Arc::new(AuthManager::new(auth_store.clone(), &ca_cert_path, &ca_key_path).unwrap());
 
+        let agent_logs = Arc::new(kuiper_forge::agent_logs::AgentLogStore::new(db.pool()));
+
         // Create agent registry
         let agent_registry = Arc::new(kuiper_forge::agent_registry::AgentRegistry::new());
 
@@ -109,6 +114,7 @@ impl TestFixture {
             listen_addr: server_addr,
             tls: tls_config,
             proxy_protocol,
+            agent_logs: Some(agent_logs.clone()),
         };
 
         // Create webhook config and pending job store if needed
@@ -166,6 +172,8 @@ impl TestFixture {
             _temp_dir: temp_dir,
             ca_cert_pem,
             server_addr,
+            auth_manager,
+            agent_logs,
             shutdown_tx: Some(shutdown_tx),
         }
     }
@@ -197,6 +205,42 @@ impl TestFixture {
             .connect()
             .await
             .unwrap()
+    }
+
+    /// Register a new agent and return its id plus a channel that presents its client cert
+    async fn register_agent(&self) -> (String, Channel) {
+        let token = self
+            .auth_manager
+            .create_registration_token(chrono::Duration::hours(1), "test")
+            .await
+            .unwrap();
+        let response = RegistrationServiceClient::new(self.channel_without_client_cert().await)
+            .register(RegisterRequest {
+                registration_token: token.token,
+                hostname: "test-host".to_string(),
+                agent_type: "tart".to_string(),
+                labels: vec![],
+                max_vms: 0,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+
+        let tls_config = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(&self.ca_cert_pem))
+            .identity(Identity::from_pem(
+                response.client_cert_pem,
+                response.client_key_pem,
+            ))
+            .domain_name("localhost");
+        let channel = Channel::from_shared(format!("https://{}", self.server_addr))
+            .unwrap()
+            .tls_config(tls_config)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        (response.agent_id, channel)
     }
 }
 
@@ -265,6 +309,7 @@ async fn test_agent_service_requires_mtls_grpc_only_mode() {
             labels: vec![],
             max_vms: 2,
             label_sets: vec![],
+            agent_version: String::new(),
         })),
     })
     .await
@@ -346,6 +391,7 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
             labels: vec![],
             max_vms: 2,
             label_sets: vec![],
+            agent_version: String::new(),
         })),
     })
     .await
@@ -617,4 +663,123 @@ async fn test_webhook_mode_with_proxy_protocol_v1() {
         "Expected HTTP 200 in webhook mode with PROXY protocol, got {}",
         response.status()
     );
+}
+
+async fn check_log_upload(webhook_mode: bool) {
+    use kuiper_forge::agent_logs::LogLevel;
+
+    install_crypto_provider();
+    let fixture = TestFixture::new(webhook_mode).await;
+    let (agent_id, channel) = fixture.register_agent().await;
+    let now = chrono::Utc::now().timestamp_micros();
+    let batch = LogBatch {
+        records: vec![
+            LogRecord {
+                timestamp_micros: now,
+                level: "INFO".to_string(),
+                target: "kuiper_tart_agent".to_string(),
+                message: "hello".to_string(),
+                seq: 0,
+            },
+            LogRecord {
+                timestamp_micros: now + 1,
+                level: "ERROR".to_string(),
+                target: "kuiper_tart_agent".to_string(),
+                message: "clone failed".to_string(),
+                seq: 1,
+            },
+        ],
+        dropped: 3,
+    };
+
+    AgentServiceClient::new(channel)
+        .upload_logs(batch.clone())
+        .await
+        .unwrap();
+
+    let lines = fixture
+        .agent_logs
+        .recent(&agent_id, LogLevel::Trace, None, 10)
+        .await
+        .unwrap();
+    let messages: Vec<&str> = lines.iter().map(|l| l.message.as_str()).collect();
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert_eq!(messages[0], "clone failed");
+    assert_eq!(messages[1], "hello");
+    assert!(messages[2].contains("dropped 3"));
+
+    // no client cert, no upload
+    let status = AgentServiceClient::new(fixture.channel_without_client_cert().await)
+        .upload_logs(batch)
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn test_log_upload_grpc_only_mode() {
+    check_log_upload(false).await;
+}
+
+#[tokio::test]
+async fn test_log_upload_webhook_mode() {
+    check_log_upload(true).await;
+}
+
+/// Open an agent stream whose first status reports `version`, returning once the server has accepted it
+async fn connect_with_version(
+    channel: Channel,
+    version: &str,
+) -> tokio::sync::mpsc::Sender<AgentMessage> {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(AgentMessage {
+        payload: Some(AgentPayload::Status(AgentStatus {
+            active_vms: 0,
+            available_slots: 1,
+            vms: vec![],
+            agent_id: String::new(),
+            hostname: "test-host".to_string(),
+            agent_type: "tart".to_string(),
+            labels: vec!["self-hosted".to_string()],
+            max_vms: 1,
+            label_sets: vec![],
+            agent_version: version.to_string(),
+        })),
+    })
+    .await
+    .unwrap();
+
+    // the record sync happens before the server answers the stream call
+    AgentServiceClient::new(channel)
+        .agent_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap();
+    tx
+}
+
+#[tokio::test]
+async fn test_agent_version_reported_and_cleared() {
+    install_crypto_provider();
+    let fixture = TestFixture::new(false).await;
+    let (agent_id, channel) = fixture.register_agent().await;
+    let stored_version = || async {
+        fixture
+            .auth_manager
+            .list_agents()
+            .await
+            .into_iter()
+            .find(|a| a.agent_id == agent_id)
+            .unwrap()
+            .agent_version
+    };
+    assert_eq!(stored_version().await, None);
+
+    let stream = connect_with_version(channel.clone(), "1.2.3").await;
+    assert_eq!(stored_version().await.as_deref(), Some("1.2.3"));
+    drop(stream);
+
+    // an older agent sends no version, which must not leave the newer one behind
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _stream = connect_with_version(channel, "").await;
+    assert_eq!(stored_version().await, None);
 }

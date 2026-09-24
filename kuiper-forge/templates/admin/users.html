@@ -1,0 +1,75 @@
+{% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
+
+{% block title %}Users{% endblock %}
+
+{% block body %}
+{% include "admin/nav.html" %}
+
+<div class="container">
+    <h1>Admin Users</h1>
+
+    {% if let Some(msg) = notice %}
+    <div class="alert alert-success">{{ msg }}</div>
+    {% endif %}
+    {% if let Some(err) = error %}
+    <div class="alert alert-danger">{{ err }}</div>
+    {% endif %}
+
+    <div class="card">
+        <div class="card-title">Users</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Created</th>
+                    <th>Last Login</th>
+                    <th>Set Password</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>
+                        {{ user.username }}
+                        {% if user.is_self %}<span class="badge badge-label">you</span>{% endif %}
+                    </td>
+                    <td>{% call m::ts(user.created_at) %}{% endcall %}</td>
+                    <td>
+                        {% if let Some(t) = user.last_login %}{% call m::ts(t) %}{% endcall %}{% else %}-{% endif %}
+                    </td>
+                    <td>
+                        <form method="post" action="/admin/users/password" class="inline-form">
+                            <input type="hidden" name="username" value="{{ user.username }}">
+                            <input type="password" name="password" placeholder="New password" required autocomplete="new-password">
+                            <input type="password" name="confirm" placeholder="Confirm" required autocomplete="new-password">
+                            <button type="submit" class="btn btn-secondary btn-sm">Set</button>
+                        </form>
+                    </td>
+                    <td>
+                        {% if !user.is_self %}
+                        <form method="post" action="/admin/users/delete" style="display: inline;"
+                            onsubmit="return confirm('Delete this user?');">
+                            <input type="hidden" name="username" value="{{ user.username }}">
+                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Create User</div>
+        <form method="post" action="/admin/users/create" class="inline-form">
+            <input type="text" name="username" placeholder="Username" required autocomplete="off">
+            <input type="password" name="password" placeholder="Password" required autocomplete="new-password">
+            <input type="password" name="confirm" placeholder="Confirm password" required autocomplete="new-password">
+            <button type="submit" class="btn btn-primary">Create</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

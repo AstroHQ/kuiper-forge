@@ -393,22 +393,15 @@ impl AgentRegistry {
 
     /// Find agents matching labels (may or may not have capacity)
     /// Useful for diagnostics and admin queries.
-    #[allow(dead_code)] // Available for future admin API
     pub async fn find_agents_by_labels(&self, labels: &[String]) -> Vec<String> {
         let agents = self.agents.read().await;
-        agents
-            .iter()
-            .filter_map(|(id, agent)| {
-                // We need to check labels without await here
-                // So we'll use try_read for a quick check
-                if let Ok(agent) = agent.try_read()
-                    && agent.matches_labels(labels)
-                {
-                    return Some(id.clone());
-                }
-                None
-            })
-            .collect()
+        let mut result = Vec::new();
+        for (id, agent) in agents.iter() {
+            if agent.read().await.matches_labels(labels) {
+                result.push(id.clone());
+            }
+        }
+        result
     }
 
     /// Get total available capacity for agents matching labels

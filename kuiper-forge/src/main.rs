@@ -16,7 +16,9 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use kuiper_agent_proto::{RunnerEvent, RunnerEventType};
-use kuiper_forge::admin::{AdminAuthStore, AdminState};
+use kuiper_forge::admin::{AdminAuthStore, AdminState, ApiTokenStore};
+use kuiper_forge::agent_failures::AgentFailureStore;
+use kuiper_forge::agent_logs::AgentLogStore;
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
 use kuiper_forge::config::{self, Config, ProvisioningMode};
@@ -306,6 +308,8 @@ async fn serve(
 
     // Initialize persistent runner state for crash recovery (using shared database)
     let runner_state = Arc::new(runner_state::RunnerStateStore::new(db.pool()));
+    let agent_failures = Arc::new(AgentFailureStore::new(db.pool()));
+    let agent_logs = Arc::new(AgentLogStore::new(db.pool()));
     runner_state.load_and_log().await;
 
     // Initialize persistent pending job store for webhook mode (using shared database)
@@ -314,15 +318,18 @@ async fn serve(
 
     // Initialize admin UI state if enabled
     let admin_state = if config.admin.enabled {
-        info!("Admin UI enabled at /admin");
+        info!("Admin UI enabled at /admin, API at /api/v1");
         let admin_auth_store = AdminAuthStore::new(db.pool());
         Some(Arc::new(AdminState {
             auth_store: admin_auth_store,
+            api_tokens: ApiTokenStore::new(db.pool()),
             session_timeout_secs: config.admin.session_timeout_secs,
             auth_manager: auth_manager.clone(),
             agent_registry: agent_registry.clone(),
             runner_state: runner_state.clone(),
             pending_jobs: pending_job_store.clone(),
+            agent_failures: agent_failures.clone(),
+            agent_logs: agent_logs.clone(),
             server_trust: server_trust.clone(),
             coordinator_url: config.admin.coordinator_url.clone(),
         }))
@@ -355,6 +362,7 @@ async fn serve(
             agent_registry.clone(),
             runner_state.clone(),
             pending_job_store.clone(),
+            agent_failures.clone(),
         );
         (token_provider, Some(fm), Some(notifier), wh_notifier)
     } else {
@@ -382,6 +390,7 @@ async fn serve(
             agent_registry.clone(),
             runner_state.clone(),
             pending_job_store.clone(),
+            agent_failures.clone(),
         );
         (token_provider, Some(fm), Some(notifier), wh_notifier)
     };
@@ -416,7 +425,20 @@ async fn serve(
         listen_addr,
         tls: config.tls.clone(),
         proxy_protocol: config.grpc.proxy_protocol,
+        agent_logs: Some(agent_logs.clone()),
     };
+
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+        loop {
+            ticker.tick().await;
+            match agent_logs.prune().await {
+                Ok(0) => {}
+                Ok(n) => info!("Pruned {} agent log lines", n),
+                Err(e) => warn!("Failed to prune agent logs: {:#}", e),
+            }
+        }
+    });
 
     // Spawn stale agent cleanup task
     // Runner records for removed agents are handled by the orphaned-runner
@@ -832,10 +854,17 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
             }
 
             println!(
-                "{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
-                "AGENT ID", "TYPE", "HOSTNAME", "MAX_VMS", "CREATED", "EXPIRES", "STATUS"
+                "{:<30} {:<12} {:<15} {:<10} {:<8} {:<12} {:<12} {:<10}",
+                "AGENT ID",
+                "TYPE",
+                "HOSTNAME",
+                "VERSION",
+                "MAX_VMS",
+                "CREATED",
+                "EXPIRES",
+                "STATUS"
             );
-            println!("{}", "-".repeat(105));
+            println!("{}", "-".repeat(116));
 
             for agent in &resp.agents {
                 let status = if agent.revoked {
@@ -871,11 +900,18 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
                 let expires = chrono::DateTime::parse_from_rfc3339(&agent.expires_at)
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or(agent.expires_at.clone());
+                // empty from agents older than version reporting, or an older coordinator
+                let version = if agent.agent_version.is_empty() {
+                    "-"
+                } else {
+                    agent.agent_version.as_str()
+                };
                 println!(
-                    "{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
+                    "{:<30} {:<12} {:<15} {:<10} {:<8} {:<12} {:<12} {:<10}",
                     id_short,
                     agent.agent_type,
                     hostname_short,
+                    version,
                     agent.max_vms,
                     created,
                     expires,
@@ -998,6 +1034,7 @@ async fn handle_admin_command(
             }
 
             admin_store.update_password(&username, &password).await?;
+            admin_store.delete_user_sessions(&username, None).await?;
             println!("Password for '{username}' updated successfully.");
             Ok(())
         }

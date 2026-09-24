@@ -20,12 +20,12 @@ use std::str::FromStr;
 #[cfg(feature = "postgres")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-// Re-export the pool and row types for the selected backend
+// Re-export the backend, pool and row types for the selected backend
 #[cfg(feature = "sqlite")]
-pub use sqlx::{SqlitePool as DbPool, sqlite::SqliteRow as DbRow};
+pub use sqlx::{Sqlite as Db, SqlitePool as DbPool, sqlite::SqliteRow as DbRow};
 
 #[cfg(feature = "postgres")]
-pub use sqlx::{PgPool as DbPool, postgres::PgRow as DbRow};
+pub use sqlx::{PgPool as DbPool, Postgres as Db, postgres::PgRow as DbRow};
 
 /// Shared database for the coordinator.
 ///
@@ -97,11 +97,17 @@ impl Database {
             .await
             .context("Failed to connect to PostgreSQL database")?;
 
-        // Run migrations
+        // both sets record into the same _sqlx_migrations table, so each has to ignore the other's versions
         sqlx::migrate!("./migrations/shared")
+            .set_ignore_missing(true)
             .run(&pool)
             .await
             .context("Failed to run migrations")?;
+        sqlx::migrate!("./migrations/postgres")
+            .set_ignore_missing(true)
+            .run(&pool)
+            .await
+            .context("Failed to run postgres migrations")?;
 
         info!(
             backend = "postgres",

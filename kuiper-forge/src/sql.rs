@@ -110,11 +110,10 @@ pub const DELETE_OLD_REVOKED_AGENTS: &str = "DELETE FROM registered_agents WHERE
 /// `revoke_agent` between read-modify-write can't be silently undone.
 #[cfg(feature = "sqlite")]
 pub const UPDATE_AGENT_METADATA: &str =
-    "UPDATE registered_agents SET labels = ?, max_vms = ? WHERE agent_id = ?";
+    "UPDATE registered_agents SET labels = ?, max_vms = ?, agent_version = ? WHERE agent_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const UPDATE_AGENT_METADATA: &str =
-    "UPDATE registered_agents SET labels = $1, max_vms = $2 WHERE agent_id = $3";
+pub const UPDATE_AGENT_METADATA: &str = "UPDATE registered_agents SET labels = $1, max_vms = $2, agent_version = $3 WHERE agent_id = $4";
 
 #[cfg(feature = "sqlite")]
 pub const CHECK_AGENT_VALID: &str =
@@ -278,6 +277,12 @@ pub const DELETE_ADMIN_USER: &str = "DELETE FROM admin_users WHERE username = ?"
 #[cfg(feature = "postgres")]
 pub const DELETE_ADMIN_USER: &str = "DELETE FROM admin_users WHERE username = $1";
 
+pub const COUNT_ADMIN_USERS: &str = "SELECT COUNT(*) as count FROM admin_users";
+
+// sqlite has no row locks, the first write in a transaction takes the database lock instead
+#[cfg(feature = "postgres")]
+pub const LOCK_ADMIN_USERS: &str = "SELECT username FROM admin_users FOR UPDATE";
+
 // Admin sessions queries
 
 #[cfg(feature = "sqlite")]
@@ -315,3 +320,119 @@ pub const DELETE_ADMIN_SESSIONS_BY_USER: &str = "DELETE FROM admin_sessions WHER
 
 #[cfg(feature = "postgres")]
 pub const DELETE_ADMIN_SESSIONS_BY_USER: &str = "DELETE FROM admin_sessions WHERE username = $1";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_OTHER_ADMIN_SESSIONS_BY_USER: &str =
+    "DELETE FROM admin_sessions WHERE username = ? AND session_id <> ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_OTHER_ADMIN_SESSIONS_BY_USER: &str =
+    "DELETE FROM admin_sessions WHERE username = $1 AND session_id <> $2";
+
+// API tokens queries
+
+#[cfg(feature = "sqlite")]
+pub const INSERT_API_TOKEN: &str = r#"
+    INSERT INTO api_tokens (id, name, token_hash, token_prefix, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+"#;
+
+#[cfg(feature = "postgres")]
+pub const INSERT_API_TOKEN: &str = r#"
+    INSERT INTO api_tokens (id, name, token_hash, token_prefix, created_by, created_at)
+    VALUES ($1, $2, $3, $4, $5, $6)
+"#;
+
+pub const SELECT_ALL_API_TOKENS: &str = "SELECT id, name, token_prefix, created_by, created_at, last_used_at FROM api_tokens ORDER BY created_at DESC";
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_API_TOKEN_BY_HASH: &str = "SELECT id, name, token_prefix, created_by, created_at, last_used_at FROM api_tokens WHERE token_hash = ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_API_TOKEN_BY_HASH: &str = "SELECT id, name, token_prefix, created_by, created_at, last_used_at FROM api_tokens WHERE token_hash = $1";
+
+#[cfg(feature = "sqlite")]
+pub const UPDATE_API_TOKEN_LAST_USED: &str = "UPDATE api_tokens SET last_used_at = ? WHERE id = ?";
+
+#[cfg(feature = "postgres")]
+pub const UPDATE_API_TOKEN_LAST_USED: &str =
+    "UPDATE api_tokens SET last_used_at = $1 WHERE id = $2";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_API_TOKEN: &str = "DELETE FROM api_tokens WHERE id = ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_API_TOKEN: &str = "DELETE FROM api_tokens WHERE id = $1";
+
+// Agent failures queries
+
+#[cfg(feature = "sqlite")]
+pub const INSERT_AGENT_FAILURE: &str = r#"
+    INSERT INTO agent_failures (id, agent_id, occurred_at, kind, runner_name, job_id, message)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+"#;
+
+#[cfg(feature = "postgres")]
+pub const INSERT_AGENT_FAILURE: &str = r#"
+    INSERT INTO agent_failures (id, agent_id, occurred_at, kind, runner_name, job_id, message)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+"#;
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_AGENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind, runner_name, job_id, message FROM agent_failures WHERE agent_id = ? ORDER BY occurred_at DESC LIMIT ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_AGENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind, runner_name, job_id, message FROM agent_failures WHERE agent_id = $1 ORDER BY occurred_at DESC LIMIT $2";
+
+#[cfg(feature = "sqlite")]
+pub const PRUNE_AGENT_FAILURES: &str = r#"
+    DELETE FROM agent_failures WHERE agent_id = ? AND id NOT IN (
+        SELECT id FROM agent_failures WHERE agent_id = ? ORDER BY occurred_at DESC LIMIT ?
+    )
+"#;
+
+#[cfg(feature = "postgres")]
+pub const PRUNE_AGENT_FAILURES: &str = r#"
+    DELETE FROM agent_failures WHERE agent_id = $1 AND id NOT IN (
+        SELECT id FROM agent_failures WHERE agent_id = $2 ORDER BY occurred_at DESC LIMIT $3
+    )
+"#;
+
+// Agent logs queries
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_AGENT_LOGS: &str = r#"
+    SELECT ts, seq, level, target, message FROM agent_logs
+    WHERE agent_id = ? AND level <= ? AND (ts < ? OR (ts = ? AND seq < ?))
+    ORDER BY ts DESC, seq DESC LIMIT ?
+"#;
+
+#[cfg(feature = "postgres")]
+pub const SELECT_AGENT_LOGS: &str = r#"
+    SELECT ts, seq, level, target, message FROM agent_logs
+    WHERE agent_id = $1 AND level <= $2 AND (ts < $3 OR (ts = $4 AND seq < $5))
+    ORDER BY ts DESC, seq DESC LIMIT $6
+"#;
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_AGENT_LOGS_OLDER_THAN: &str = "DELETE FROM agent_logs WHERE ts < ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_AGENT_LOGS_OLDER_THAN: &str = "DELETE FROM agent_logs WHERE ts < $1";
+
+pub const SELECT_AGENT_LOG_AGENTS: &str = "SELECT DISTINCT agent_id FROM agent_logs";
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_AGENT_LOG_CUTOFF: &str =
+    "SELECT ts, seq FROM agent_logs WHERE agent_id = ? ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_AGENT_LOG_CUTOFF: &str = "SELECT ts, seq FROM agent_logs WHERE agent_id = $1 ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET $2";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_AGENT_LOGS_BEFORE: &str =
+    "DELETE FROM agent_logs WHERE agent_id = ? AND (ts < ? OR (ts = ? AND seq <= ?))";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_AGENT_LOGS_BEFORE: &str =
+    "DELETE FROM agent_logs WHERE agent_id = $1 AND (ts < $2 OR (ts = $3 AND seq <= $4))";

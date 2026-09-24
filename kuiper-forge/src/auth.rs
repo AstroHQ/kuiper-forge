@@ -56,6 +56,9 @@ pub struct RegisteredAgent {
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
+    /// Last version the agent reported. None for agents that don't report one
+    #[serde(default)]
+    pub agent_version: Option<String>,
 }
 
 /// Database-backed storage for tokens and agents.
@@ -186,8 +189,8 @@ impl AuthStore {
         }
     }
 
-    /// Update only the fields an agent reports via AgentStatus (labels and
-    /// max_vms). Leaves `revoked` and other admin-controlled columns untouched,
+    /// Update only the fields an agent reports via AgentStatus (labels,
+    /// max_vms, version). Leaves `revoked` and other admin-controlled columns untouched,
     /// so a concurrent revoke between read and write can't be undone by this
     /// path.
     pub async fn update_agent_metadata(
@@ -195,11 +198,13 @@ impl AuthStore {
         agent_id: &str,
         labels: &[String],
         max_vms: u32,
+        agent_version: Option<&str>,
     ) -> Result<()> {
         let labels_json = serde_json::to_string(labels)?;
         sqlx::query(sql::UPDATE_AGENT_METADATA)
             .bind(&labels_json)
             .bind(max_vms as i64)
+            .bind(agent_version)
             .bind(agent_id)
             .execute(&self.pool)
             .await?;
@@ -249,6 +254,7 @@ impl AuthStore {
                 .ok()?
                 .with_timezone(&Utc),
             revoked: row.get::<i32, _>("revoked") != 0,
+            agent_version: row.get("agent_version"),
         })
     }
 
@@ -275,6 +281,7 @@ impl AuthStore {
                         .ok()?
                         .with_timezone(&Utc),
                     revoked: row.get::<i32, _>("revoked") != 0,
+                    agent_version: row.get("agent_version"),
                 })
             })
             .collect()
@@ -481,6 +488,7 @@ impl AuthManager {
             created_at: Utc::now(),
             expires_at,
             revoked: false,
+            agent_version: None,
         };
         self.store.store_agent(registered).await?;
 
@@ -525,7 +533,7 @@ impl AuthManager {
         self.store.get_agent(agent_id).await
     }
 
-    /// Update only labels and max_vms on a stored agent record. Preserves the
+    /// Update only labels, max_vms and version on a stored agent record. Preserves the
     /// `revoked` flag so an admin revocation that lands concurrently with this
     /// update isn't clobbered.
     pub async fn update_agent_metadata(
@@ -533,9 +541,10 @@ impl AuthManager {
         agent_id: &str,
         labels: &[String],
         max_vms: u32,
+        agent_version: Option<&str>,
     ) -> Result<()> {
         self.store
-            .update_agent_metadata(agent_id, labels, max_vms)
+            .update_agent_metadata(agent_id, labels, max_vms, agent_version)
             .await
     }
 }

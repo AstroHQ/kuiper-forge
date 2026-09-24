@@ -268,7 +268,10 @@ pub struct SshSession {
 impl SshSession {
     /// Execute a command and return the output.
     pub async fn execute(&mut self, command: &str) -> Result<CommandOutput> {
-        debug!("Executing SSH command: {}", command);
+        debug!(
+            local_only = tracing::field::Empty,
+            "Executing SSH command: {}", command
+        );
 
         let mut channel = self
             .handle

@@ -30,10 +30,28 @@ pub struct DashboardTemplate {
     pub base: BaseContext,
     pub connected_agents: usize,
     pub active_runners: usize,
-    pub pending_jobs: usize,
+    pub pending_jobs: Vec<PendingJobSummary>,
     pub agents: Vec<AgentSummary>,
     pub tokens: Vec<TokenSummary>,
     pub new_token: Option<String>,
+}
+
+/// Webhook job still waiting for a runner
+pub struct PendingJobSummary {
+    pub job_id: u64,
+    /// Agent running a runner for this job. None while it's still waiting for one
+    pub assigned_agent: Option<String>,
+    pub repository: Option<String>,
+    pub workflow_name: Option<String>,
+    pub job_name: Option<String>,
+    pub labels: Vec<String>,
+    /// How long ago the webhook arrived, e.g. `4m 12s`
+    pub waiting: String,
+    pub retry_count: i32,
+    pub failed_agents: usize,
+    /// Connected agents whose labels match, regardless of free capacity
+    pub matching_agents: usize,
+    pub free_capacity: usize,
 }
 
 /// Agent summary for list view
@@ -47,6 +65,8 @@ pub struct AgentSummary {
     pub active_vms: usize,
     pub created_at: DateTime<Utc>,
     pub revoked: bool,
+    /// None for agents that predate version reporting
+    pub version: Option<String>,
 }
 
 /// Agent detail page template
@@ -56,6 +76,90 @@ pub struct AgentDetailTemplate {
     pub base: BaseContext,
     pub agent: AgentSummary,
     pub runners: Vec<RunnerSummary>,
+    pub failures: Vec<FailureSummary>,
+    /// Active tab for the shared agent header
+    pub tab: &'static str,
+}
+
+/// Just what the shared agent header needs
+pub struct AgentHeader {
+    pub agent_id: String,
+    pub revoked: bool,
+}
+
+/// Agent logs tab
+#[derive(Template)]
+#[template(path = "admin/agent_logs.html")]
+pub struct AgentLogsTemplate {
+    pub base: BaseContext,
+    pub agent: AgentHeader,
+    pub tab: &'static str,
+    /// Oldest first, so the newest line sits at the bottom like a terminal
+    pub lines: Vec<LogLineView>,
+    /// Selected minimum level, lowercase
+    pub level: &'static str,
+    /// Cursor for the next "older" page, None when there's nothing older
+    pub older: Option<String>,
+    /// True when looking at an older page rather than the newest lines
+    pub paged: bool,
+    pub live: bool,
+}
+
+pub struct LogLineView {
+    pub ts: DateTime<Utc>,
+    pub level: &'static str,
+    pub target: String,
+    pub message: String,
+}
+
+/// Recorded agent failure for the agent detail page
+pub struct FailureSummary {
+    pub occurred_at: DateTime<Utc>,
+    /// e.g. `4m 12s`
+    pub ago: String,
+    pub kind: &'static str,
+    pub runner_name: Option<String>,
+    pub job_id: Option<u64>,
+    pub message: String,
+}
+
+/// Admin user row for the users page
+pub struct UserSummary {
+    pub username: String,
+    pub created_at: DateTime<Utc>,
+    pub last_login: Option<DateTime<Utc>>,
+    pub is_self: bool,
+}
+
+/// Admin users page template
+#[derive(Template)]
+#[template(path = "admin/users.html")]
+pub struct UsersTemplate {
+    pub base: BaseContext,
+    pub users: Vec<UserSummary>,
+    pub notice: Option<String>,
+    pub error: Option<String>,
+}
+
+/// API token row for the API tokens page
+pub struct ApiTokenSummary {
+    pub id: String,
+    pub name: String,
+    pub token_prefix: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// API tokens page template
+#[derive(Template)]
+#[template(path = "admin/api_tokens.html")]
+pub struct ApiTokensTemplate {
+    pub base: BaseContext,
+    pub tokens: Vec<ApiTokenSummary>,
+    /// Plaintext of a just-created token, shown once
+    pub new_token: Option<String>,
+    pub error: Option<String>,
 }
 
 /// Runner summary
