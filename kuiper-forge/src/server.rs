@@ -58,7 +58,8 @@ const RESERVATION_DB_GRACE: Duration = Duration::from_secs(60);
 
 /// Parse PROXY protocol header from an incoming TCP connection.
 ///
-/// Supports both PROXY protocol v1 (text) and v2 (binary).
+/// Supports both PROXY protocol v1 (text) and v2 (binary). The header is optional: a connection that doesn't start
+/// with one is treated as direct and returns `fallback_addr`, so in-cluster callers can skip the load balancer.
 /// Returns the real client address extracted from the header.
 ///
 /// The PROXY protocol header is sent by load balancers (HAProxy, AWS NLB, DO LB)
@@ -71,6 +72,20 @@ async fn parse_proxy_protocol(
     use ppp::v1::Addresses as V1Addr;
     use ppp::v2::Addresses as V2Addr;
     use tokio::io::AsyncReadExt;
+
+    // peek so a direct connection's TLS ClientHello (0x16) stays unread for the handshake. this doesn't let anyone
+    // spoof more than before, any client could already send its own PROXY header
+    let mut first = [0u8; 1];
+    let n = stream
+        .peek(&mut first)
+        .await
+        .context("Failed to peek connection")?;
+    if n == 0 {
+        anyhow::bail!("Connection closed before any data received");
+    }
+    if first[0] != b'P' && first[0] != 0x0D {
+        return Ok(fallback_addr);
+    }
 
     // PROXY protocol headers are at most 107 bytes (v1) or 232 bytes (v2)
     // Read incrementally to avoid over-reading into TLS data

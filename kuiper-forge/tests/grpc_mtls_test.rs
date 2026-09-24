@@ -590,28 +590,44 @@ async fn test_grpc_with_proxy_protocol_v2() {
     );
 }
 
-/// Test that server with proxy_protocol=true rejects connections without PROXY header
+/// Test that server with proxy_protocol=true still accepts direct connections without a PROXY header
 #[tokio::test]
-async fn test_proxy_protocol_required_when_enabled() {
+async fn test_proxy_protocol_optional_when_enabled() {
     install_crypto_provider();
 
-    // Start server with proxy protocol enabled
     let fixture = TestFixture::new_with_proxy_protocol(false, true).await;
 
-    // Try to connect WITHOUT sending PROXY protocol header
+    // no PROXY header, straight into TLS like an in-cluster caller
     let tcp_stream = TcpStream::connect(fixture.server_addr).await.unwrap();
-
-    // Attempt TLS handshake directly (should fail because server expects PROXY header first)
     let tls_config = fixture.build_tls_client_config();
     let connector = TlsConnector::from(tls_config);
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
 
-    // The TLS handshake should fail because the server is waiting for PROXY header
-    // and the TLS ClientHello will be interpreted as invalid PROXY protocol data
     let result = connector.connect(server_name, tcp_stream).await;
     assert!(
-        result.is_err(),
-        "Expected TLS handshake to fail when PROXY header not sent, but it succeeded"
+        result.is_ok(),
+        "Expected TLS handshake to succeed without PROXY header, got {:?}",
+        result.err()
+    );
+}
+
+/// Test that webhook mode accepts direct connections when proxy protocol is enabled
+#[tokio::test]
+async fn test_webhook_mode_proxy_protocol_optional() {
+    install_crypto_provider();
+
+    let fixture = TestFixture::new_with_proxy_protocol(true, true).await;
+
+    let tcp_stream = TcpStream::connect(fixture.server_addr).await.unwrap();
+    let tls_config = fixture.build_tls_client_config();
+    let connector = TlsConnector::from(tls_config);
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+
+    let result = connector.connect(server_name, tcp_stream).await;
+    assert!(
+        result.is_ok(),
+        "Expected TLS handshake to succeed without PROXY header, got {:?}",
+        result.err()
     );
 }
 

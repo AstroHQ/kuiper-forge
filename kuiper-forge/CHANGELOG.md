@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.7.1 - 2026-09-24
+#### Bug Fixes
+- PROXY protocol header is optional when enabled, direct connections (e.g. in-cluster callers) work - *jfro*
+
+- - -
+
 ## kuiper-forge-v0.7.0 - 2026-09-24
 #### Features
 - linux VMs supported in tart-agent - (d01cb4a) - *jfro*

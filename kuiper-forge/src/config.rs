@@ -285,12 +285,10 @@ pub struct GrpcConfig {
 
     /// Enable PROXY protocol support (v1 and v2).
     ///
-    /// When enabled, the server expects incoming connections to begin with a
-    /// PROXY protocol header (sent by load balancers like HAProxy, AWS NLB,
-    /// DigitalOcean LB). The real client IP is extracted from this header.
-    ///
-    /// WARNING: Only enable this if ALL traffic comes through a proxy that
-    /// sends PROXY protocol headers. Direct connections will fail.
+    /// When enabled, the server accepts a PROXY protocol header at the start of
+    /// a connection (sent by load balancers like HAProxy, AWS NLB,
+    /// DigitalOcean LB) and extracts the real client IP from it. The header is
+    /// optional, so direct connections (e.g. in-cluster callers) still work.
     #[serde(default)]
     pub proxy_protocol: bool,
 }
