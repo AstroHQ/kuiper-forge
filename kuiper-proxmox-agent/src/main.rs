@@ -581,29 +581,31 @@ impl ProxmoxAgent {
         })
     }
 
-    /// Select the appropriate template VMID based on job labels.
+    /// Select the template VMID for a create command.
     ///
-    /// Returns the template_vmid of the first mapping whose capability set
-    /// (agent labels + that mapping's labels) covers the job's labels, mirroring
-    /// how the coordinator routes. Falls back to the default `template_vmid` if
-    /// no mapping covers the job. See [`kuiper_agent_lib::labels::select_mapping`].
-    fn select_template(&self, job_labels: &[String]) -> u32 {
-        match kuiper_agent_lib::labels::select_mapping(
+    /// A fixed-capacity pool command names its capability's template. Otherwise it's the template_vmid of the first
+    /// mapping whose capability set (agent labels + that mapping's labels) covers the job's labels, mirroring how the
+    /// coordinator routes, or the default `template_vmid` if none does. See
+    /// [`kuiper_agent_lib::labels::mapping_for`].
+    fn select_template(&self, cmd: &CreateRunnerCommand) -> u32 {
+        match kuiper_agent_lib::labels::mapping_for(
             &self.config.agent.labels,
+            &self.config.vm.template_vmid.to_string(),
             &self.config.vm.template_mappings,
-            job_labels,
+            &cmd.label_set_id,
+            &cmd.labels,
         ) {
             Some(mapping) => {
                 info!(
                     "Selected template {} for labels {:?} (matched mapping labels {:?})",
-                    mapping.template_vmid, job_labels, mapping.labels
+                    mapping.template_vmid, cmd.labels, mapping.labels
                 );
                 mapping.template_vmid
             }
             None => {
                 info!(
-                    "No template mapping matched labels {:?}, using default {}",
-                    job_labels, self.config.vm.template_vmid
+                    "No template mapping for labels {:?}, using default {}",
+                    cmd.labels, self.config.vm.template_vmid
                 );
                 self.config.vm.template_vmid
             }
@@ -670,7 +672,7 @@ impl ProxmoxAgent {
     /// status bridge in `main`), so this only sends lifecycle events.
     async fn handle_create_runner(&self, cmd: CreateRunnerCommand, events: runtime::EventSender) {
         // Select template based on job labels
-        let template_vmid = self.select_template(&cmd.labels);
+        let template_vmid = self.select_template(&cmd);
 
         let params = vm_manager::RunnerParams {
             registration_token: &cmd.registration_token,
@@ -771,16 +773,20 @@ impl ProxmoxAgent {
         // plus the mapping's labels), so the coordinator can route jobs for each
         // mapped template here. With no mappings this is a single set: agent.labels.
         let labels = self.config.agent.labels.clone();
-        let mappings = &self.config.vm.template_mappings;
-        let label_sets: Vec<LabelSet> = kuiper_agent_lib::labels::label_sets(&labels, mappings)
-            .into_iter()
-            .zip(kuiper_agent_lib::labels::pool_sizes(mappings))
-            .map(|(labels, pool_size)| LabelSet {
-                labels,
-                limits: Vec::new(),
-                pool_size,
-            })
-            .collect();
+        let label_sets: Vec<LabelSet> = kuiper_agent_lib::labels::capabilities(
+            &labels,
+            &self.config.vm.template_vmid.to_string(),
+            &self.config.vm.template_mappings,
+        )
+        .into_iter()
+        .map(|c| LabelSet {
+            labels: c.labels,
+            limits: Vec::new(),
+            pool_size: c.pool,
+            id: c.id,
+            is_default: c.is_default,
+        })
+        .collect();
 
         AgentStatus {
             active_vms: active_count,

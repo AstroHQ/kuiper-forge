@@ -85,6 +85,10 @@ impl kuiper_agent_lib::labels::LabelMapping for TemplateMapping {
     fn pool(&self) -> Option<u32> {
         self.pool
     }
+
+    fn id(&self) -> String {
+        self.template_vmid.to_string()
+    }
 }
 
 /// VM configuration.

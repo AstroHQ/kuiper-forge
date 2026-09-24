@@ -20,6 +20,12 @@ const TART_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// How often to re-count tart VMs this agent doesn't manage.
 pub const EXTERNAL_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
+/// How long to wait before pulling images again after a pull failed.
+pub const IMAGE_OS_RETRY_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Pulls can be big images over slow links, so this is long.
+const TART_PULL_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
+
 use tracing::{debug, error, info, warn};
 
 use crate::config::TartConfig;
@@ -276,6 +282,38 @@ impl VmManager {
     /// until a clone of it tells us otherwise.
     pub async fn image_os(&self, image: &str) -> GuestOs {
         self.known_image_os(image).await.unwrap_or(GuestOs::MacOS)
+    }
+
+    /// Learn the OS of each image, pulling OCI images tart doesn't have yet. Returns true once every image is known.
+    pub async fn resolve_image_os(&self, images: &[String]) -> bool {
+        let mut all_known = true;
+        for image in images {
+            if self.known_image_os(image).await.is_some() {
+                continue;
+            }
+            if !crate::host_checks::is_oci_image(image) {
+                warn!("Image {} isn't local or OCI, can't find its OS", image);
+                all_known = false;
+                continue;
+            }
+
+            info!("Pulling {} to find its OS", image);
+            if let Err(e) = self.tart_pull(image).await {
+                warn!("Failed to pull {}: {}", image, e);
+                all_known = false;
+                continue;
+            }
+            match self.known_image_os(image).await {
+                Some(os) => {
+                    info!("Image {} is {:?}", image, os);
+
+                    // re-send status, the image's limits may have changed
+                    self.state_changed.notify_one();
+                }
+                None => all_known = false,
+            }
+        }
+        all_known
     }
 
     async fn known_image_os(&self, image: &str) -> Option<GuestOs> {
@@ -704,6 +742,23 @@ impl VmManager {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(Error::Tart(format!("delete failed: {stderr}")))
+        }
+    }
+
+    /// Pull an OCI image into tart's cache.
+    async fn tart_pull(&self, image: &str) -> Result<()> {
+        let output = timeout(
+            TART_PULL_TIMEOUT,
+            Command::new("tart").args(["pull", image]).output(),
+        )
+        .await
+        .map_err(|_| Error::Timeout("tart pull"))??;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(Error::Tart(format!("pull failed: {stderr}")))
         }
     }
 

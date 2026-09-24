@@ -117,6 +117,12 @@ message LabelSet {
     // Runners to keep for this set in fixed-capacity mode. Unset on every set (older agents, or none configured) means
     // the legacy pool: base labels, max_vms runners
     optional uint32 pool_size = 3;
+    // The resource runners for this set are created from (tart image, proxmox template VMID). The coordinator sends it
+    // back in CreateRunnerCommand.label_set_id for pool runners. Empty from older agents
+    string id = 4;
+    // The agent's default resource, used for jobs that don't ask for any mapping. A mapping can have the same labels,
+    // so this can't be told from the labels
+    bool is_default = 5;
 }
 
 message VmInfo {
@@ -184,6 +190,7 @@ message CreateRunnerCommand {
     repeated string labels = 4;     // Labels for GitHub runner registration
     string runner_scope_url = 5;    // GitHub org/repo URL for runner registration
     string jit_config = 6;          // JIT config blob (webhook mode): if set, skip config.sh and use run.sh --jitconfig
+    string label_set_id = 7;        // LabelSet.id to create from (fixed-capacity pools). Empty: pick by labels
 }
 
 message DestroyRunnerCommand {

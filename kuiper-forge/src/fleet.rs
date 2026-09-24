@@ -753,7 +753,11 @@ impl FleetManager {
         );
 
         // Reserve a slot on the agent
-        if !self.agent_registry.reserve_slot(&agent_id, labels).await {
+        if !self
+            .agent_registry
+            .reserve_slot(&agent_id, labels, "")
+            .await
+        {
             anyhow::bail!("Failed to reserve slot on agent {agent_id} (might be at capacity)");
         }
 
@@ -830,6 +834,7 @@ impl FleetManager {
             labels: labels.to_vec(),
             runner_scope_url: runner_scope.to_url(),
             jit_config,
+            label_set_id: String::new(), // the agent picks by job labels
         };
 
         let coordinator_msg = CoordinatorMessage {
@@ -1534,6 +1539,7 @@ impl FleetManager {
         let agents = self.agent_registry.list_all().await;
         let mut total = 0u32;
         for agent in &agents {
+            // same members as legacy_pool_capacity and select_legacy_pool_agent
             if !agent.explicit_pools && normalize_labels(&agent.labels) == pool_def.labels {
                 total += self
                     .runner_state
@@ -1580,12 +1586,12 @@ impl FleetManager {
         let capacity = match &pool_def.agent_id {
             Some(agent_id) => {
                 self.agent_registry
-                    .agent_capacity(agent_id, &pool_def.labels)
+                    .agent_capacity(agent_id, &pool_def.labels, &pool_def.label_set_id)
                     .await
             }
             None => {
                 self.agent_registry
-                    .available_capacity(&pool_def.labels)
+                    .legacy_pool_capacity(&pool_def.labels)
                     .await
             }
         };
@@ -1643,7 +1649,7 @@ impl FleetManager {
                 Some(agent_id) => Some(agent_id.clone()),
                 None => {
                     self.agent_registry
-                        .find_available_agent(&pool_def.labels)
+                        .select_legacy_pool_agent(&pool_def.labels)
                         .await
                 }
             };
@@ -1666,7 +1672,7 @@ impl FleetManager {
             // Reserve a slot on the agent to prevent over-scheduling
             if !self
                 .agent_registry
-                .reserve_slot(&agent_id, &pool_def.labels)
+                .reserve_slot(&agent_id, &pool_def.labels, &pool_def.label_set_id)
                 .await
             {
                 warn!(
@@ -1719,6 +1725,7 @@ impl FleetManager {
                 labels: pool_def.labels.clone(),
                 runner_scope_url: runner_scope.to_url(),
                 jit_config: String::new(),
+                label_set_id: pool_def.label_set_id.clone(),
             };
 
             let coordinator_msg = CoordinatorMessage {

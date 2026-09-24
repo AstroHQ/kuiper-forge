@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use kuiper_agent_lib::labels::Capability;
 use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture, RegistrationBundle, runtime};
 use kuiper_agent_proto::{
     AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType,
@@ -191,8 +192,7 @@ async fn main() -> anyhow::Result<()> {
         config.tart.max_macos_vms, config.tart.max_total_vms
     );
 
-    // Build label_sets: each set is base_labels + one image_mapping's labels,
-    // representing the capabilities this agent can fulfill (shared with the
+    // Build capabilities: base_labels + one image_mapping's labels each, then base_image alone (shared with the
     // proxmox agent via kuiper_agent_lib::labels so the two can't drift).
     let base_labels: Vec<String> = config
         .agent
@@ -201,20 +201,13 @@ async fn main() -> anyhow::Result<()> {
         .map(|l| l.to_lowercase())
         .collect();
 
-    let label_sets: Vec<Vec<String>> =
-        kuiper_agent_lib::labels::label_sets(&base_labels, &config.tart.image_mappings);
-
-    info!(
-        "Label sets: {:?} (base: {:?}, image_mappings: {:?})",
-        label_sets,
-        config.agent.labels,
-        config
-            .tart
-            .image_mappings
-            .iter()
-            .map(|m| &m.labels)
-            .collect::<Vec<_>>()
+    let capabilities = kuiper_agent_lib::labels::capabilities(
+        &base_labels,
+        &config.tart.base_image,
+        &config.tart.image_mappings,
     );
+
+    info!("Capabilities: {:?}", capabilities);
 
     let pooled: u32 = config
         .tart
@@ -248,7 +241,17 @@ async fn main() -> anyhow::Result<()> {
         agent_type: "tart".to_string(),
     };
 
-    // Create agent instance. Pass the agent-level metadata (labels, label_sets)
+    // an unpulled OCI image's OS is unknown and counts as macOS, which can block linux jobs on the macOS limit.
+    // Pulling finds out
+    let images: Vec<String> = capabilities.iter().map(|c| c.id.clone()).collect();
+    let pull_vm_manager = vm_manager.clone();
+    tokio::spawn(async move {
+        while !pull_vm_manager.resolve_image_os(&images).await {
+            tokio::time::sleep(vm_manager::IMAGE_OS_RETRY_INTERVAL).await;
+        }
+    });
+
+    // Create agent instance. Pass the agent-level metadata (labels, capabilities)
     // through; max_vms and limits come from vm_manager in build_status.
     let agent = TartAgent::new(
         agent_config,
@@ -256,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
         vm_manager.clone(),
         config.clone(),
         base_labels,
-        label_sets,
+        capabilities,
     );
 
     // Spawn cleanup task
@@ -594,8 +597,8 @@ struct TartAgent {
     config: Config,
     /// Base labels this agent advertises (flat list; sent in AgentStatus).
     labels: Vec<String>,
-    /// Capability sets derived from image_mappings (sent in AgentStatus).
-    label_sets: Vec<Vec<String>>,
+    /// Label sets derived from image_mappings plus base_image (sent in AgentStatus).
+    capabilities: Vec<Capability>,
 }
 
 impl TartAgent {
@@ -605,7 +608,7 @@ impl TartAgent {
         vm_manager: Arc<VmManager>,
         config: Config,
         labels: Vec<String>,
-        label_sets: Vec<Vec<String>>,
+        capabilities: Vec<Capability>,
     ) -> Arc<Self> {
         Arc::new(Self {
             agent_config,
@@ -613,35 +616,37 @@ impl TartAgent {
             vm_manager,
             config,
             labels,
-            label_sets,
+            capabilities,
         })
     }
 
-    /// Select the appropriate VM image based on job labels.
+    /// Select the VM image for a create command.
     ///
-    /// Returns the image of the first mapping whose capability set (agent labels
-    /// plus that mapping's labels) covers the job's labels, mirroring how the
-    /// coordinator routes. Falls back to `base_image` if no mapping covers the
-    /// job. See [`kuiper_agent_lib::labels::select_mapping`].
-    fn select_image(&self, job_labels: &[String]) -> String {
-        match kuiper_agent_lib::labels::select_mapping(
+    /// A fixed-capacity pool command names its capability's image. Otherwise it's the image of the first mapping whose
+    /// capability set (agent labels plus that mapping's labels) covers the job's labels, mirroring how the coordinator
+    /// routes, or `base_image` if none does. See [`kuiper_agent_lib::labels::mapping_for`].
+    fn select_image(&self, cmd: &CreateRunnerCommand) -> String {
+        let tart = &self.config.tart;
+        match kuiper_agent_lib::labels::mapping_for(
             &self.config.agent.labels,
-            &self.config.tart.image_mappings,
-            job_labels,
+            &tart.base_image,
+            &tart.image_mappings,
+            &cmd.label_set_id,
+            &cmd.labels,
         ) {
             Some(mapping) => {
                 info!(
                     "Selected image '{}' for labels {:?} (matched mapping labels {:?})",
-                    mapping.image, job_labels, mapping.labels
+                    mapping.image, cmd.labels, mapping.labels
                 );
                 mapping.image.clone()
             }
             None => {
                 info!(
-                    "No image mapping matched labels {:?}, using default '{}'",
-                    job_labels, self.config.tart.base_image
+                    "No image mapping for labels {:?}, using default '{}'",
+                    cmd.labels, tart.base_image
                 );
-                self.config.tart.base_image.clone()
+                tart.base_image.clone()
             }
         }
     }
@@ -654,26 +659,13 @@ impl TartAgent {
         self.vm_manager.available_slots(os).await > 0
     }
 
-    /// The image behind each of `label_sets`, same order.
-    fn label_set_images(&self) -> Vec<&str> {
-        let tart = &self.config.tart;
-        if tart.image_mappings.is_empty() {
-            vec![tart.base_image.as_str()]
-        } else {
-            tart.image_mappings
-                .iter()
-                .map(|m| m.image.as_str())
-                .collect()
-        }
-    }
-
     /// Read commands from the coordinator and act on them: check capacity, ack,
     /// and spawn the (long-running) lifecycle so the loop keeps draining.
     async fn serve(self: Arc<Self>, mut connection: runtime::Connection) {
         while let Some(command) = connection.commands.recv().await {
             match command {
                 runtime::RunnerCommand::Create(cmd) => {
-                    let image = self.select_image(&cmd.labels);
+                    let image = self.select_image(&cmd);
                     let os = self.vm_manager.image_os(&image).await;
                     if !self.has_capacity(os).await {
                         let summary = self.vm_manager.capacity_summary().await;
@@ -886,25 +878,21 @@ impl TartAgent {
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
         // each set also says which limits its VMs use, so the coordinator doesn't hold linux jobs to the macOS limit
-        let mut label_sets = Vec::with_capacity(self.label_sets.len());
+        let mut label_sets = Vec::with_capacity(self.capabilities.len());
         let mut available_slots = 0;
 
         // fixed-capacity pools use max_vms as their target, so a macOS-only agent mustn't claim the total limit
         let mut max_vms = 0;
-        let pools = kuiper_agent_lib::labels::pool_sizes(&self.config.tart.image_mappings);
-        for ((labels, image), pool_size) in self
-            .label_sets
-            .iter()
-            .zip(self.label_set_images())
-            .zip(pools)
-        {
-            let os = self.vm_manager.image_os(image).await;
+        for capability in &self.capabilities {
+            let os = self.vm_manager.image_os(&capability.id).await;
             available_slots = available_slots.max(self.vm_manager.available_slots(os).await);
             max_vms = max_vms.max(self.vm_manager.max_vms(os));
             label_sets.push(LabelSet {
-                labels: labels.clone(),
+                labels: capability.labels.clone(),
                 limits: os.limit_names().iter().map(|l| l.to_string()).collect(),
-                pool_size,
+                pool_size: capability.pool,
+                id: capability.id.clone(),
+                is_default: capability.is_default,
             });
         }
 

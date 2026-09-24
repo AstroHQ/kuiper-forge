@@ -77,6 +77,10 @@ impl kuiper_agent_lib::labels::LabelMapping for ImageMapping {
     fn pool(&self) -> Option<u32> {
         self.pool
     }
+
+    fn id(&self) -> String {
+        self.image.clone()
+    }
 }
 
 /// Tart-specific configuration.
