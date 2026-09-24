@@ -1,6 +1,6 @@
 [package]
 name = "kuiper-forge"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -37,7 +37,7 @@ sqlx = { version = "0.9", features = ["runtime-tokio", "chrono"] }
 
 # gRPC
 tonic = { workspace = true }
-kuiper-agent-proto = { version = "0.2.0", path = "../kuiper-agent-proto" }
+kuiper-agent-proto = { version = "0.3.0", path = "../kuiper-agent-proto" }
 
 # TLS/Certificates
 rcgen = { workspace = true }
