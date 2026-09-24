@@ -33,6 +33,11 @@ pub enum Error {
     #[error("SSH error: {0}")]
     Ssh(String),
 
+    /// Remote command exited non-zero. `stderr` is left out of the message, it can echo tokens or runner
+    /// output and the message ends up in uploaded logs.
+    #[error("SSH command failed (exit code: {exit_code})")]
+    SshCommand { exit_code: u32, stderr: String },
+
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

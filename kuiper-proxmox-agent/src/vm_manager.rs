@@ -374,15 +374,18 @@ impl VmManager {
             let install_output = session.execute(&install_cmd).await?;
             if install_output.exit_code != 0 {
                 error!(
+                    local_only = tracing::field::Empty,
                     "Runner installation failed: stdout={}, stderr={}",
-                    install_output.stdout, install_output.stderr
+                    install_output.stdout,
+                    install_output.stderr
                 );
                 return Err(Error::runner(format!(
-                    "Failed to install runner: {}",
-                    install_output.stderr
+                    "Failed to install runner (exit code {})",
+                    install_output.exit_code
                 )));
             }
             info!(
+                local_only = tracing::field::Empty,
                 "Runner installed successfully: {}",
                 install_output.stdout.trim()
             );
@@ -403,13 +406,20 @@ impl VmManager {
             );
             let write_output = session.execute(&write_cmd).await?;
             if write_output.exit_code != 0 {
+                error!(
+                    local_only = tracing::field::Empty,
+                    "JIT config write failed on VM {}: {}",
+                    vmid,
+                    write_output.stderr.trim()
+                );
                 return Err(Error::runner(format!(
-                    "Failed to write JIT config to VM: {}",
-                    write_output.stderr
+                    "Failed to write JIT config to VM (exit code {})",
+                    write_output.exit_code
                 )));
             }
             if !write_output.stdout.is_empty() {
                 info!(
+                    local_only = tracing::field::Empty,
                     "JIT config write stdout (VM {}): {}",
                     vmid,
                     write_output.stdout.trim()
@@ -417,6 +427,7 @@ impl VmManager {
             }
             if !write_output.stderr.is_empty() {
                 warn!(
+                    local_only = tracing::field::Empty,
                     "JIT config write stderr (VM {}): {}",
                     vmid,
                     write_output.stderr.trim()
@@ -438,16 +449,23 @@ impl VmManager {
             let output = session.execute(&config_cmd).await?;
             if output.exit_code != 0 {
                 error!(
+                    local_only = tracing::field::Empty,
                     "Runner configuration failed (exit {}): stdout={}, stderr={}",
-                    output.exit_code, output.stdout, output.stderr
+                    output.exit_code,
+                    output.stdout,
+                    output.stderr
                 );
                 return Err(Error::runner(format!(
-                    "Configuration failed with exit code {}:\nstdout: {}\nstderr: {}",
-                    output.exit_code, output.stdout, output.stderr
+                    "Configuration failed with exit code {}",
+                    output.exit_code
                 )));
             }
             if !output.stdout.is_empty() {
-                info!("Config output: {}", output.stdout.trim());
+                info!(
+                    local_only = tracing::field::Empty,
+                    "Config output: {}",
+                    output.stdout.trim()
+                );
             }
 
             // Update state
@@ -474,10 +492,20 @@ impl VmManager {
             run_elapsed.as_secs_f64()
         );
         if !output.stdout.is_empty() {
-            info!("Runner stdout (VM {}): {}", vmid, output.stdout.trim());
+            info!(
+                local_only = tracing::field::Empty,
+                "Runner stdout (VM {}): {}",
+                vmid,
+                output.stdout.trim()
+            );
         }
         if !output.stderr.is_empty() {
-            info!("Runner stderr (VM {}): {}", vmid, output.stderr.trim());
+            info!(
+                local_only = tracing::field::Empty,
+                "Runner stderr (VM {}): {}",
+                vmid,
+                output.stderr.trim()
+            );
         }
 
         // If the runner exited suspiciously fast, grab as much diagnostic info as possible
@@ -500,6 +528,7 @@ impl VmManager {
 
             // Always log stdout/stderr at WARN level for fast exits (even if empty)
             warn!(
+                local_only = tracing::field::Empty,
                 "Early exit diagnostics (VM {}): exit_code={}, stdout_len={}, stderr_len={}, \
                  stdout={:?}, stderr={:?}",
                 vmid,
@@ -521,7 +550,12 @@ impl VmManager {
                             vmid
                         );
                     } else {
-                        warn!("Runner _diag (VM {}): {}", vmid, diag.stdout.trim());
+                        warn!(
+                            local_only = tracing::field::Empty,
+                            "Runner _diag (VM {}): {}",
+                            vmid,
+                            diag.stdout.trim()
+                        );
                     }
                 }
                 Err(e) => {
@@ -551,8 +585,8 @@ impl VmManager {
 
         if output.exit_code != 0 {
             return Err(Error::runner(format!(
-                "Runner exited with code {}: {}",
-                output.exit_code, output.stderr
+                "Runner exited with code {}",
+                output.exit_code
             )));
         }
 

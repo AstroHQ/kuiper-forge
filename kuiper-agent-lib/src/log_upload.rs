@@ -3,6 +3,8 @@
 //! [`LogCapture::layer`] is a tracing layer that copies events into a bounded in-memory buffer. The runtime
 //! drains it over the `UploadLogs` rpc while a session is up, see [`crate::runtime::connect_with_logs`]. Lines
 //! logged before the first connect are kept (up to the buffer size) and sent once connected.
+//!
+//! Events that carry a `local_only` field are never captured, see [`LOCAL_ONLY`].
 
 use kuiper_agent_proto::{AgentServiceClient, LogBatch, LogRecord};
 use std::collections::VecDeque;
@@ -39,6 +41,11 @@ const IGNORED_TARGET_PREFIXES: &[&str] = &[
     "rustls",
     "kuiper_agent_lib::log_upload",
 ];
+
+/// Field name that keeps an event out of the upload, for ssh commands (they hold registration tokens / JIT
+/// configs) and runner output. Mark it as `local_only = tracing::field::Empty` so the local fmt output doesn't
+/// print it, the field still shows up in the event's metadata.
+pub const LOCAL_ONLY: &str = "local_only";
 
 /// Shared handle to the capture buffer. Cheap to clone.
 #[derive(Clone)]
@@ -167,9 +174,10 @@ impl<S: Subscriber> Layer<S> for LogCaptureLayer {
         }
         let meta = event.metadata();
         let target = meta.target();
-        if IGNORED_TARGET_PREFIXES
-            .iter()
-            .any(|prefix| target.starts_with(prefix))
+        if meta.fields().field(LOCAL_ONLY).is_some()
+            || IGNORED_TARGET_PREFIXES
+                .iter()
+                .any(|prefix| target.starts_with(prefix))
         {
             return;
         }
@@ -253,11 +261,16 @@ pub(crate) async fn upload_loop(mut client: AgentServiceClient<Channel>, capture
                 break;
             }
             let more_waiting = !capture.lock().records.is_empty();
+            let in_flight = InFlight {
+                capture: &capture,
+                batch: Some(batch.clone()),
+            };
 
-            match client.upload_logs(batch.clone()).await {
-                Ok(_) => {}
+            match client.upload_logs(batch).await {
+                Ok(_) => in_flight.done(),
                 Err(status) if status.code() == tonic::Code::Unimplemented => {
                     debug!("Coordinator doesn't support log upload, disabling until reconnect");
+                    in_flight.done();
                     capture.disable();
                     return;
                 }
@@ -269,10 +282,11 @@ pub(crate) async fn upload_loop(mut client: AgentServiceClient<Channel>, capture
                     ) =>
                 {
                     debug!("Coordinator refused log batch, dropping it: {}", status);
+                    in_flight.done();
                 }
                 Err(status) => {
                     debug!("Log upload failed, will retry: {}", status);
-                    capture.requeue(batch);
+                    drop(in_flight);
                     break;
                 }
             }
@@ -281,6 +295,28 @@ pub(crate) async fn upload_loop(mut client: AgentServiceClient<Channel>, capture
             if !more_waiting {
                 break;
             }
+        }
+    }
+}
+
+/// A batch taken out of the buffer but not yet acked. Puts it back on drop, which also covers the runtime
+/// aborting the uploader mid-rpc when the session ends.
+struct InFlight<'a> {
+    capture: &'a LogCapture,
+    batch: Option<LogBatch>,
+}
+
+impl InFlight<'_> {
+    /// The coordinator has it (or refused it for good), don't requeue.
+    fn done(mut self) {
+        self.batch = None;
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(batch) = self.batch.take() {
+            self.capture.requeue(batch);
         }
     }
 }
@@ -353,6 +389,39 @@ mod tests {
             messages(&batch),
             vec!["line 0", "line 1", "line 2", "line 3"]
         );
+    }
+
+    #[test]
+    fn test_skips_local_only_events() {
+        let capture = LogCapture::new();
+        let subscriber = tracing_subscriber::registry().with(capture.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "agent", local_only = tracing::field::Empty, "SSH exec: config.sh --token abc");
+            tracing::info!(target: "agent", "kept");
+        });
+        assert_eq!(messages(&capture.take_batch()), vec!["kept"]);
+    }
+
+    #[test]
+    fn test_dropped_in_flight_batch_is_requeued() {
+        let capture = LogCapture::new();
+        for i in 0..3 {
+            capture.push("INFO", "t", format!("line {i}"));
+        }
+        let in_flight = InFlight {
+            capture: &capture,
+            batch: Some(capture.take_batch()),
+        };
+        drop(in_flight);
+        assert_eq!(capture.take_batch().records.len(), 3);
+
+        capture.push("INFO", "t", "line".to_string());
+        let in_flight = InFlight {
+            capture: &capture,
+            batch: Some(capture.take_batch()),
+        };
+        in_flight.done();
+        assert!(capture.take_batch().records.is_empty());
     }
 
     #[test]

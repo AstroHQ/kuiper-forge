@@ -226,7 +226,10 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
 pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result<String> {
     let session = connect(ip, config).await?;
 
-    debug!("SSH exec on {}: {}", ip, command);
+    debug!(
+        local_only = tracing::field::Empty,
+        "SSH exec on {}: {}", ip, command
+    );
 
     let mut channel = session
         .channel_open_session()
@@ -269,10 +272,23 @@ pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result
     if exit_code == 0 {
         Ok(String::from_utf8_lossy(&stdout).to_string())
     } else {
-        let stderr_str = String::from_utf8_lossy(&stderr).to_string();
-        Err(Error::Ssh(format!(
-            "SSH command failed: {stderr_str} (exit code: {exit_code})"
-        )))
+        Err(Error::SshCommand {
+            exit_code,
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
+        })
+    }
+}
+
+/// Log a failed command's stderr locally, it's kept out of the error message.
+fn log_command_stderr(e: &Error) {
+    if let Error::SshCommand { stderr, .. } = e
+        && !stderr.trim().is_empty()
+    {
+        error!(
+            local_only = tracing::field::Empty,
+            "stderr: {}",
+            stderr.trim()
+        );
     }
 }
 
@@ -291,7 +307,12 @@ pub async fn ssh_exec_with_logging(
 ) -> Result<()> {
     let session = connect(ip, config).await?;
 
-    info!("SSH exec (logged to {}): {}", log_path.display(), command);
+    info!(
+        local_only = tracing::field::Empty,
+        "SSH exec (logged to {}): {}",
+        log_path.display(),
+        command
+    );
 
     // Open log file for appending
     let mut log_file = OpenOptions::new()
@@ -336,7 +357,10 @@ pub async fn ssh_exec_with_logging(
                 // Also log to tracing at debug level for real-time visibility
                 if let Ok(text) = std::str::from_utf8(&data) {
                     for line in text.lines() {
-                        debug!("[runner stdout] {}", line);
+                        debug!(
+                            local_only = tracing::field::Empty,
+                            "[runner stdout] {}", line
+                        );
                     }
                 }
             }
@@ -351,7 +375,10 @@ pub async fn ssh_exec_with_logging(
                     // Log stderr at info level since it's often important
                     if let Ok(text) = std::str::from_utf8(&data) {
                         for line in text.lines() {
-                            info!("[runner stderr] {}", line);
+                            info!(
+                                local_only = tracing::field::Empty,
+                                "[runner stderr] {}", line
+                            );
                         }
                     }
                 }
@@ -459,11 +486,15 @@ pub async fn ensure_runner_installed(
     match ssh_exec(ip, config, &install_cmd).await {
         Ok(output) => {
             info!("GitHub Actions runner installed on {}", ip);
-            debug!("Install output: {}", output);
+            debug!(
+                local_only = tracing::field::Empty,
+                "Install output: {}", output
+            );
             Ok(())
         }
         Err(e) => {
             error!("Failed to install GitHub Actions runner on {}: {}", ip, e);
+            log_command_stderr(&e);
             Err(e)
         }
     }
@@ -514,7 +545,10 @@ pub async fn configure_runner(
 
     match ssh_exec(ip, config, &config_cmd).await {
         Ok(output) => {
-            debug!("Runner config output: {}", output);
+            debug!(
+                local_only = tracing::field::Empty,
+                "Runner config output: {}", output
+            );
             info!("Runner {} configured successfully", runner_name);
             Ok(())
         }
@@ -523,6 +557,7 @@ pub async fn configure_runner(
                 "Failed to configure runner {} on {}: {}",
                 runner_name, ip, e
             );
+            log_command_stderr(&e);
             error!(
                 "This usually means the GitHub registration token is invalid or expired. \
                  Check that the coordinator has valid GitHub App credentials."
@@ -744,7 +779,7 @@ async fn poll_and_stream_log(
 
         // Log to tracing for real-time visibility
         for line in new_content.lines() {
-            debug!("[runner gui] {}", line);
+            debug!(local_only = tracing::field::Empty, "[runner gui] {}", line);
         }
     }
 
