@@ -9,6 +9,7 @@
 //! - gRPC connection handling with mTLS
 //! - Registration token exchange
 //! - Automatic reconnection with backoff
+//! - Batched upload of the agent's own logs to the coordinator ([`log_upload`])
 //! - GitHub Actions runner version fetching and download URL construction
 
 pub mod bundle;
@@ -17,6 +18,7 @@ mod connector;
 mod error;
 pub mod github_runner;
 pub mod labels;
+pub mod log_upload;
 pub mod runtime;
 pub mod shell;
 
@@ -24,5 +26,6 @@ pub use bundle::RegistrationBundle;
 pub use certs::AgentCertStore;
 pub use connector::{AgentConfig, AgentConnector};
 pub use error::Error;
+pub use log_upload::LogCapture;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

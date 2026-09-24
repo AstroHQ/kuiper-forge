@@ -1,4 +1,5 @@
 {% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
 
 {% block title %}Users{% endblock %}
 
@@ -34,9 +35,9 @@
                         {{ user.username }}
                         {% if user.is_self %}<span class="badge badge-label">you</span>{% endif %}
                     </td>
-                    <td>{{ user.created_at.format("%Y-%m-%d %H:%M") }}</td>
+                    <td>{% call m::ts(user.created_at) %}{% endcall %}</td>
                     <td>
-                        {% if let Some(t) = user.last_login %}{{ t.format("%Y-%m-%d %H:%M") }}{% else %}-{% endif %}
+                        {% if let Some(t) = user.last_login %}{% call m::ts(t) %}{% endcall %}{% else %}-{% endif %}
                     </td>
                     <td>
                         <form method="post" action="/admin/users/password" class="inline-form">

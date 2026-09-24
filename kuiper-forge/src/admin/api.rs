@@ -2,19 +2,21 @@
 //!
 //! - `GET /api/v1/status` - fleet-wide counts
 //! - `GET /api/v1/agents` - every registered agent with its live status
+//! - `GET /api/v1/agents/{agent_id}/logs` - the agent's own uploaded log lines, newest first
 
+use crate::admin::agent_log_routes::level_filter;
 use crate::admin::middleware::AdminState;
 use crate::agent_registry::AgentInfo;
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{Path, Query, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::error;
@@ -24,6 +26,7 @@ pub fn api_router(state: Arc<AdminState>) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/agents", get(agents))
+        .route("/agents/{agent_id}/logs", get(agent_logs))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -176,4 +179,65 @@ async fn agents(State(state): State<Arc<AdminState>>) -> Response {
         .collect();
 
     Json(agents).into_response()
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    /// Minimum level: error, warn, info, debug or trace (default)
+    level: Option<String>,
+    /// `next_before` from a previous response, to page back in time
+    before: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct LogLineResponse {
+    ts: DateTime<Utc>,
+    level: &'static str,
+    target: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct LogsResponse {
+    lines: Vec<LogLineResponse>,
+    /// Pass as `before` to get the next older page. Null when this page wasn't full
+    next_before: Option<String>,
+}
+
+async fn agent_logs(
+    State(state): State<Arc<AdminState>>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(500).clamp(1, 1000);
+    let (min_level, _) = level_filter(query.level.as_deref());
+    let lines = match state
+        .agent_logs
+        .recent(&agent_id, min_level, query.before.as_deref(), limit)
+        .await
+    {
+        Ok(lines) => lines,
+        Err(e) => {
+            error!("Failed to load logs for agent {}: {:#}", agent_id, e);
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+
+    let next_before = (lines.len() as i64 == limit)
+        .then(|| lines.last().map(|l| l.cursor.clone()))
+        .flatten();
+    Json(LogsResponse {
+        lines: lines
+            .into_iter()
+            .map(|l| LogLineResponse {
+                ts: l.ts,
+                level: l.level.as_str(),
+                target: l.target,
+                message: l.message,
+            })
+            .collect(),
+        next_before,
+    })
+    .into_response()
 }

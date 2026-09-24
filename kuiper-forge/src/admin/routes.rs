@@ -8,7 +8,7 @@ use crate::admin::templates::{
     AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, FailureSummary,
     LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary,
 };
-use crate::admin::{api_token_routes, user_routes};
+use crate::admin::{agent_log_routes, api_token_routes, user_routes};
 use crate::agent_failures::FailureKind;
 use crate::agent_registry::AgentInfo;
 use askama::Template;
@@ -37,6 +37,7 @@ pub fn admin_router(state: Arc<AdminState>) -> Router {
         .route("/tokens/{token}/delete", post(token_delete))
         .route("/agents/{agent_id}", get(agent_detail))
         .route("/agents/{agent_id}/revoke", post(agent_revoke))
+        .route("/agents/{agent_id}/logs", get(agent_log_routes::agent_logs))
         .route("/users", get(user_routes::users_page))
         .route("/users/create", post(user_routes::user_create))
         .route("/users/password", post(user_routes::user_set_password))
@@ -461,6 +462,7 @@ async fn agent_detail(
         agent: agent_summary,
         runners,
         failures,
+        tab: "overview",
     };
 
     Html(

@@ -198,6 +198,13 @@ pub struct LoggingConfig {
     /// Number of days to retain log files (agent and runner logs)
     #[serde(default = "default_log_retention_days")]
     pub retention_days: u32,
+    /// Upload this agent's own log lines to the coordinator (shown in its admin UI). Runner logs are never sent
+    #[serde(default = "default_true")]
+    pub upload: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_log_retention_days() -> u32 {
@@ -208,6 +215,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             retention_days: default_log_retention_days(),
+            upload: true,
         }
     }
 }

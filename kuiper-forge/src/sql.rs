@@ -392,3 +392,41 @@ pub const PRUNE_AGENT_FAILURES: &str = r#"
         SELECT id FROM agent_failures WHERE agent_id = $2 ORDER BY occurred_at DESC LIMIT $3
     )
 "#;
+
+// Agent logs queries
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_AGENT_LOGS: &str = r#"
+    SELECT ts, seq, level, target, message FROM agent_logs
+    WHERE agent_id = ? AND level <= ? AND (ts < ? OR (ts = ? AND seq < ?))
+    ORDER BY ts DESC, seq DESC LIMIT ?
+"#;
+
+#[cfg(feature = "postgres")]
+pub const SELECT_AGENT_LOGS: &str = r#"
+    SELECT ts, seq, level, target, message FROM agent_logs
+    WHERE agent_id = $1 AND level <= $2 AND (ts < $3 OR (ts = $4 AND seq < $5))
+    ORDER BY ts DESC, seq DESC LIMIT $6
+"#;
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_AGENT_LOGS_OLDER_THAN: &str = "DELETE FROM agent_logs WHERE ts < ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_AGENT_LOGS_OLDER_THAN: &str = "DELETE FROM agent_logs WHERE ts < $1";
+
+pub const SELECT_AGENT_LOG_AGENTS: &str = "SELECT DISTINCT agent_id FROM agent_logs";
+
+#[cfg(feature = "sqlite")]
+pub const SELECT_AGENT_LOG_CUTOFF: &str =
+    "SELECT ts FROM agent_logs WHERE agent_id = ? ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_AGENT_LOG_CUTOFF: &str =
+    "SELECT ts FROM agent_logs WHERE agent_id = $1 ORDER BY ts DESC, seq DESC LIMIT 1 OFFSET $2";
+
+#[cfg(feature = "sqlite")]
+pub const DELETE_AGENT_LOGS_BEFORE: &str = "DELETE FROM agent_logs WHERE agent_id = ? AND ts < ?";
+
+#[cfg(feature = "postgres")]
+pub const DELETE_AGENT_LOGS_BEFORE: &str = "DELETE FROM agent_logs WHERE agent_id = $1 AND ts < $2";

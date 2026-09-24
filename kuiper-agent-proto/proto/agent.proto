@@ -45,7 +45,27 @@ message RegisterResponse {
 service AgentService {
     // Bidirectional streaming for agent-coordinator communication
     rpc AgentStream(stream AgentMessage) returns (stream CoordinatorMessage);
+
+    // Batched upload of the agent's own log lines (not runner logs), kept off the stream so log volume can't
+    // delay commands. Coordinators without this rpc answer UNIMPLEMENTED and agents stop uploading.
+    rpc UploadLogs(LogBatch) returns (UploadLogsResponse);
 }
+
+message LogBatch {
+    repeated LogRecord records = 1;
+    // Lines the agent dropped since the last batch because its buffer was full
+    uint64 dropped = 2;
+}
+
+message LogRecord {
+    int64 timestamp_micros = 1;  // Unix time on the agent
+    string level = 2;            // "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
+    string target = 3;           // tracing target, usually the module path
+    string message = 4;          // message plus any structured fields as key=value
+    uint64 seq = 5;              // per-process counter, breaks ties between equal timestamps
+}
+
+message UploadLogsResponse {}
 
 // Messages FROM agent TO coordinator
 message AgentMessage {

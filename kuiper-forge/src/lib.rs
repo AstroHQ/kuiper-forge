@@ -12,6 +12,7 @@ compile_error!("At least one database feature must be enabled: 'sqlite' or 'post
 
 pub mod admin;
 pub mod agent_failures;
+pub mod agent_logs;
 pub mod agent_registry;
 pub mod auth;
 pub mod config;

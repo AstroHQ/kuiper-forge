@@ -61,7 +61,13 @@
             font-size: 0.9em;
             cursor: pointer;
             border: none;
+            /* <button> doesn't inherit these, so it ends up a different height than an <a class="btn"> */
+            font-family: inherit;
+            line-height: 1.4;
+            vertical-align: middle;
         }
+        .btn-group { display: flex; gap: 8px; align-items: center; }
+        .btn-group form { display: contents; }
         .btn-primary { background: #007bff; color: white; }
         .btn-primary:hover { background: #0056b3; }
         .btn-danger { background: #dc3545; color: white; }
@@ -110,6 +116,29 @@
         .detail-grid { display: grid; grid-template-columns: 150px 1fr; gap: 10px; }
         .detail-label { font-weight: 600; color: #555; }
         .muted { color: #888; font-size: 0.85em; }
+        .tabs { display: flex; gap: 4px; border-bottom: 2px solid #ddd; margin-bottom: 20px; }
+        .tab { padding: 8px 16px; color: #555; text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab:hover { color: #1a1a2e; }
+        .tab-active { color: #1a1a2e; font-weight: 600; border-bottom-color: #007bff; }
+        .log-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+        .log-view {
+            background: #1a1a2e;
+            color: #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.8em;
+            line-height: 1.5;
+            max-height: 70vh;
+            overflow: auto;
+        }
+        .log-line { white-space: pre-wrap; word-break: break-word; }
+        .log-time { color: #888; }
+        .log-target { color: #7a8599; }
+        .log-ERROR { color: #ff6b6b; font-weight: bold; }
+        .log-WARN { color: #ffc857; }
+        .log-INFO { color: #6bcB77; }
+        .log-DEBUG, .log-TRACE { color: #7aa2f7; }
         .failure-message { white-space: pre-wrap; display: block; max-height: 12em; overflow: auto; }
         dialog {
             border: none;
@@ -126,5 +155,32 @@
 </head>
 <body>
     {% block body %}{% endblock %}
+    <script>
+        // timestamps come from the server in UTC (see macros.html), show them in the browser's timezone instead
+        (() => {
+            const pad = (n, width = 2) => String(n).padStart(width, '0');
+            const day = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+            const hm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+            for (const el of document.querySelectorAll('time.local-time')) {
+                const d = new Date(Number(el.dataset.ms));
+                const utc = el.title || el.textContent;
+                const full = `${day(d)} ${hm(d)}:${pad(d.getSeconds())}`;
+                switch (el.dataset.fmt) {
+                    case 'ms':
+                        el.textContent = `${full}.${pad(d.getMilliseconds(), 3)}`;
+                        el.title = `${utc} UTC`;
+                        break;
+                    case 'title':
+                        el.title = `${full} ${zone}`;
+                        break;
+                    default:
+                        el.textContent = `${day(d)} ${hm(d)}`;
+                        el.title = utc;
+                }
+            }
+            for (const el of document.querySelectorAll('.local-tz')) el.textContent = zone;
+        })();
+    </script>
 </body>
 </html>

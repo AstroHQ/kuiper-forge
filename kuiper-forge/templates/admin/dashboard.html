@@ -1,4 +1,5 @@
 {% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
 
 {% block title %}Dashboard{% endblock %}
 
@@ -182,7 +183,7 @@
             <tr>
                 <td><code>{{ token.token }}</code></td>
                 <td>{{ token.created_by }}</td>
-                <td>{{ token.expires_at.format("%Y-%m-%d %H:%M") }}</td>
+                <td>{% call m::ts(token.expires_at) %}{% endcall %}</td>
                 <td>
                     <form method="post" action="/admin/tokens/{{ token.token }}/delete" style="display: inline;">
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>

@@ -6,6 +6,7 @@
 //! - Admin routes for dashboard, agents, etc.
 //! - API tokens and the read-only `/api/v1` endpoints
 
+mod agent_log_routes;
 pub mod api;
 mod api_token_routes;
 pub mod api_tokens;

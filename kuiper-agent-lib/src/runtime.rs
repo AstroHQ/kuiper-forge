@@ -19,6 +19,7 @@
 //! Any agent (these two, or one a third party writes) gets the same correct
 //! connection behaviour for free, while keeping full control of its own logic.
 
+use crate::log_upload::{self, LogCapture};
 use crate::{AgentCertStore, AgentConfig, AgentConnector, Error, Result};
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentServiceClient, AgentStatus, CommandAck, CoordinatorMessage,
@@ -125,18 +126,34 @@ pub fn connect(
     initial_delay: Duration,
     max_delay: Duration,
 ) -> Connection {
+    connect_with_logs(config, cert_store, status, initial_delay, max_delay, None)
+}
+
+/// Same as [`connect`], and also uploads lines from `logs` to the coordinator while connected.
+pub fn connect_with_logs(
+    config: AgentConfig,
+    cert_store: AgentCertStore,
+    status: watch::Receiver<AgentStatus>,
+    initial_delay: Duration,
+    max_delay: Duration,
+    logs: Option<LogCapture>,
+) -> Connection {
     let (command_tx, command_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (event_tx, event_rx) = mpsc::channel(CHANNEL_CAPACITY);
 
-    tokio::spawn(drive(
-        config,
-        cert_store,
-        status,
-        command_tx,
-        event_rx,
-        initial_delay,
-        max_delay,
-    ));
+    tokio::spawn(
+        Driver {
+            config,
+            cert_store,
+            status,
+            command_tx,
+            event_rx,
+            initial_delay,
+            max_delay,
+            logs,
+        }
+        .run(),
+    );
 
     Connection {
         commands: command_rx,
@@ -145,43 +162,57 @@ pub fn connect(
 }
 
 /// Background driver: connect, run a session, reconnect with backoff, repeat.
-async fn drive(
+struct Driver {
     config: AgentConfig,
     cert_store: AgentCertStore,
     status: watch::Receiver<AgentStatus>,
     command_tx: mpsc::Sender<RunnerCommand>,
-    mut event_rx: mpsc::Receiver<AgentMessage>,
+    event_rx: mpsc::Receiver<AgentMessage>,
     initial_delay: Duration,
     max_delay: Duration,
-) {
-    let mut delay = initial_delay;
-    loop {
-        let mut connector = AgentConnector::new(config.clone(), cert_store.clone());
-        match connector.connect().await {
-            Ok(client) => {
-                info!("Connected to coordinator");
-                if let Some(agent_id) = connector.agent_id() {
-                    info!("Agent ID: {}", agent_id);
+    logs: Option<LogCapture>,
+}
+
+impl Driver {
+    async fn run(mut self) {
+        let mut delay = self.initial_delay;
+        loop {
+            let mut connector = AgentConnector::new(self.config.clone(), self.cert_store.clone());
+            match connector.connect().await {
+                Ok(client) => {
+                    info!("Connected to coordinator");
+                    if let Some(agent_id) = connector.agent_id() {
+                        info!("Agent ID: {}", agent_id);
+                    }
+                    delay = self.initial_delay; // reset backoff after a successful connect
+                    let uploader = self.logs.clone().map(|capture| {
+                        tokio::spawn(log_upload::upload_loop(client.clone(), capture))
+                    });
+                    if let Err(e) =
+                        run_session(client, &self.status, &self.command_tx, &mut self.event_rx)
+                            .await
+                    {
+                        warn!("Stream ended: {}", e);
+                    } else {
+                        info!("Stream closed by coordinator");
+                    }
+                    if let Some(uploader) = uploader {
+                        uploader.abort();
+                    }
                 }
-                delay = initial_delay; // reset backoff after a successful connect
-                if let Err(e) = run_session(client, &status, &command_tx, &mut event_rx).await {
-                    warn!("Stream ended: {}", e);
-                } else {
-                    info!("Stream closed by coordinator");
-                }
+                Err(e) => error!("Connection failed: {}", e),
             }
-            Err(e) => error!("Connection failed: {}", e),
-        }
 
-        // The agent dropped its Connection (e.g. shutting down) — stop driving.
-        if command_tx.is_closed() {
-            debug!("Connection dropped by agent; stopping runtime driver");
-            return;
-        }
+            // The agent dropped its Connection (e.g. shutting down) — stop driving.
+            if self.command_tx.is_closed() {
+                debug!("Connection dropped by agent; stopping runtime driver");
+                return;
+            }
 
-        info!("Reconnecting in {:?}...", delay);
-        tokio::time::sleep(delay).await;
-        delay = std::cmp::min(delay * 2, max_delay);
+            info!("Reconnecting in {:?}...", delay);
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(delay * 2, self.max_delay);
+        }
     }
 }
 

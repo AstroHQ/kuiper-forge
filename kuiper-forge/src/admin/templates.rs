@@ -75,6 +75,39 @@ pub struct AgentDetailTemplate {
     pub agent: AgentSummary,
     pub runners: Vec<RunnerSummary>,
     pub failures: Vec<FailureSummary>,
+    /// Active tab for the shared agent header
+    pub tab: &'static str,
+}
+
+/// Just what the shared agent header needs
+pub struct AgentHeader {
+    pub agent_id: String,
+    pub revoked: bool,
+}
+
+/// Agent logs tab
+#[derive(Template)]
+#[template(path = "admin/agent_logs.html")]
+pub struct AgentLogsTemplate {
+    pub base: BaseContext,
+    pub agent: AgentHeader,
+    pub tab: &'static str,
+    /// Oldest first, so the newest line sits at the bottom like a terminal
+    pub lines: Vec<LogLineView>,
+    /// Selected minimum level, lowercase
+    pub level: &'static str,
+    /// Cursor for the next "older" page, None when there's nothing older
+    pub older: Option<String>,
+    /// True when looking at an older page rather than the newest lines
+    pub paged: bool,
+    pub live: bool,
+}
+
+pub struct LogLineView {
+    pub ts: DateTime<Utc>,
+    pub level: &'static str,
+    pub target: String,
+    pub message: String,
 }
 
 /// Recorded agent failure for the agent detail page

@@ -15,7 +15,7 @@ use clap::Parser;
 use config::Config;
 use error::{Error, Result};
 use kuiper_agent_lib::{
-    AgentCertStore, AgentConfig as LibAgentConfig, RegistrationBundle, runtime,
+    AgentCertStore, AgentConfig as LibAgentConfig, LogCapture, RegistrationBundle, runtime,
 };
 use kuiper_agent_proto::{
     AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType, VmInfo,
@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize logging with file output (retention applied after config load)
-    init_logging(
+    let log_capture = init_logging(
         &args.resolve_log_dir(),
         config::LoggingConfig::default().retention_days as usize,
     )?;
@@ -236,7 +236,11 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Hand the connection off to the runtime, which drives the coordinator loop.
-    let connection = runtime::connect(
+    let upload_logs = agent.config.logging.upload;
+    if !upload_logs {
+        log_capture.disable();
+    }
+    let connection = runtime::connect_with_logs(
         LibAgentConfig {
             coordinator_url: agent.config.coordinator.url.clone(),
             coordinator_hostname: agent.config.coordinator.hostname.clone(),
@@ -247,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         status_rx,
         Duration::from_secs(5),
         Duration::from_secs(60),
+        upload_logs.then_some(log_capture),
     );
 
     // Run the command loop with graceful shutdown handling.
@@ -796,7 +801,7 @@ impl ProxmoxAgent {
 }
 
 /// Initialize logging with file output and stdout.
-fn init_logging(log_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
+fn init_logging(log_dir: &Path, retention_days: usize) -> anyhow::Result<LogCapture> {
     std::fs::create_dir_all(log_dir)?;
 
     // Create a daily rotating file appender (e.g., kuiper-proxmox-agent.2026-01-15.log)
@@ -820,8 +825,10 @@ fn init_logging(log_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
         Err(_) => EnvFilter::new(format!("{base},info")),
     };
 
+    let capture = LogCapture::new();
     tracing_subscriber::registry()
         .with(filter)
+        .with(capture.layer()) // uploaded to the coordinator once connected
         .with(fmt::layer().with_target(false)) // stdout
         .with(
             fmt::layer()
@@ -832,7 +839,7 @@ fn init_logging(log_dir: &Path, retention_days: usize) -> anyhow::Result<()> {
         .init();
 
     info!("Logging to: {}", log_dir.display());
-    Ok(())
+    Ok(capture)
 }
 
 #[cfg(test)]

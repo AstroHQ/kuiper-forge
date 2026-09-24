@@ -1,0 +1,58 @@
+{% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
+
+{% block title %}Logs: {{ agent.agent_id }}{% endblock %}
+
+{% block body %}
+{% if live %}<meta http-equiv="refresh" content="5">{% endif %}
+{% include "admin/nav.html" %}
+
+<div class="container">
+    {% include "admin/agent_header.html" %}
+
+    <div class="card">
+        <form method="get" class="log-toolbar">
+            <label for="level">Level</label>
+            <select id="level" name="level" onchange="this.form.submit()">
+                <option value="trace"{% if level == "trace" %} selected{% endif %}>All</option>
+                <option value="debug"{% if level == "debug" %} selected{% endif %}>Debug and up</option>
+                <option value="info"{% if level == "info" %} selected{% endif %}>Info and up</option>
+                <option value="warn"{% if level == "warn" %} selected{% endif %}>Warnings and errors</option>
+                <option value="error"{% if level == "error" %} selected{% endif %}>Errors only</option>
+            </select>
+            {% if !paged %}
+            <label><input type="checkbox" name="live" value="1"{% if live %} checked{% endif %} onchange="this.form.submit()"> Live</label>
+            {% endif %}
+            {% if let Some(cursor) = older %}
+            <a href="?level={{ level }}&amp;before={{ cursor }}" class="btn btn-secondary btn-sm">Older</a>
+            {% endif %}
+            {% if paged %}
+            <a href="?level={{ level }}" class="btn btn-secondary btn-sm">Newest</a>
+            {% endif %}
+            <span class="muted">times are <span class="local-tz">UTC</span>, from the agent's clock</span>
+        </form>
+
+        {% if lines.is_empty() %}
+        {% if paged || level != "trace" %}
+        <p style="color: #666;">No log lines match.</p>
+        {% else %}
+        <p style="color: #666;">No logs from this agent yet. Older agent versions don't upload logs, and newer ones start after they connect.</p>
+        {% endif %}
+        {% else %}
+        <div class="log-view" id="log-view">
+            {% for line in lines %}
+            <div class="log-line"><span class="log-time">{% call m::ts_ms(line.ts) %}{% endcall %}</span> <span class="log-{{ line.level }}">{{ "{:>5}"|format(line.level) }}</span> <span class="log-target">{{ line.target }}</span> {{ line.message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+    {% if !paged %}
+    // newest lines are at the bottom
+    const logView = document.getElementById('log-view');
+    if (logView) logView.scrollTop = logView.scrollHeight;
+    {% endif %}
+</script>
+{% endblock %}

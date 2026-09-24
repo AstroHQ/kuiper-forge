@@ -1,4 +1,5 @@
 {% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
 
 {% block title %}API Tokens{% endblock %}
 
@@ -50,9 +51,9 @@
                     <td>{{ token.name }}</td>
                     <td><code>{{ token.token_prefix }}…</code></td>
                     <td>{{ token.created_by }}</td>
-                    <td>{{ token.created_at.format("%Y-%m-%d %H:%M") }}</td>
+                    <td>{% call m::ts(token.created_at) %}{% endcall %}</td>
                     <td>
-                        {% if let Some(t) = token.last_used_at %}{{ t.format("%Y-%m-%d %H:%M") }}{% else %}never{% endif %}
+                        {% if let Some(t) = token.last_used_at %}{% call m::ts(t) %}{% endcall %}{% else %}never{% endif %}
                     </td>
                     <td>
                         <form method="post" action="/admin/api-tokens/delete" style="display: inline;"

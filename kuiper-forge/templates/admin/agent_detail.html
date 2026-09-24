@@ -1,4 +1,5 @@
 {% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
 
 {% block title %}Agent: {{ agent.agent_id }}{% endblock %}
 
@@ -6,18 +7,7 @@
 {% include "admin/nav.html" %}
 
 <div class="container">
-    <div class="page-header">
-        <h1>Agent: {{ agent.agent_id }}</h1>
-        <div>
-            <a href="/admin/dashboard" class="btn btn-secondary">Back to Dashboard</a>
-            {% if !agent.revoked %}
-            <form method="post" action="/admin/agents/{{ agent.agent_id }}/revoke" style="display: inline;"
-                onsubmit="return confirm('Are you sure you want to revoke this agent? This will disconnect the agent and require re-registration.');">
-                <button type="submit" class="btn btn-danger">Revoke Certificate</button>
-            </form>
-            {% endif %}
-        </div>
-    </div>
+    {% include "admin/agent_header.html" %}
 
     <div class="card">
         <div class="card-title">Agent Details</div>
@@ -57,7 +47,7 @@
             </div>
 
             <div class="detail-label">Registered</div>
-            <div>{{ agent.created_at }}</div>
+            <div>{% call m::ts(agent.created_at) %}{% endcall %}</div>
         </div>
     </div>
 
@@ -102,7 +92,7 @@
                             <span style="color: #666;">-</span>
                         {% endif %}
                     </td>
-                    <td>{{ runner.created_at }}</td>
+                    <td>{% call m::ts(runner.created_at) %}{% endcall %}</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -127,7 +117,7 @@
             <tbody>
                 {% for failure in failures %}
                 <tr>
-                    <td title="{{ failure.occurred_at }}" style="white-space: nowrap;">{{ failure.ago }} ago</td>
+                    <td style="white-space: nowrap;">{% call m::ts_title(failure.occurred_at, failure.ago ~ " ago") %}{% endcall %}</td>
                     <td style="white-space: nowrap;"><span class="badge badge-offline">{{ failure.kind }}</span></td>
                     <td>
                         {% if let Some(name) = failure.runner_name %}{{ name }}{% else %}-{% endif %}
