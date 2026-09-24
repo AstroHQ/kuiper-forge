@@ -41,6 +41,26 @@ impl std::str::FromStr for AgentType {
     }
 }
 
+/// A host-wide limit an agent reports on top of `max_vms`, e.g. tart's macOS guest limit. Every VM the agent runs
+/// counts against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmLimit {
+    pub name: String,
+    pub max: usize,
+    /// VMs using up this limit that the agent doesn't manage
+    pub external: usize,
+}
+
+impl From<&kuiper_agent_proto::CapacityLimit> for VmLimit {
+    fn from(l: &kuiper_agent_proto::CapacityLimit) -> Self {
+        Self {
+            name: l.name.clone(),
+            max: l.max as usize,
+            external: l.external as usize,
+        }
+    }
+}
+
 /// Information about a connected agent
 #[derive(Debug)]
 pub struct ConnectedAgent {
@@ -58,6 +78,9 @@ pub struct ConnectedAgent {
 
     /// Currently active VMs (as reported by agent)
     pub active_vms: usize,
+
+    /// Extra limits from the agent's last status, empty for agents that only have `max_vms`
+    pub limits: Vec<VmLimit>,
 
     /// Reserved slots (commands sent but not yet reflected in active_vms)
     /// This prevents over-scheduling when sending multiple commands quickly
@@ -101,6 +124,7 @@ impl ConnectedAgent {
             hostname,
             max_vms,
             active_vms,
+            limits: Vec::new(),
             reserved_slots: 0,
             labels,
             label_sets,
@@ -110,16 +134,24 @@ impl ConnectedAgent {
         }
     }
 
+    /// How many VMs this agent can run right now: `max_vms`, lowered by any limit that VMs outside the agent use up.
+    pub fn effective_max(&self) -> usize {
+        self.limits
+            .iter()
+            .map(|l| l.max.saturating_sub(l.external))
+            .fold(self.max_vms, usize::min)
+    }
+
     /// Check if this agent has capacity for more VMs
     /// Takes into account both active VMs and reserved slots
     pub fn has_capacity(&self) -> bool {
-        self.active_vms + self.reserved_slots < self.max_vms
+        self.active_vms + self.reserved_slots < self.effective_max()
     }
 
     /// Get available capacity (number of VMs that can still be created)
     /// Takes into account both active VMs and reserved slots
     pub fn available_capacity(&self) -> usize {
-        self.max_vms
+        self.effective_max()
             .saturating_sub(self.active_vms + self.reserved_slots)
     }
 
@@ -349,8 +381,14 @@ impl AgentRegistry {
                 continue;
             }
             reasons.push(format!(
-                "{}: matches={}, capacity={} (active={}, reserved={}, max={})",
-                id, matches, has_cap, agent.active_vms, agent.reserved_slots, agent.max_vms
+                "{}: matches={}, capacity={} (active={}, reserved={}, max={}, usable={})",
+                id,
+                matches,
+                has_cap,
+                agent.active_vms,
+                agent.reserved_slots,
+                agent.max_vms,
+                agent.effective_max()
             ));
         }
         drop(agents);
@@ -533,9 +571,10 @@ impl AgentRegistry {
                 // actually running; reserved_slots should only account for commands
                 // that are genuinely in-flight (sent but not yet reflected).
                 let total_accounted = active_vms + agent.reserved_slots;
-                if total_accounted > agent.max_vms {
+                let max = agent.effective_max();
+                if total_accounted > max {
                     // reserved_slots claims more than physically possible - clamp
-                    agent.reserved_slots = agent.max_vms.saturating_sub(active_vms);
+                    agent.reserved_slots = max.saturating_sub(active_vms);
                 }
             }
             // When active_vms == old_active, leave reserved_slots alone - commands
@@ -559,6 +598,17 @@ impl AgentRegistry {
                     reserved_slots = agent.reserved_slots,
                     "Agent status updated"
                 );
+            }
+        }
+    }
+
+    /// Replace the agent's extra limits with the ones from its latest status.
+    pub async fn set_limits(&self, agent_id: &str, limits: Vec<VmLimit>) {
+        if let Some(agent) = self.get(agent_id).await {
+            let mut agent = agent.write().await;
+            if agent.limits != limits {
+                debug!(agent_id = %agent_id, limits = ?limits, "Agent limits changed");
+                agent.limits = limits;
             }
         }
     }
@@ -648,6 +698,7 @@ impl AgentRegistry {
                 label_sets: agent.label_sets.clone(),
                 max_vms: agent.max_vms,
                 active_vms: agent.active_vms,
+                limits: agent.limits.clone(),
                 last_seen_secs: agent.last_seen.elapsed().as_secs(),
             });
         }
@@ -728,6 +779,7 @@ pub struct AgentInfo {
     pub label_sets: Vec<Vec<String>>,
     pub max_vms: usize,
     pub active_vms: usize,
+    pub limits: Vec<VmLimit>,
     pub last_seen_secs: u64,
 }
 
@@ -809,6 +861,49 @@ mod tests {
         // Unregister
         registry.unregister("agent_1").await;
         assert_eq!(registry.count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_limits_with_external_vms_reduce_capacity() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                2,
+                0, // active_vms
+                vec!["macos".to_string()],
+                vec![],
+                tx,
+            )
+            .await;
+        let limit = |name: &str, max, external| VmLimit {
+            name: name.to_string(),
+            max,
+            external,
+        };
+        let labels = ["macos".to_string()];
+
+        // someone runs a mac VM by hand: one macOS slot left
+        registry
+            .set_limits("agent_1", vec![limit("macos", 2, 1), limit("total", 5, 1)])
+            .await;
+        assert_eq!(registry.available_capacity(&labels).await, 1);
+
+        // plus four linux VMs: total limit is full
+        registry
+            .set_limits("agent_1", vec![limit("macos", 2, 1), limit("total", 5, 5)])
+            .await;
+        assert_eq!(registry.available_capacity(&labels).await, 0);
+        assert!(registry.find_available_agent(&labels).await.is_none());
+
+        // external VMs gone, back to max_vms
+        registry
+            .set_limits("agent_1", vec![limit("macos", 2, 0), limit("total", 5, 0)])
+            .await;
+        assert_eq!(registry.available_capacity(&labels).await, 2);
     }
 
     #[tokio::test]

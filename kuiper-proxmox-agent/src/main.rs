@@ -797,6 +797,7 @@ impl ProxmoxAgent {
             max_vms: self.config.vm.concurrent_vms,
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            limits: Vec::new(),
         }
     }
 }

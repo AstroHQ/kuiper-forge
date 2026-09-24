@@ -77,9 +77,12 @@ impl kuiper_agent_lib::labels::LabelMapping for ImageMapping {
 pub struct TartConfig {
     /// Default base image for VMs (used when no image mapping matches)
     pub base_image: String,
-    /// Maximum concurrent VMs (Apple Virtualization Framework limit is 2)
-    #[serde(default = "default_max_concurrent_vms")]
-    pub max_concurrent_vms: u32,
+    /// Max macOS guests at once, 1 up to `MACOS_GUEST_LIMIT`
+    #[serde(default = "default_max_macos_vms", alias = "max_concurrent_vms")]
+    pub max_macos_vms: u32,
+    /// Max VMs of any OS at once
+    #[serde(default = "default_max_total_vms")]
+    pub max_total_vms: u32,
     /// Shared cache directory for VMs
     pub shared_cache_dir: Option<PathBuf>,
     /// SSH configuration for connecting to VMs
@@ -92,6 +95,21 @@ pub struct TartConfig {
     /// Image mappings for label-based selection (first match wins)
     #[serde(default)]
     pub image_mappings: Vec<ImageMapping>,
+}
+
+impl TartConfig {
+    fn limit_errors(&self) -> Vec<&'static str> {
+        let mut errors = Vec::new();
+        if !(1..=MACOS_GUEST_LIMIT).contains(&self.max_macos_vms) {
+            errors.push(
+                "tart.max_macos_vms: must be 1 or 2, macOS won't run more than 2 macOS VMs at once",
+            );
+        }
+        if self.max_total_vms == 0 {
+            errors.push("tart.max_total_vms: must be at least 1");
+        }
+        errors
+    }
 }
 
 fn default_runner_version() -> String {
@@ -128,8 +146,15 @@ impl Default for SshAuthConfig {
     }
 }
 
-fn default_max_concurrent_vms() -> u32 {
-    2
+/// macOS only runs this many macOS guests per host (a license term, so a future macOS could change it)
+pub const MACOS_GUEST_LIMIT: u32 = 2;
+
+fn default_max_macos_vms() -> u32 {
+    MACOS_GUEST_LIMIT
+}
+
+fn default_max_total_vms() -> u32 {
+    5
 }
 
 /// Cleanup configuration.
@@ -278,6 +303,8 @@ impl Config {
             errors.push("tart.base_image: Tart image to use for VMs (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
         }
 
+        errors.extend(config.tart.limit_errors());
+
         if !errors.is_empty() {
             let error_msg = format!(
                 "Configuration incomplete\n\nPlease edit {} and set:\n  - {}\n\nThen start the agent:\n  kuiper-tart-agent",
@@ -374,7 +401,34 @@ base_image = "macos-runner"
             config.coordinator.url,
             "https://coordinator.example.com:9443"
         );
-        assert_eq!(config.tart.max_concurrent_vms, 2);
+        assert_eq!(config.tart.max_macos_vms, 2);
+        assert_eq!(config.tart.max_total_vms, 5);
         assert_eq!(config.cleanup.max_vm_age_hours, 2);
+    }
+
+    #[test]
+    fn test_old_max_concurrent_vms_key() {
+        let toml = r#"
+base_image = "macos-runner"
+max_concurrent_vms = 1
+"#;
+        let tart: TartConfig = toml::from_str(toml).expect("Failed to parse config");
+        assert_eq!(tart.max_macos_vms, 1);
+        assert_eq!(tart.max_total_vms, 5);
+    }
+
+    #[test]
+    fn test_limit_validation() {
+        let tart = |macos, total| {
+            toml::from_str::<TartConfig>(&format!(
+                "base_image = \"x\"\nmax_macos_vms = {macos}\nmax_total_vms = {total}"
+            ))
+            .unwrap()
+        };
+        assert!(tart(1, 5).limit_errors().is_empty());
+        assert!(tart(2, 1).limit_errors().is_empty());
+        assert_eq!(tart(0, 5).limit_errors().len(), 1);
+        assert_eq!(tart(3, 5).limit_errors().len(), 1);
+        assert_eq!(tart(2, 0).limit_errors().len(), 1);
     }
 }

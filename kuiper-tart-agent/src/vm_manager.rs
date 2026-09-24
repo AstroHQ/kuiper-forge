@@ -1,13 +1,14 @@
 //! VM Manager - handles VM lifecycle for the Tart agent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kuiper_agent_proto::VmInfo;
+use kuiper_agent_proto::{CapacityLimit, VmInfo};
+use serde::Deserialize;
 use tokio::process::Command;
 use tokio::sync::{Notify, RwLock};
 use tokio::time::{Instant, timeout};
@@ -15,6 +16,10 @@ use tokio::time::{Instant, timeout};
 /// Timeout for tart CLI commands (clone, stop, delete, ip).
 /// This prevents the agent from hanging indefinitely if tart gets stuck.
 const TART_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How often to re-count tart VMs this agent doesn't manage.
+pub const EXTERNAL_POLL_INTERVAL: Duration = Duration::from_secs(15);
+
 use tracing::{debug, error, info, warn};
 
 use crate::config::TartConfig;
@@ -80,14 +85,35 @@ impl From<&VmState> for VmInfo {
     }
 }
 
+/// Running tart VMs this agent doesn't manage (started by hand, another tool, a previous agent run). They use up
+/// the same host-wide limits as runner VMs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExternalVms {
+    pub macos: u32,
+    /// Any OS, macOS included
+    pub total: u32,
+}
+
+#[derive(Deserialize)]
+struct TartListEntry {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Running", default)]
+    running: bool,
+}
+
+#[derive(Deserialize)]
+struct TartGetInfo {
+    #[serde(rename = "OS")]
+    os: String,
+}
+
 /// Manages Tart VMs for the agent.
 pub struct VmManager {
     /// Tart configuration
     config: TartConfig,
     /// SSH configuration
     ssh_config: SshConfig,
-    /// Maximum concurrent VMs
-    max_concurrent: u32,
     /// Active VMs tracked by ID
     active_vms: Arc<RwLock<HashMap<String, VmState>>>,
     /// Directory for runner log files
@@ -96,19 +122,20 @@ pub struct VmManager {
     /// Used by the agent's main loop to push immediate AgentStatus updates so
     /// the coordinator's view doesn't lag the agent's true capacity.
     state_changed: Arc<Notify>,
+    /// Last count from `refresh_external`
+    external: RwLock<ExternalVms>,
 }
 
 impl VmManager {
     /// Create a new VM manager.
     pub fn new(config: TartConfig, ssh_config: SshConfig, log_dir: PathBuf) -> Self {
-        let max_concurrent = config.max_concurrent_vms;
         Self {
             config,
             ssh_config,
-            max_concurrent,
             active_vms: Arc::new(RwLock::new(HashMap::new())),
             log_dir,
             state_changed: Arc::new(Notify::new()),
+            external: RwLock::new(ExternalVms::default()),
         }
     }
 
@@ -123,15 +150,112 @@ impl VmManager {
         self.active_vms.read().await.len()
     }
 
-    /// Get the number of available slots.
+    /// Get the number of available slots, after VMs this agent doesn't manage.
     pub async fn available_slots(&self) -> u32 {
-        let active = self.active_vms.read().await.len() as u32;
-        self.max_concurrent.saturating_sub(active)
+        let external = *self.external.read().await;
+        let active = self.active_vms.read().await.len();
+        self.free_slots(active, external)
     }
 
-    /// Get maximum VM capacity.
+    /// Runner VMs are always macOS (the runner is started through the macOS GUI session), so each one counts
+    /// against both limits.
+    fn free_slots(&self, active: usize, external: ExternalVms) -> u32 {
+        let active = active as u32;
+        let macos = self
+            .config
+            .max_macos_vms
+            .saturating_sub(active + external.macos);
+        let total = self
+            .config
+            .max_total_vms
+            .saturating_sub(active + external.total);
+        macos.min(total)
+    }
+
+    /// Get maximum VM capacity when nothing else is running on the host.
     pub fn max_vms(&self) -> u32 {
-        self.max_concurrent
+        self.config.max_macos_vms.min(self.config.max_total_vms)
+    }
+
+    /// The host-wide limits with current external usage, for `AgentStatus`.
+    pub async fn limits(&self) -> Vec<CapacityLimit> {
+        let external = *self.external.read().await;
+        vec![
+            CapacityLimit {
+                name: "macos".to_string(),
+                max: self.config.max_macos_vms,
+                external: external.macos,
+            },
+            CapacityLimit {
+                name: "total".to_string(),
+                max: self.config.max_total_vms,
+                external: external.total,
+            },
+        ]
+    }
+
+    /// Current usage against both limits, e.g. for a capacity rejection.
+    pub async fn capacity_summary(&self) -> String {
+        let external = *self.external.read().await;
+        let active = self.active_vms.read().await.len();
+        self.format_capacity(active, external)
+    }
+
+    fn format_capacity(&self, active: usize, external: ExternalVms) -> String {
+        let active = active as u32;
+        format!(
+            "macOS {}/{} ({} external), total {}/{} ({} external)",
+            active + external.macos,
+            self.config.max_macos_vms,
+            external.macos,
+            active + external.total,
+            self.config.max_total_vms,
+            external.total,
+        )
+    }
+
+    /// Re-count running tart VMs this agent doesn't manage. Keeps the last count if tart fails.
+    pub async fn refresh_external(&self) {
+        let external = match self.count_external().await {
+            Ok(external) => external,
+            Err(e) => {
+                warn!("Failed to count external tart VMs: {}", e);
+                return;
+            }
+        };
+        let old = std::mem::replace(&mut *self.external.write().await, external);
+        if old != external {
+            info!(
+                "External tart VMs changed: {} macOS, {} total (was {} macOS, {} total)",
+                external.macos, external.total, old.macos, old.total
+            );
+            self.state_changed.notify_one();
+        }
+    }
+
+    async fn count_external(&self) -> Result<ExternalVms> {
+        // ours can start or finish while `tart list` runs, so take our names from both sides of it
+        let mut ours: HashSet<String> = self.active_vms.read().await.keys().cloned().collect();
+        let running = self.tart_running_vms().await?;
+        ours.extend(self.active_vms.read().await.keys().cloned());
+
+        let mut external = ExternalVms::default();
+        for name in running.iter().filter(|name| !ours.contains(*name)) {
+            external.total += 1;
+
+            // unknown counts as macOS so we don't overbook the stricter limit
+            let is_macos = match self.tart_os(name).await {
+                Ok(os) => os == "darwin",
+                Err(e) => {
+                    warn!("Couldn't get OS of tart VM {}, assuming macOS: {}", name, e);
+                    true
+                }
+            };
+            if is_macos {
+                external.macos += 1;
+            }
+        }
+        Ok(external)
     }
 
     /// Get current VM states.
@@ -148,31 +272,31 @@ impl VmManager {
     ///
     /// Returns the VM ID on success.
     pub async fn create_vm(&self, vm_name: &str, template: &str) -> Result<String> {
-        // Check capacity
+        // check and insert under one lock so two creates can't both take the last slot
         {
-            let active = self.active_vms.read().await;
-            if active.len() >= self.max_concurrent as usize {
-                return Err(Error::CapacityExceeded(self.max_concurrent));
+            let external = *self.external.read().await;
+            let mut active = self.active_vms.write().await;
+            if self.free_slots(active.len(), external) == 0 {
+                return Err(Error::CapacityExceeded(
+                    self.format_capacity(active.len(), external),
+                ));
             }
             if active.contains_key(vm_name) {
                 return Err(Error::VmAlreadyRunning(vm_name.to_string()));
             }
+
+            info!("Creating VM {} from template {}", vm_name, template);
+            active.insert(
+                vm_name.to_string(),
+                VmState {
+                    vm_id: vm_name.to_string(),
+                    name: vm_name.to_string(),
+                    state: VmStatus::Creating,
+                    ip_address: None,
+                    created_at: Instant::now(),
+                },
+            );
         }
-
-        info!("Creating VM {} from template {}", vm_name, template);
-
-        // Track VM as creating
-        let vm_state = VmState {
-            vm_id: vm_name.to_string(),
-            name: vm_name.to_string(),
-            state: VmStatus::Creating,
-            ip_address: None,
-            created_at: Instant::now(),
-        };
-        self.active_vms
-            .write()
-            .await
-            .insert(vm_name.to_string(), vm_state);
         self.state_changed.notify_one();
 
         // Clone the VM
@@ -486,6 +610,50 @@ impl VmManager {
         }
     }
 
+    /// Names of running local VMs (any owner).
+    async fn tart_running_vms(&self) -> Result<Vec<String>> {
+        let output = timeout(
+            TART_COMMAND_TIMEOUT,
+            Command::new("tart")
+                .args(["list", "--source", "local", "--format", "json"])
+                .output(),
+        )
+        .await
+        .map_err(|_| Error::Timeout("tart list"))??;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Tart(format!("list failed: {stderr}")));
+        }
+        let entries: Vec<TartListEntry> = serde_json::from_slice(&output.stdout)
+            .map_err(|e| Error::Tart(format!("bad `tart list` output: {e}")))?;
+        Ok(entries
+            .into_iter()
+            .filter(|e| e.running)
+            .map(|e| e.name)
+            .collect())
+    }
+
+    /// Guest OS of a VM, e.g. "darwin" or "linux".
+    async fn tart_os(&self, name: &str) -> Result<String> {
+        let output = timeout(
+            TART_COMMAND_TIMEOUT,
+            Command::new("tart")
+                .args(["get", name, "--format", "json"])
+                .output(),
+        )
+        .await
+        .map_err(|_| Error::Timeout("tart get"))??;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Tart(format!("get failed: {stderr}")));
+        }
+        let info: TartGetInfo = serde_json::from_slice(&output.stdout)
+            .map_err(|e| Error::Tart(format!("bad `tart get` output: {e}")))?;
+        Ok(info.os)
+    }
+
     /// Get the IP address of a VM.
     async fn tart_ip(&self, name: &str) -> Result<Option<Ipv4Addr>> {
         let output = timeout(
@@ -527,7 +695,8 @@ mod tests {
     async fn test_vm_manager_capacity() {
         let config = TartConfig {
             base_image: "test".to_string(),
-            max_concurrent_vms: 2,
+            max_macos_vms: 2,
+            max_total_vms: 3,
             shared_cache_dir: None,
             ssh: Default::default(),
             runner_version: "latest".to_string(),
@@ -539,5 +708,46 @@ mod tests {
         assert_eq!(manager.max_vms(), 2);
         assert_eq!(manager.available_slots().await, 2);
         assert_eq!(manager.active_count().await, 0);
+    }
+
+    #[test]
+    fn test_free_slots_counts_external_vms() {
+        let config = TartConfig {
+            base_image: "test".to_string(),
+            max_macos_vms: 2,
+            max_total_vms: 3,
+            shared_cache_dir: None,
+            ssh: Default::default(),
+            runner_version: "latest".to_string(),
+            image_mappings: Vec::new(),
+        };
+        let manager = VmManager::new(config, SshConfig::default(), std::env::temp_dir());
+        let ext = |macos, total| ExternalVms { macos, total };
+
+        // one external mac leaves one mac slot
+        assert_eq!(manager.free_slots(0, ext(1, 1)), 1);
+        assert_eq!(manager.free_slots(1, ext(1, 1)), 0);
+
+        // external linux VMs only use up the total limit
+        assert_eq!(manager.free_slots(0, ext(0, 2)), 1);
+        assert_eq!(manager.free_slots(0, ext(0, 3)), 0);
+
+        // over the limit doesn't underflow
+        assert_eq!(manager.free_slots(2, ext(2, 4)), 0);
+    }
+
+    #[test]
+    fn test_parse_tart_list() {
+        let json = r#"[
+            {"Name": "a", "Running": true, "State": "running", "Source": "local"},
+            {"Name": "b", "Running": false, "State": "stopped", "Source": "local"}
+        ]"#;
+        let entries: Vec<TartListEntry> = serde_json::from_str(json).unwrap();
+        let running: Vec<_> = entries
+            .iter()
+            .filter(|e| e.running)
+            .map(|e| &e.name)
+            .collect();
+        assert_eq!(running, ["a"]);
     }
 }

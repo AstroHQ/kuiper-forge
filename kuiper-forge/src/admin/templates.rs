@@ -61,12 +61,38 @@ pub struct AgentSummary {
     pub agent_type: String,
     pub label_sets: Vec<Vec<String>>,
     pub max_vms: u32,
+    /// Only known while the agent is connected
+    pub limits: Vec<LimitView>,
     pub is_online: bool,
     pub active_vms: usize,
     pub created_at: DateTime<Utc>,
     pub revoked: bool,
     /// None for agents that predate version reporting
     pub version: Option<String>,
+}
+
+/// Usage of one of an agent's host-wide limits
+pub struct LimitView {
+    pub name: String,
+    /// The agent's own VMs plus external ones
+    pub used: usize,
+    pub max: usize,
+    pub external: usize,
+}
+
+impl LimitView {
+    pub fn from_agent(agent: &crate::agent_registry::AgentInfo) -> Vec<Self> {
+        agent
+            .limits
+            .iter()
+            .map(|l| Self {
+                name: l.name.clone(),
+                used: agent.active_vms + l.external,
+                max: l.max,
+                external: l.external,
+            })
+            .collect()
+    }
 }
 
 /// Agent detail page template

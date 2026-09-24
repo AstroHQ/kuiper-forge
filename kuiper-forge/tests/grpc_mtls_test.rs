@@ -310,6 +310,7 @@ async fn test_agent_service_requires_mtls_grpc_only_mode() {
             max_vms: 2,
             label_sets: vec![],
             agent_version: String::new(),
+            limits: vec![],
         })),
     })
     .await
@@ -392,6 +393,7 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
             max_vms: 2,
             label_sets: vec![],
             agent_version: String::new(),
+            limits: vec![],
         })),
     })
     .await
@@ -744,6 +746,7 @@ async fn connect_with_version(
             max_vms: 1,
             label_sets: vec![],
             agent_version: version.to_string(),
+            limits: vec![],
         })),
     })
     .await

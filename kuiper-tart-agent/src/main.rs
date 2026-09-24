@@ -186,7 +186,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("kuiper-tart-agent starting");
     info!("Coordinator: {}", config.coordinator.url);
-    info!("Max concurrent VMs: {}", config.tart.max_concurrent_vms);
+    info!(
+        "Max VMs: {} macOS, {} total",
+        config.tart.max_macos_vms, config.tart.max_total_vms
+    );
 
     // Build label_sets: each set is base_labels + one image_mapping's labels,
     // representing the capabilities this agent can fulfill (shared with the
@@ -233,7 +236,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Create agent instance. Pass the agent-level metadata (labels, label_sets)
-    // through; max_vms is read from config.tart.max_concurrent_vms in build_status.
+    // through; max_vms and limits come from vm_manager in build_status.
     let agent = TartAgent::new(
         agent_config,
         cert_store,
@@ -258,6 +261,17 @@ async fn main() -> anyhow::Result<()> {
             info!("Running stale VM cleanup");
             cleanup_vm_manager.cleanup_stale_vms(max_age).await;
             cleanup_old_logs(&cleanup_log_dir, log_retention_days);
+        }
+    });
+
+    // count external VMs before the first status so the coordinator never sees too many free slots
+    vm_manager.refresh_external().await;
+    let external_vm_manager = vm_manager.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(vm_manager::EXTERNAL_POLL_INTERVAL);
+        loop {
+            ticker.tick().await;
+            external_vm_manager.refresh_external().await;
         }
     });
 
@@ -380,7 +394,8 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         agent: config::AgentConfig { labels: vec![] },
         tart: config::TartConfig {
             base_image: String::new(), // User must set
-            max_concurrent_vms: 2,
+            max_macos_vms: config::MACOS_GUEST_LIMIT,
+            max_total_vms: 5,
             shared_cache_dir: None,
             ssh: config::SshAuthConfig::default(),
             runner_version: "latest".to_string(),
@@ -409,7 +424,7 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
     println!("  1. Edit {} and configure:", config_path.display());
     println!("     • agent.labels (e.g., [\"macos\", \"arm64\", \"sequoia\"])");
     println!("     • tart.base_image (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
-    println!("     • tart.max_concurrent_vms (default: 2)");
+    println!("     • tart.max_macos_vms (default: 2) and tart.max_total_vms (default: 5)");
     println!("  2. Ensure base image is pulled: tart pull <image>");
     println!("  3. Start agent: kuiper-tart-agent\n");
 
@@ -619,13 +634,9 @@ impl TartAgent {
 
 impl TartAgent {
     async fn has_capacity(&self) -> bool {
+        // an external VM may have started since the last poll
+        self.vm_manager.refresh_external().await;
         self.vm_manager.available_slots().await > 0
-    }
-
-    /// `(active, max)` VM counts — for the capacity-rejection message.
-    async fn capacity(&self) -> (u32, u32) {
-        let active = self.vm_manager.active_count().await as u32;
-        (active, self.vm_manager.max_vms())
     }
 
     /// Read commands from the coordinator and act on them: check capacity, ack,
@@ -635,17 +646,17 @@ impl TartAgent {
             match command {
                 runtime::RunnerCommand::Create(cmd) => {
                     if !self.has_capacity().await {
-                        let (active, max) = self.capacity().await;
+                        let summary = self.vm_manager.capacity_summary().await;
                         warn!(
-                            "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                            cmd.vm_name, active, max
+                            "Rejecting CreateRunner for vm={}: at capacity ({})",
+                            cmd.vm_name, summary
                         );
                         let _ = connection
                             .events
                             .command_ack(
                                 cmd.command_id,
                                 false,
-                                format!("Capacity exceeded: max {max} VMs"),
+                                format!("Capacity exceeded: {summary}"),
                             )
                             .await;
                         continue;
@@ -856,9 +867,10 @@ impl TartAgent {
             hostname,
             agent_type: self.agent_config.agent_type.clone(),
             labels: self.labels.clone(),
-            max_vms: self.config.tart.max_concurrent_vms,
+            max_vms: self.vm_manager.max_vms(),
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            limits: self.vm_manager.limits().await,
         }
     }
 }

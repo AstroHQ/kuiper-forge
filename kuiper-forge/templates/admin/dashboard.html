@@ -127,7 +127,12 @@
                         <span class="badge badge-offline">Offline</span>
                         {% endif %}
                     </td>
-                    <td>{{ agent.active_vms }}/{{ agent.max_vms }}</td>
+                    <td>
+                        {{ agent.active_vms }}/{{ agent.max_vms }}
+                        {% for limit in agent.limits %}
+                        <div class="muted">{{ limit.name }} {{ limit.used }}/{{ limit.max }}{% if limit.external > 0 %} ({{ limit.external }} external){% endif %}</div>
+                        {% endfor %}
+                    </td>
                     <td>
                         {% for label_set in agent.label_sets %}
                         <div style="margin-bottom: 2px;">
