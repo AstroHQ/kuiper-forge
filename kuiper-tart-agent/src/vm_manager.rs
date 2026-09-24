@@ -149,17 +149,18 @@ impl VmCounts {
     }
 }
 
+// some tart 2.x builds emit lowercase keys, same as `host_checks::TartImage`
 #[derive(Deserialize)]
 struct TartListEntry {
-    #[serde(rename = "Name")]
+    #[serde(rename = "Name", alias = "name")]
     name: String,
-    #[serde(rename = "Running", default)]
+    #[serde(rename = "Running", alias = "running", default)]
     running: bool,
 }
 
 #[derive(Deserialize)]
 struct TartGetInfo {
-    #[serde(rename = "OS")]
+    #[serde(rename = "OS", alias = "os")]
     os: String,
 }
 
@@ -924,6 +925,19 @@ mod tests {
         assert_eq!(GuestOs::from_tart("linux"), GuestOs::Linux);
         assert_eq!(GuestOs::from_tart("darwin"), GuestOs::MacOS);
         assert_eq!(GuestOs::from_tart(""), GuestOs::MacOS);
+    }
+
+    #[test]
+    fn test_parse_tart_json_lowercase_keys() {
+        let entries: Vec<TartListEntry> =
+            serde_json::from_str(r#"[{"name": "a", "running": true}]"#).unwrap();
+        assert_eq!(entries[0].name, "a");
+        assert!(entries[0].running);
+
+        let info: TartGetInfo = serde_json::from_str(r#"{"os": "linux", "cpu": 4}"#).unwrap();
+        assert_eq!(info.os, "linux");
+        let info: TartGetInfo = serde_json::from_str(r#"{"OS": "darwin", "CPU": 4}"#).unwrap();
+        assert_eq!(info.os, "darwin");
     }
 
     #[test]
