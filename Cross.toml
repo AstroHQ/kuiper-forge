@@ -1,9 +1,12 @@
+# cross images are ubuntu 20.04, its apt protoc is 3.6 which rejects proto3 `optional`, so grab a release build instead
 [target.x86_64-unknown-linux-musl]
 pre-build = [
-    "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y protobuf-compiler cmake clang"
+    "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip cmake clang",
+    "curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip && unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && rm /tmp/protoc.zip"
 ]
 
 [target.aarch64-unknown-linux-musl]
 pre-build = [
-    "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y protobuf-compiler cmake clang"
+    "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip cmake clang",
+    "curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip && unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && rm /tmp/protoc.zip"
 ]
