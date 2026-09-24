@@ -10,15 +10,16 @@ use std::time::Duration;
 use chrono::Local;
 use russh::ChannelMsg;
 use russh::client::{self, Config, Handle, Handler};
-use russh::keys::PrivateKey;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::ssh_key::PublicKey;
+use russh::keys::{HashAlg, PrivateKey};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
 use crate::error::{Error, Result};
+use crate::vm_manager::GuestOs;
 
 /// SSH authentication method.
 #[derive(Debug, Clone, Default)]
@@ -144,6 +145,20 @@ fn load_key(path: &PathBuf) -> Result<PrivateKey> {
     PrivateKey::from_openssh(&key_data).map_err(|e| Error::Ssh(format!("Failed to parse key: {e}")))
 }
 
+/// RSA keys need a SHA-2 signature: OpenSSH 8.8+ turned off `ssh-rsa` (SHA-1) by default, and russh uses SHA-1 when
+/// the hash is `None`. Other key types ignore the hash.
+async fn rsa_hash<H: Handler>(session: &Handle<H>, key: &PrivateKey) -> Option<HashAlg> {
+    if !key.algorithm().is_rsa() {
+        return None;
+    }
+    match session.best_supported_rsa_hash().await {
+        Ok(Some(hash)) => hash,
+
+        // server didn't list its algorithms, assume a modern one
+        _ => Some(HashAlg::Sha256),
+    }
+}
+
 /// Establish an SSH connection to a remote host.
 async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>> {
     let ssh_config = Config::default();
@@ -178,7 +193,8 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
                 key_path, config.username
             );
             let key = load_key(key_path)?;
-            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            let hash = rsa_hash(&session, &key).await;
+            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
             session
                 .authenticate_publickey(&config.username, key_with_hash)
                 .await
@@ -201,7 +217,8 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
                     key_path, config.username
                 );
                 let key = load_key(&key_path)?;
-                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+                let hash = rsa_hash(&session, &key).await;
+                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
                 session
                     .authenticate_publickey(&config.username, key_with_hash)
                     .await
@@ -292,136 +309,6 @@ fn log_command_stderr(e: &Error) {
     }
 }
 
-/// Execute a command on a remote host via SSH, streaming output to a log file.
-///
-/// This is designed for long-running commands like the GitHub runner where we want
-/// to capture all output for debugging purposes.
-///
-/// NOTE: For macOS GUI context requirements, use `start_runner_gui_and_wait` instead.
-#[allow(dead_code)]
-pub async fn ssh_exec_with_logging(
-    ip: Ipv4Addr,
-    config: &SshConfig,
-    command: &str,
-    log_path: &Path,
-) -> Result<()> {
-    let session = connect(ip, config).await?;
-
-    info!(
-        local_only = tracing::field::Empty,
-        "SSH exec (logged to {}): {}",
-        log_path.display(),
-        command
-    );
-
-    // Open log file for appending
-    let mut log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to open log file: {e}")))?;
-
-    // Write header with timestamp
-    let header = format!(
-        "\n=== Runner started at {} ===\n=== Command: {} ===\n\n",
-        Local::now().format("%Y-%m-%d %H:%M:%S"),
-        command
-    );
-    log_file
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to write to log file: {e}")))?;
-
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to open channel: {e}")))?;
-
-    channel
-        .exec(true, command)
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to exec command: {e}")))?;
-
-    let mut exit_status = None;
-
-    loop {
-        let msg = channel.wait().await;
-        match msg {
-            Some(ChannelMsg::Data { data }) => {
-                // Write stdout to log file
-                log_file
-                    .write_all(&data)
-                    .await
-                    .map_err(|e| Error::Ssh(format!("Failed to write stdout to log: {e}")))?;
-                // Also log to tracing at debug level for real-time visibility
-                if let Ok(text) = std::str::from_utf8(&data) {
-                    for line in text.lines() {
-                        debug!(
-                            local_only = tracing::field::Empty,
-                            "[runner stdout] {}", line
-                        );
-                    }
-                }
-            }
-            Some(ChannelMsg::ExtendedData { data, ext }) => {
-                if ext == 1 {
-                    // stderr - prefix with [stderr] in log
-                    let prefixed: Vec<u8> = data.iter().copied().collect();
-                    log_file
-                        .write_all(&prefixed)
-                        .await
-                        .map_err(|e| Error::Ssh(format!("Failed to write stderr to log: {e}")))?;
-                    // Log stderr at info level since it's often important
-                    if let Ok(text) = std::str::from_utf8(&data) {
-                        for line in text.lines() {
-                            info!(
-                                local_only = tracing::field::Empty,
-                                "[runner stderr] {}", line
-                            );
-                        }
-                    }
-                }
-            }
-            Some(ChannelMsg::ExitStatus {
-                exit_status: status,
-            }) => {
-                exit_status = Some(status);
-            }
-            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-            Some(_) => {}
-        }
-    }
-
-    // Write footer with exit status
-    let exit_code = exit_status.unwrap_or(0);
-    let footer = format!(
-        "\n=== Runner exited at {} with code {} ===\n",
-        Local::now().format("%Y-%m-%d %H:%M:%S"),
-        exit_code
-    );
-    log_file
-        .write_all(footer.as_bytes())
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to write to log file: {e}")))?;
-
-    // Ensure everything is flushed
-    log_file
-        .flush()
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to flush log file: {e}")))?;
-
-    if exit_code == 0 {
-        Ok(())
-    } else {
-        Err(Error::Ssh(format!(
-            "SSH command failed (exit code: {}). See log: {}",
-            exit_code,
-            log_path.display()
-        )))
-    }
-}
-
 use kuiper_agent_lib::github_runner::{self, Arch, Platform};
 use kuiper_agent_lib::shell::escape_posix;
 
@@ -432,6 +319,7 @@ pub async fn ensure_runner_installed(
     ip: Ipv4Addr,
     config: &SshConfig,
     runner_version: &str,
+    os: GuestOs,
 ) -> Result<()> {
     // Check if runner is already installed
     let check_cmd =
@@ -472,16 +360,20 @@ pub async fn ensure_runner_installed(
         ))
     })?;
 
+    let platform = match os {
+        GuestOs::MacOS => Platform::MacOS,
+        GuestOs::Linux => Platform::Linux,
+    };
     info!(
-        "Installing GitHub Actions runner v{} for osx-{} on {}",
+        "Installing GitHub Actions runner v{} for {}-{} on {}",
         version,
+        platform.as_str(),
         arch.as_str(),
         ip
     );
 
     // Generate install script from template
-    let install_cmd =
-        github_runner::install_command("~/actions-runner", &version, Platform::MacOS, arch);
+    let install_cmd = github_runner::install_command("~/actions-runner", &version, platform, arch);
 
     match ssh_exec(ip, config, &install_cmd).await {
         Ok(output) => {
@@ -502,6 +394,7 @@ pub async fn ensure_runner_installed(
 
 /// Configure the GitHub Actions runner on a VM.
 /// Automatically installs the runner if not present.
+#[allow(clippy::too_many_arguments)]
 pub async fn configure_runner(
     ip: Ipv4Addr,
     config: &SshConfig,
@@ -510,6 +403,7 @@ pub async fn configure_runner(
     runner_scope_url: &str,
     runner_name: &str,
     runner_version: &str,
+    os: GuestOs,
 ) -> Result<()> {
     let labels_str = labels.join(",");
 
@@ -527,7 +421,7 @@ pub async fn configure_runner(
     }
 
     // Ensure runner is installed first
-    ensure_runner_installed(ip, config, runner_version).await?;
+    ensure_runner_installed(ip, config, runner_version, os).await?;
 
     info!(
         "Configuring runner {} with labels: {} (scope: {})",
@@ -567,66 +461,29 @@ pub async fn configure_runner(
     }
 }
 
-/// Start the GitHub Actions runner and wait for it to complete.
-///
-/// For ephemeral runners, the process exits when the job completes.
-/// Returns Ok if the runner exited normally (exit code 0), Err otherwise.
-///
-/// All runner output (stdout/stderr) is captured to the specified log file.
-///
-/// NOTE: This runs the runner directly via SSH. For operations requiring macOS
-/// GUI context (code signing, keychain, notarization), use `start_runner_gui_and_wait` instead.
-#[allow(dead_code)]
-pub async fn start_runner_and_wait(
-    ip: Ipv4Addr,
-    config: &SshConfig,
-    log_path: &Path,
-) -> Result<()> {
-    info!(
-        "Starting runner on {} (logging to {})",
-        ip,
-        log_path.display()
-    );
+/// Wrapper script for running the GitHub Actions runner. It's plain bash, so linux runs the same script headless.
+const RUNNER_SCRIPT: &str = kuiper_agent_lib::github_runner::GUI_RUNNER_SCRIPT_MACOS;
 
-    // Run the runner - for ephemeral runners, this blocks until the job completes
-    // Use a login shell to ensure PATH includes Homebrew and other user-installed tools
-    let run_cmd = "zsh -l -c 'cd ~/actions-runner && ./run.sh'";
-
-    match ssh_exec_with_logging(ip, config, run_cmd, log_path).await {
-        Ok(()) => {
-            info!("Runner completed successfully on {}", ip);
-            Ok(())
-        }
-        Err(e) => {
-            // For ephemeral runners, exit code 0 means success, anything else is a problem
-            error!("Runner failed on {}: {}", ip, e);
-            Err(e)
-        }
-    }
-}
-
-/// Wrapper script for running the GitHub Actions runner in GUI context.
-/// This script is uploaded to the VM and launched via Terminal.app.
-const GUI_RUNNER_SCRIPT: &str = kuiper_agent_lib::github_runner::GUI_RUNNER_SCRIPT_MACOS;
-
-/// Start the GitHub Actions runner in a GUI context using Terminal.app.
+/// Start the GitHub Actions runner in the background and wait for it to complete.
 ///
-/// This launches the runner via `open -a Terminal` which provides access to
+/// On macOS this launches the runner via `open -a Terminal`, which provides access to
 /// macOS GUI services (code signing, keychain, notarization, etc.) that don't
-/// work in a headless SSH session.
+/// work in a headless SSH session. On linux it's a detached process.
 ///
 /// For ephemeral runners, the process exits when the job completes.
 /// Returns Ok if the runner exited normally (exit code 0), Err otherwise.
 ///
 /// All runner output is captured to the specified log file by polling.
-pub async fn start_runner_gui_and_wait(
+pub async fn start_runner_and_wait(
     ip: Ipv4Addr,
     config: &SshConfig,
     log_path: &Path,
     jit_config: &str,
+    os: GuestOs,
 ) -> Result<()> {
     info!(
-        "Starting runner in GUI mode on {} (logging to {})",
+        "Starting runner ({:?}) on {} (logging to {})",
+        os,
         ip,
         log_path.display()
     );
@@ -634,7 +491,7 @@ pub async fn start_runner_gui_and_wait(
     // Upload the runner wrapper script to the VM
     let script_path = "~/start-runner.sh";
     let upload_cmd = format!(
-        "cat > {script_path} << 'RUNNER_SCRIPT_EOF'\n{GUI_RUNNER_SCRIPT}\nRUNNER_SCRIPT_EOF\nchmod +x {script_path}"
+        "cat > {script_path} << 'RUNNER_SCRIPT_EOF'\n{RUNNER_SCRIPT}\nRUNNER_SCRIPT_EOF\nchmod +x {script_path}"
     );
     ssh_exec(ip, config, &upload_cmd)
         .await
@@ -642,7 +499,7 @@ pub async fn start_runner_gui_and_wait(
     debug!("Uploaded runner script to {}", script_path);
 
     // If JIT config is provided, write it to a file on the VM.
-    // The GUI runner script checks for this file and passes --jitconfig to run.sh.
+    // The runner script checks for this file and passes --jitconfig to run.sh.
     if !jit_config.is_empty() {
         info!("Writing JIT config to VM {} (skipping config.sh)", ip);
         let write_jit_cmd =
@@ -655,12 +512,19 @@ pub async fn start_runner_gui_and_wait(
     // Clean up any previous signal file
     let _ = ssh_exec(ip, config, "rm -f ~/runner-exit-status").await;
 
-    // Launch via Terminal.app for GUI context
-    let launch_cmd = format!("open -a Terminal {script_path}");
+    let launch_cmd = match os {
+        GuestOs::MacOS => format!("open -a Terminal {script_path}"),
+
+        // login shell for the user's PATH. setsid + nohup + no open fds so it outlives this SSH session and the
+        // exec returns right away
+        GuestOs::Linux => {
+            format!("setsid nohup bash -l {script_path} > /dev/null 2>&1 < /dev/null &")
+        }
+    };
     ssh_exec(ip, config, &launch_cmd)
         .await
-        .map_err(|e| Error::Ssh(format!("Failed to launch runner in Terminal: {e}")))?;
-    info!("Runner launched in Terminal.app GUI context on {}", ip);
+        .map_err(|e| Error::Ssh(format!("Failed to launch runner: {e}")))?;
+    info!("Runner launched on {}", ip);
 
     // Open local log file for writing
     let mut log_file = OpenOptions::new()
@@ -672,7 +536,7 @@ pub async fn start_runner_gui_and_wait(
 
     // Write header
     let header = format!(
-        "\n=== Runner (GUI mode) started at {} ===\n\n",
+        "\n=== Runner started at {} ===\n\n",
         Local::now().format("%Y-%m-%d %H:%M:%S"),
     );
     log_file
@@ -709,7 +573,7 @@ pub async fn start_runner_gui_and_wait(
 
                 // Write footer
                 let footer = format!(
-                    "\n=== Runner (GUI mode) exited at {} with code {} ===\n",
+                    "\n=== Runner exited at {} with code {} ===\n",
                     Local::now().format("%Y-%m-%d %H:%M:%S"),
                     exit_code
                 );
@@ -723,13 +587,10 @@ pub async fn start_runner_gui_and_wait(
                     .map_err(|e| Error::Ssh(format!("Failed to flush log: {e}")))?;
 
                 if exit_code == 0 {
-                    info!("Runner (GUI mode) completed successfully on {}", ip);
+                    info!("Runner completed successfully on {}", ip);
                     return Ok(());
                 } else {
-                    error!(
-                        "Runner (GUI mode) failed on {} with exit code {}",
-                        ip, exit_code
-                    );
+                    error!("Runner failed on {} with exit code {}", ip, exit_code);
                     return Err(Error::Ssh(format!(
                         "Runner failed (exit code: {}). See log: {}",
                         exit_code,
@@ -751,11 +612,17 @@ async fn poll_and_stream_log(
     log_file: &mut tokio::fs::File,
     last_log_size: u64,
 ) -> Result<u64> {
-    let size_str = match ssh_exec(ip, config, "wc -c < ~/runner.log 2>/dev/null || echo 0").await {
-        Ok(s) => s,
+    // size and new bytes from one snapshot, the runner can write between two separate calls
+    let from = last_log_size + 1;
+    let cmd = format!(
+        "n=$(( $(wc -c < ~/runner.log 2>/dev/null || echo 0) )); echo $n; \
+         if [ $n -gt {last_log_size} ]; then tail -c +{from} ~/runner.log | head -c $((n - {last_log_size})); fi"
+    );
+    let output = match ssh_exec(ip, config, &cmd).await {
+        Ok(output) => output,
         Err(_) => return Ok(last_log_size),
     };
-
+    let (size_str, new_content) = output.split_once('\n').unwrap_or((&output, ""));
     let current_size: u64 = match size_str.trim().parse() {
         Ok(s) => s,
         Err(_) => return Ok(last_log_size),
@@ -765,13 +632,7 @@ async fn poll_and_stream_log(
         return Ok(last_log_size);
     }
 
-    // Read new content using tail with byte offset
-    let bytes_to_read = current_size - last_log_size;
-    let tail_cmd = format!("tail -c {bytes_to_read} ~/runner.log 2>/dev/null");
-
-    if let Ok(new_content) = ssh_exec(ip, config, &tail_cmd).await
-        && !new_content.is_empty()
-    {
+    if !new_content.is_empty() {
         log_file
             .write_all(new_content.as_bytes())
             .await
@@ -779,7 +640,7 @@ async fn poll_and_stream_log(
 
         // Log to tracing for real-time visibility
         for line in new_content.lines() {
-            debug!(local_only = tracing::field::Empty, "[runner gui] {}", line);
+            debug!(local_only = tracing::field::Empty, "[runner] {}", line);
         }
     }
 

@@ -15,9 +15,10 @@ pub use proto::registration_service_client::RegistrationServiceClient;
 pub use proto::registration_service_server::{RegistrationService, RegistrationServiceServer};
 
 pub use proto::{
-    AgentMessage, AgentStatus, CommandAck, CommandResult, CoordinatorMessage, CreateRunnerCommand,
-    CreateRunnerResult, DestroyRunnerCommand, DestroyRunnerResult, LabelSet, LogBatch, LogRecord,
-    Ping, Pong, RegisterRequest, RegisterResponse, RunnerEvent, UploadLogsResponse, VmInfo,
+    AgentMessage, AgentStatus, CapacityLimit, CommandAck, CommandResult, CoordinatorMessage,
+    CreateRunnerCommand, CreateRunnerResult, DestroyRunnerCommand, DestroyRunnerResult, LabelSet,
+    LogBatch, LogRecord, Ping, Pong, RegisterRequest, RegisterResponse, RunnerEvent,
+    UploadLogsResponse, VmInfo,
 };
 
 // Re-export the payload enums for pattern matching

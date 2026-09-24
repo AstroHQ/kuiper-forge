@@ -111,7 +111,7 @@ struct TartImage {
 /// - `docker.io/library/image` -> OCI
 /// - `macos-sequoia-base` -> local
 /// - `my-image:latest` -> local
-fn is_oci_image(image: &str) -> bool {
+pub(crate) fn is_oci_image(image: &str) -> bool {
     // Look for pattern: domain.tld/path or domain:port/path
     if let Some(slash_pos) = image.find('/') {
         let prefix = &image[..slash_pos];

@@ -36,7 +36,12 @@
             </div>
 
             <div class="detail-label">Capacity</div>
-            <div>{{ agent.active_vms }} / {{ agent.max_vms }} VMs</div>
+            <div>
+                {{ agent.active_vms }} / {{ agent.max_vms }} VMs
+                {% for limit in agent.limits %}
+                <div class="muted">{{ limit.name }}: {{ limit.used }} / {{ limit.max }}{% if limit.external > 0 %}, {{ limit.external }} not managed by this agent{% endif %}</div>
+                {% endfor %}
+            </div>
 
             <div class="detail-label">Label Sets</div>
             <div>

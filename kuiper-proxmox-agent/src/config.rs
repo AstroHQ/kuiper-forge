@@ -72,11 +72,22 @@ pub struct TemplateMapping {
     pub labels: Vec<String>,
     /// The Proxmox template VMID to use when this mapping matches
     pub template_vmid: u32,
+    /// Runners to keep for this mapping in fixed-capacity mode. Setting it on any mapping means unset ones get none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<u32>,
 }
 
 impl kuiper_agent_lib::labels::LabelMapping for TemplateMapping {
     fn labels(&self) -> &[String] {
         &self.labels
+    }
+
+    fn pool(&self) -> Option<u32> {
+        self.pool
+    }
+
+    fn id(&self) -> String {
+        self.template_vmid.to_string()
     }
 }
 
@@ -147,14 +158,15 @@ pub const TEMPLATE_MAPPINGS_HELP: &str = r#"
 # the shared/base labels (e.g. ["self-hosted"]) and put the distinguishing
 # labels in the mappings — no need to repeat them in `agent.labels`.
 #
-# LIMITATION: this label-set routing only applies to WEBHOOK provisioning. In
-# FIXED-CAPACITY mode the coordinator pre-creates runners from `agent.labels`
-# only, so mapped labels (e.g. Windows/2022) are never pre-created and such jobs
-# won't match. Use webhook provisioning if you rely on template_mappings.
+# In FIXED-CAPACITY mode, set `pool` on a mapping to keep that many runners of
+# it. Once any mapping has `pool`, mappings without it get none. With no `pool`
+# anywhere the coordinator pre-creates `concurrent_vms` runners from
+# `agent.labels` only, and jobs needing mapped labels won't match them.
 #
 # [[vm.template_mappings]]
 # labels = ["Windows", "2022"]
 # template_vmid = 9001
+# pool = 1
 #
 # [[vm.template_mappings]]
 # labels = ["Windows", "2019"]

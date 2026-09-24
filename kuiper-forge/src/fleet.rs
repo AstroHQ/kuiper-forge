@@ -18,7 +18,7 @@ use kuiper_agent_proto::{
 };
 
 use crate::agent_failures::{AgentFailureStore, FailureKind};
-use crate::agent_registry::{AgentRegistry, PoolDefinition};
+use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
 use crate::github::RunnerTokenProvider;
 use crate::pending_jobs::PendingJobStore;
@@ -752,8 +752,16 @@ impl FleetManager {
             agent_id, job_id, labels
         );
 
+        // Generate runner name and command ID, the reservation is per runner
+        let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
+        let command_id = Uuid::new_v4().to_string();
+
         // Reserve a slot on the agent
-        if !self.agent_registry.reserve_slot(&agent_id).await {
+        if !self
+            .agent_registry
+            .reserve_slot(&agent_id, labels, "", &runner_name)
+            .await
+        {
             anyhow::bail!("Failed to reserve slot on agent {agent_id} (might be at capacity)");
         }
 
@@ -765,7 +773,9 @@ impl FleetManager {
                         "Job {} is no longer queued (status: {}) — skipping runner creation",
                         job_id, status
                     );
-                    self.agent_registry.release_slot(&agent_id).await;
+                    self.agent_registry
+                        .release_slot(&agent_id, &runner_name)
+                        .await;
                     self.pending_job_store.remove_job(job_id).await;
                     return Ok(());
                 }
@@ -774,7 +784,9 @@ impl FleetManager {
                         "Job {} not found on GitHub — removing from pending queue",
                         job_id
                     );
-                    self.agent_registry.release_slot(&agent_id).await;
+                    self.agent_registry
+                        .release_slot(&agent_id, &runner_name)
+                        .await;
                     self.pending_job_store.remove_job(job_id).await;
                     return Ok(());
                 }
@@ -789,10 +801,6 @@ impl FleetManager {
             }
         }
 
-        // Generate runner name and command ID
-        let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
-        let command_id = Uuid::new_v4().to_string();
-
         // Generate JIT config (webhook mode — runner is pre-assigned to this job)
         let jit_config = match self
             .token_provider
@@ -802,7 +810,9 @@ impl FleetManager {
             Ok(config) => config,
             Err(e) => {
                 // Release the reserved slot since we won't use it
-                self.agent_registry.release_slot(&agent_id).await;
+                self.agent_registry
+                    .release_slot(&agent_id, &runner_name)
+                    .await;
                 return Err(e);
             }
         };
@@ -818,6 +828,7 @@ impl FleetManager {
                 job_name.map(String::from),
                 repository.map(String::from),
                 workflow_name.map(String::from),
+                None, // pool
             )
             .await;
 
@@ -829,6 +840,7 @@ impl FleetManager {
             labels: labels.to_vec(),
             runner_scope_url: runner_scope.to_url(),
             jit_config,
+            label_set_id: String::new(), // the agent picks by job labels
         };
 
         let coordinator_msg = CoordinatorMessage {
@@ -913,7 +925,9 @@ impl FleetManager {
                                     &ack.error,
                                 )
                                 .await;
-                            agent_registry.release_slot(&agent_id_clone).await;
+                            agent_registry
+                                .release_slot(&agent_id_clone, &runner_name_clone)
+                                .await;
                             if let Err(e) = token_provider
                                 .remove_runner(&runner_scope, &runner_name_clone)
                                 .await
@@ -933,7 +947,9 @@ impl FleetManager {
                     }
                     Some(AgentPayload::Result(result)) => {
                         // Legacy agents may respond with a full lifecycle result
-                        agent_registry.release_slot(&agent_id_clone).await;
+                        agent_registry
+                            .release_slot(&agent_id_clone, &runner_name_clone)
+                            .await;
                         let mut reprovision = false;
                         if result.success {
                             match check_job_after_runner(
@@ -1014,7 +1030,9 @@ impl FleetManager {
                                 &format!("unexpected response to CreateRunner: {other:?}"),
                             )
                             .await;
-                        agent_registry.release_slot(&agent_id_clone).await;
+                        agent_registry
+                            .release_slot(&agent_id_clone, &runner_name_clone)
+                            .await;
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)
                             .await
@@ -1045,7 +1063,9 @@ impl FleetManager {
                             &format!("CreateRunner: {e:#}"),
                         )
                         .await;
-                    agent_registry.release_slot(&agent_id_clone).await;
+                    agent_registry
+                        .release_slot(&agent_id_clone, &runner_name_clone)
+                        .await;
                     if let Err(e_inner) = token_provider
                         .remove_runner(&runner_scope, &runner_name_clone)
                         .await
@@ -1207,7 +1227,9 @@ impl FleetManager {
 
                 // Runner still in state - we're the first to handle cleanup.
                 // Release the reserved slot on the agent.
-                self.agent_registry.release_slot(&event.agent_id).await;
+                self.agent_registry
+                    .release_slot(&event.agent_id, &runner_name)
+                    .await;
 
                 // a plain destroy of a fixed-capacity runner is normal, anything else means it died mid-job
                 if event_type == RunnerEventType::Destroyed
@@ -1481,12 +1503,12 @@ impl FleetManager {
 
     /// Warn (once per agent) about capabilities fixed-capacity mode can't pre-create.
     ///
-    /// Fixed-capacity pools are derived from each agent's flat `labels` (its base
+    /// Legacy fixed-capacity pools are derived from each agent's flat `labels` (its base
     /// labels), not its `label_sets`. So an agent advertising mapping-specific
     /// capabilities — e.g. via `vm.template_mappings` — gets runners pre-created
     /// with only its base labels, and jobs requiring a mapped label won't match.
-    /// Webhook provisioning is the mode that matches on `label_sets`; surface this
-    /// so the mismatch isn't silent.
+    /// Setting `pool` on the mappings or using webhook provisioning both match on
+    /// `label_sets`; surface this so the mismatch isn't silent.
     async fn warn_unprovisionable_capabilities(&self) {
         let agents = self.agent_registry.list_all().await;
         let mut warned = self
@@ -1494,7 +1516,7 @@ impl FleetManager {
             .lock()
             .expect("warned_capability_agents mutex poisoned");
 
-        for agent in &agents {
+        for agent in agents.iter().filter(|a| !a.explicit_pools) {
             let base: std::collections::HashSet<String> =
                 agent.labels.iter().map(|l| l.to_lowercase()).collect();
             let mut extra: Vec<String> = agent
@@ -1513,24 +1535,28 @@ impl FleetManager {
                     "Agent advertises capabilities {:?} only via label sets (e.g. \
                      vm.template_mappings), but fixed-capacity provisioning pre-creates runners \
                      from base labels {:?} only — jobs requiring those extra labels won't match \
-                     pre-created runners. Use webhook provisioning for label-based template selection.",
+                     pre-created runners. Set `pool` on the mappings to pre-create runners per \
+                     mapping, or use webhook provisioning.",
                     extra, agent.labels
                 );
             }
         }
     }
 
-    /// Count current runners (pending + active) for a pool by checking
-    /// the runner_state DB for all agents matching the pool's labels.
-    async fn count_runners_for_pool(&self, labels: &[String]) -> u32 {
+    /// Count current runners (pending + active) for a pool from the runner_state DB. An explicit pool counts its
+    /// agent's runners tagged with the pool, a legacy one all runners of the agents with its base labels.
+    async fn count_runners_for_pool(&self, pool_def: &PoolDefinition) -> u32 {
+        if let Some(agent_id) = &pool_def.agent_id {
+            return self
+                .runner_state
+                .count_runners_for_pool(agent_id, &pool_def.key())
+                .await as u32;
+        }
         let agents = self.agent_registry.list_all().await;
         let mut total = 0u32;
         for agent in &agents {
-            // Exact match: normalize agent labels the same way get_pool_definitions() does
-            let mut normalized: Vec<String> =
-                agent.labels.iter().map(|l| l.to_lowercase()).collect();
-            normalized.sort();
-            if normalized == labels {
+            // same members as legacy_pool_capacity and select_legacy_pool_agent
+            if !agent.explicit_pools && normalize_labels(&agent.labels) == pool_def.labels {
                 total += self
                     .runner_state
                     .count_runners_for_agent(&agent.agent_id)
@@ -1553,7 +1579,7 @@ impl FleetManager {
         // Count current runners from the database (source of truth).
         // This replaces the old in-memory pending_runners counter which could
         // diverge from reality when runners completed without decrementing.
-        let current = self.count_runners_for_pool(&pool_def.labels).await;
+        let current = self.count_runners_for_pool(pool_def).await;
 
         let target = pool_def.target_count;
 
@@ -1573,10 +1599,18 @@ impl FleetManager {
         let needed = target - current;
 
         // Check available capacity before trying to create runners
-        let capacity = self
-            .agent_registry
-            .available_capacity(&pool_def.labels)
-            .await;
+        let capacity = match &pool_def.agent_id {
+            Some(agent_id) => {
+                self.agent_registry
+                    .agent_capacity(agent_id, &pool_def.labels, &pool_def.label_set_id)
+                    .await
+            }
+            None => {
+                self.agent_registry
+                    .legacy_pool_capacity(&pool_def.labels)
+                    .await
+            }
+        };
 
         // Log all agents for debugging
         let all_agents = self.agent_registry.list_all().await;
@@ -1626,12 +1660,16 @@ impl FleetManager {
                 to_create
             );
 
-            // Find an available agent with matching labels
-            let agent_id = match self
-                .agent_registry
-                .find_available_agent(&pool_def.labels)
-                .await
-            {
+            // Find an available agent with matching labels, an explicit pool always uses its own agent
+            let found = match &pool_def.agent_id {
+                Some(agent_id) => Some(agent_id.clone()),
+                None => {
+                    self.agent_registry
+                        .select_legacy_pool_agent(&pool_def.labels)
+                        .await
+                }
+            };
+            let agent_id = match found {
                 Some(id) => {
                     info!("Found available agent: {}", id);
                     id
@@ -1647,8 +1685,21 @@ impl FleetManager {
                 }
             };
 
+            // Generate runner name and command ID, the reservation is per runner
+            let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
+            let command_id = Uuid::new_v4().to_string();
+
             // Reserve a slot on the agent to prevent over-scheduling
-            if !self.agent_registry.reserve_slot(&agent_id).await {
+            if !self
+                .agent_registry
+                .reserve_slot(
+                    &agent_id,
+                    &pool_def.labels,
+                    &pool_def.label_set_id,
+                    &runner_name,
+                )
+                .await
+            {
                 warn!(
                     "Failed to reserve slot on agent {} (might be at capacity now)",
                     agent_id
@@ -1667,14 +1718,12 @@ impl FleetManager {
                 Err(e) => {
                     error!("Failed to get registration token: {}", e);
                     // Release the reserved slot since we won't use it
-                    self.agent_registry.release_slot(&agent_id).await;
+                    self.agent_registry
+                        .release_slot(&agent_id, &runner_name)
+                        .await;
                     break;
                 }
             };
-
-            // Generate runner name and command ID
-            let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
-            let command_id = Uuid::new_v4().to_string();
 
             // Save runner state for crash recovery (no job_id in fixed capacity mode)
             self.runner_state
@@ -1687,6 +1736,7 @@ impl FleetManager {
                     None, // job_name
                     None, // repository
                     None, // workflow_name
+                    pool_def.agent_id.as_ref().map(|_| pool_def.key()),
                 )
                 .await;
 
@@ -1698,6 +1748,7 @@ impl FleetManager {
                 labels: pool_def.labels.clone(),
                 runner_scope_url: runner_scope.to_url(),
                 jit_config: String::new(),
+                label_set_id: pool_def.label_set_id.clone(),
             };
 
             let coordinator_msg = CoordinatorMessage {
@@ -1747,7 +1798,9 @@ impl FleetManager {
                                         &ack.error,
                                     )
                                     .await;
-                                agent_registry.release_slot(&agent_id_clone).await;
+                                agent_registry
+                                    .release_slot(&agent_id_clone, &runner_name_clone)
+                                    .await;
                                 if let Err(e) = token_provider
                                     .remove_runner(&runner_scope, &runner_name_clone)
                                     .await
@@ -1761,7 +1814,9 @@ impl FleetManager {
                             }
                         }
                         Some(AgentPayload::Result(result)) => {
-                            agent_registry.release_slot(&agent_id_clone).await;
+                            agent_registry
+                                .release_slot(&agent_id_clone, &runner_name_clone)
+                                .await;
                             if result.success {
                                 info!("Runner {} completed successfully", runner_name_clone);
                             } else {
@@ -1801,7 +1856,9 @@ impl FleetManager {
                                     &format!("unexpected response to CreateRunner: {other:?}"),
                                 )
                                 .await;
-                            agent_registry.release_slot(&agent_id_clone).await;
+                            agent_registry
+                                .release_slot(&agent_id_clone, &runner_name_clone)
+                                .await;
                             if let Err(e) = token_provider
                                 .remove_runner(&runner_scope, &runner_name_clone)
                                 .await
@@ -1825,7 +1882,9 @@ impl FleetManager {
                                 &format!("CreateRunner: {e:#}"),
                             )
                             .await;
-                        agent_registry.release_slot(&agent_id_clone).await;
+                        agent_registry
+                            .release_slot(&agent_id_clone, &runner_name_clone)
+                            .await;
                         if let Err(e) = token_provider
                             .remove_runner(&runner_scope, &runner_name_clone)
                             .await

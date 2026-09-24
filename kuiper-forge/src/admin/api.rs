@@ -124,6 +124,8 @@ struct AgentResponse {
     /// Only known while the agent is connected
     label_sets: Vec<Vec<String>>,
     max_vms: u32,
+    /// Host-wide limits on top of max_vms. Only known while the agent is connected
+    limits: Vec<LimitResponse>,
     /// Null for agents that predate version reporting
     version: Option<String>,
     active_runners: usize,
@@ -131,6 +133,16 @@ struct AgentResponse {
     last_seen_secs: Option<u64>,
     created_at: DateTime<Utc>,
     cert_expires_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct LimitResponse {
+    name: String,
+    max: usize,
+    /// VMs using up this limit that the agent doesn't manage
+    external: usize,
+    /// The agent's own VMs using up this limit
+    active: usize,
 }
 
 async fn agents(State(state): State<Arc<AdminState>>) -> Response {
@@ -167,6 +179,19 @@ async fn agents(State(state): State<Arc<AdminState>>) -> Response {
                     .filter(|(_, r)| r.agent_id == a.agent_id)
                     .count(),
                 label_sets: live.map(|c| c.label_sets.clone()).unwrap_or_default(),
+                limits: live
+                    .map(|c| {
+                        c.limits
+                            .iter()
+                            .map(|l| LimitResponse {
+                                name: l.name.clone(),
+                                max: l.max,
+                                external: l.external,
+                                active: l.active,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 last_seen_secs: live.map(|c| c.last_seen_secs),
                 status,
                 agent_id: a.agent_id,

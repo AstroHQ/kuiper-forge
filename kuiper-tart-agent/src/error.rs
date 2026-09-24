@@ -10,8 +10,8 @@ pub enum Error {
     Config(String),
 
     /// Capacity exceeded - cannot create more VMs.
-    #[error("Capacity exceeded: max {0} VMs")]
-    CapacityExceeded(u32),
+    #[error("Capacity exceeded: {0}")]
+    CapacityExceeded(String),
 
     /// VM clone failed.
     #[error("Clone failed: {0}")]

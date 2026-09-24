@@ -1,4 +1,4 @@
-//! Tart Agent - manages macOS VMs via Tart CLI for CI runners.
+//! Tart Agent - manages macOS and linux VMs via Tart CLI for CI runners.
 //!
 //! This daemon runs on each Mac host and:
 //! - Connects outbound to the coordinator via gRPC with mTLS
@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use kuiper_agent_lib::labels::Capability;
 use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture, RegistrationBundle, runtime};
 use kuiper_agent_proto::{
     AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType,
@@ -43,7 +44,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 use config::Config;
 use error::Error;
 use ssh::SshConfig;
-use vm_manager::VmManager;
+use vm_manager::{GuestOs, VmManager};
 
 /// Tart VM Agent for CI Runner Coordination
 #[derive(Parser, Debug)]
@@ -186,10 +187,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("kuiper-tart-agent starting");
     info!("Coordinator: {}", config.coordinator.url);
-    info!("Max concurrent VMs: {}", config.tart.max_concurrent_vms);
+    info!(
+        "Max VMs: {} macOS, {} total",
+        config.tart.max_macos_vms, config.tart.max_total_vms
+    );
 
-    // Build label_sets: each set is base_labels + one image_mapping's labels,
-    // representing the capabilities this agent can fulfill (shared with the
+    // Build capabilities: base_labels + one image_mapping's labels each, then base_image alone (shared with the
     // proxmox agent via kuiper_agent_lib::labels so the two can't drift).
     let base_labels: Vec<String> = config
         .agent
@@ -198,20 +201,26 @@ async fn main() -> anyhow::Result<()> {
         .map(|l| l.to_lowercase())
         .collect();
 
-    let label_sets: Vec<Vec<String>> =
-        kuiper_agent_lib::labels::label_sets(&base_labels, &config.tart.image_mappings);
-
-    info!(
-        "Label sets: {:?} (base: {:?}, image_mappings: {:?})",
-        label_sets,
-        config.agent.labels,
-        config
-            .tart
-            .image_mappings
-            .iter()
-            .map(|m| &m.labels)
-            .collect::<Vec<_>>()
+    let capabilities = kuiper_agent_lib::labels::capabilities(
+        &base_labels,
+        &config.tart.base_image,
+        &config.tart.image_mappings,
     );
+
+    info!("Capabilities: {:?}", capabilities);
+
+    let pooled: u32 = config
+        .tart
+        .image_mappings
+        .iter()
+        .filter_map(|m| m.pool)
+        .sum();
+    if pooled > config.tart.max_total_vms {
+        warn!(
+            "Mapping pools add up to {} runners but max_total_vms is {}, the coordinator can't fill them all",
+            pooled, config.tart.max_total_vms
+        );
+    }
 
     // Initialize VM manager with SSH config from file
     let tart_config = config.tart.clone();
@@ -232,15 +241,25 @@ async fn main() -> anyhow::Result<()> {
         agent_type: "tart".to_string(),
     };
 
-    // Create agent instance. Pass the agent-level metadata (labels, label_sets)
-    // through; max_vms is read from config.tart.max_concurrent_vms in build_status.
+    // an unpulled OCI image's OS is unknown and counts as macOS, which can block linux jobs on the macOS limit.
+    // Pulling finds out
+    let images: Vec<String> = capabilities.iter().map(|c| c.id.clone()).collect();
+    let pull_vm_manager = vm_manager.clone();
+    tokio::spawn(async move {
+        while !pull_vm_manager.resolve_image_os(&images).await {
+            tokio::time::sleep(vm_manager::IMAGE_OS_RETRY_INTERVAL).await;
+        }
+    });
+
+    // Create agent instance. Pass the agent-level metadata (labels, capabilities)
+    // through; max_vms and limits come from vm_manager in build_status.
     let agent = TartAgent::new(
         agent_config,
         cert_store,
         vm_manager.clone(),
         config.clone(),
         base_labels,
-        label_sets,
+        capabilities,
     );
 
     // Spawn cleanup task
@@ -258,6 +277,17 @@ async fn main() -> anyhow::Result<()> {
             info!("Running stale VM cleanup");
             cleanup_vm_manager.cleanup_stale_vms(max_age).await;
             cleanup_old_logs(&cleanup_log_dir, log_retention_days);
+        }
+    });
+
+    // count external VMs before the first status so the coordinator never sees too many free slots
+    vm_manager.refresh_external().await;
+    let external_vm_manager = vm_manager.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(vm_manager::EXTERNAL_POLL_INTERVAL);
+        loop {
+            ticker.tick().await;
+            external_vm_manager.refresh_external().await;
         }
     });
 
@@ -380,7 +410,8 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
         agent: config::AgentConfig { labels: vec![] },
         tart: config::TartConfig {
             base_image: String::new(), // User must set
-            max_concurrent_vms: 2,
+            max_macos_vms: config::MACOS_GUEST_LIMIT,
+            max_total_vms: 5,
             shared_cache_dir: None,
             ssh: config::SshAuthConfig::default(),
             runner_version: "latest".to_string(),
@@ -388,10 +419,12 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
                 config::ImageMapping {
                     labels: vec!["macOS".to_string(), "sonoma".to_string()],
                     image: "ghcr.io/cirruslabs/macos-sonoma-base:latest".to_string(),
+                    pool: None,
                 },
                 config::ImageMapping {
                     labels: vec!["macOS".to_string(), "ventura".to_string()],
                     image: "ghcr.io/cirruslabs/macos-ventura-base:latest".to_string(),
+                    pool: None,
                 },
             ],
         },
@@ -409,7 +442,7 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
     println!("  1. Edit {} and configure:", config_path.display());
     println!("     • agent.labels (e.g., [\"macos\", \"arm64\", \"sequoia\"])");
     println!("     • tart.base_image (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
-    println!("     • tart.max_concurrent_vms (default: 2)");
+    println!("     • tart.max_macos_vms (default: 2) and tart.max_total_vms (default: 5)");
     println!("  2. Ensure base image is pulled: tart pull <image>");
     println!("  3. Start agent: kuiper-tart-agent\n");
 
@@ -564,8 +597,8 @@ struct TartAgent {
     config: Config,
     /// Base labels this agent advertises (flat list; sent in AgentStatus).
     labels: Vec<String>,
-    /// Capability sets derived from image_mappings (sent in AgentStatus).
-    label_sets: Vec<Vec<String>>,
+    /// Label sets derived from image_mappings plus base_image (sent in AgentStatus).
+    capabilities: Vec<Capability>,
 }
 
 impl TartAgent {
@@ -575,7 +608,7 @@ impl TartAgent {
         vm_manager: Arc<VmManager>,
         config: Config,
         labels: Vec<String>,
-        label_sets: Vec<Vec<String>>,
+        capabilities: Vec<Capability>,
     ) -> Arc<Self> {
         Arc::new(Self {
             agent_config,
@@ -583,49 +616,47 @@ impl TartAgent {
             vm_manager,
             config,
             labels,
-            label_sets,
+            capabilities,
         })
     }
 
-    /// Select the appropriate VM image based on job labels.
+    /// Select the VM image for a create command.
     ///
-    /// Returns the image of the first mapping whose capability set (agent labels
-    /// plus that mapping's labels) covers the job's labels, mirroring how the
-    /// coordinator routes. Falls back to `base_image` if no mapping covers the
-    /// job. See [`kuiper_agent_lib::labels::select_mapping`].
-    fn select_image(&self, job_labels: &[String]) -> String {
-        match kuiper_agent_lib::labels::select_mapping(
+    /// A fixed-capacity pool command names its capability's image. Otherwise it's the image of the first mapping whose
+    /// capability set (agent labels plus that mapping's labels) covers the job's labels, mirroring how the coordinator
+    /// routes, or `base_image` if none does. See [`kuiper_agent_lib::labels::mapping_for`].
+    fn select_image(&self, cmd: &CreateRunnerCommand) -> String {
+        let tart = &self.config.tart;
+        match kuiper_agent_lib::labels::mapping_for(
             &self.config.agent.labels,
-            &self.config.tart.image_mappings,
-            job_labels,
+            &tart.base_image,
+            &tart.image_mappings,
+            &cmd.label_set_id,
+            &cmd.labels,
         ) {
             Some(mapping) => {
                 info!(
                     "Selected image '{}' for labels {:?} (matched mapping labels {:?})",
-                    mapping.image, job_labels, mapping.labels
+                    mapping.image, cmd.labels, mapping.labels
                 );
                 mapping.image.clone()
             }
             None => {
                 info!(
-                    "No image mapping matched labels {:?}, using default '{}'",
-                    job_labels, self.config.tart.base_image
+                    "No image mapping for labels {:?}, using default '{}'",
+                    cmd.labels, tart.base_image
                 );
-                self.config.tart.base_image.clone()
+                tart.base_image.clone()
             }
         }
     }
 }
 
 impl TartAgent {
-    async fn has_capacity(&self) -> bool {
-        self.vm_manager.available_slots().await > 0
-    }
-
-    /// `(active, max)` VM counts — for the capacity-rejection message.
-    async fn capacity(&self) -> (u32, u32) {
-        let active = self.vm_manager.active_count().await as u32;
-        (active, self.vm_manager.max_vms())
+    async fn has_capacity(&self, os: GuestOs) -> bool {
+        // an external VM may have started since the last poll
+        self.vm_manager.refresh_external().await;
+        self.vm_manager.available_slots(os).await > 0
     }
 
     /// Read commands from the coordinator and act on them: check capacity, ack,
@@ -634,18 +665,20 @@ impl TartAgent {
         while let Some(command) = connection.commands.recv().await {
             match command {
                 runtime::RunnerCommand::Create(cmd) => {
-                    if !self.has_capacity().await {
-                        let (active, max) = self.capacity().await;
+                    let image = self.select_image(&cmd);
+                    let os = self.vm_manager.image_os(&image).await;
+                    if !self.has_capacity(os).await {
+                        let summary = self.vm_manager.capacity_summary().await;
                         warn!(
-                            "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                            cmd.vm_name, active, max
+                            "Rejecting CreateRunner for vm={}: at capacity ({})",
+                            cmd.vm_name, summary
                         );
                         let _ = connection
                             .events
                             .command_ack(
                                 cmd.command_id,
                                 false,
-                                format!("Capacity exceeded: max {max} VMs"),
+                                format!("Capacity exceeded: {summary}"),
                             )
                             .await;
                         continue;
@@ -656,7 +689,9 @@ impl TartAgent {
                         .await;
                     let agent = self.clone();
                     let events = connection.events.clone();
-                    tokio::spawn(async move { agent.handle_create_runner(cmd, events).await });
+                    tokio::spawn(
+                        async move { agent.handle_create_runner(cmd, image, events).await },
+                    );
                 }
                 runtime::RunnerCommand::Destroy(cmd) => {
                     let _ = connection
@@ -674,7 +709,12 @@ impl TartAgent {
     /// Run a runner VM's full lifecycle to completion, reporting runner events.
     /// Status updates are emitted automatically as the VM set changes (see the
     /// status bridge in `main`), so this only sends lifecycle events.
-    async fn handle_create_runner(&self, cmd: CreateRunnerCommand, events: runtime::EventSender) {
+    async fn handle_create_runner(
+        &self,
+        cmd: CreateRunnerCommand,
+        selected_image: String,
+        events: runtime::EventSender,
+    ) {
         let vm_name = cmd.vm_name.clone();
 
         // Validate inputs early and warn about suspicious values
@@ -698,9 +738,6 @@ impl TartAgent {
                 &cmd.runner_scope_url
             }
         );
-
-        // Select image based on job labels
-        let selected_image = self.select_image(&cmd.labels);
 
         let result: std::result::Result<(String, String), Error> = async {
             // 1. Clone and start VM from selected image
@@ -840,25 +877,38 @@ impl TartAgent {
     async fn build_status(&self) -> AgentStatus {
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
-        // Convert Vec<Vec<String>> to Vec<LabelSet>
-        let label_sets: Vec<LabelSet> = self
-            .label_sets
-            .iter()
-            .map(|ls| LabelSet { labels: ls.clone() })
-            .collect();
+        // each set also says which limits its VMs use, so the coordinator doesn't hold linux jobs to the macOS limit
+        let mut label_sets = Vec::with_capacity(self.capabilities.len());
+        let mut available_slots = 0;
+
+        // fixed-capacity pools use max_vms as their target, so a macOS-only agent mustn't claim the total limit
+        let mut max_vms = 0;
+        for capability in &self.capabilities {
+            let os = self.vm_manager.image_os(&capability.id).await;
+            available_slots = available_slots.max(self.vm_manager.available_slots(os).await);
+            max_vms = max_vms.max(self.vm_manager.max_vms(os));
+            label_sets.push(LabelSet {
+                labels: capability.labels.clone(),
+                limits: os.limit_names().iter().map(|l| l.to_string()).collect(),
+                pool_size: capability.pool,
+                id: capability.id.clone(),
+                is_default: capability.is_default,
+            });
+        }
 
         AgentStatus {
             active_vms: self.vm_manager.active_count().await as u32,
-            available_slots: self.vm_manager.available_slots().await,
+            available_slots,
             vms: self.vm_manager.get_vms().await,
             // Identity fields - required for first message
             agent_id: self.cert_store.get_agent_id().unwrap_or_default(),
             hostname,
             agent_type: self.agent_config.agent_type.clone(),
             labels: self.labels.clone(),
-            max_vms: self.config.tart.max_concurrent_vms,
+            max_vms,
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            limits: self.vm_manager.limits().await,
         }
     }
 }

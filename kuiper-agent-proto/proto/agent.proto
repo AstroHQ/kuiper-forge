@@ -95,11 +95,34 @@ message AgentStatus {
     repeated LabelSet label_sets = 9;
     // Agent build version, e.g. "0.4.0". Empty from agents that predate this field
     string agent_version = 10;
+    // Extra host-wide limits on top of max_vms. Which VMs count against which limit comes from LabelSet.limits. Empty
+    // from agents that only have max_vms
+    repeated CapacityLimit limits = 11;
+}
+
+// A host-wide VM limit, e.g. tart's macOS guest limit
+message CapacityLimit {
+    string name = 1;      // "macos", "total"
+    uint32 max = 2;
+    uint32 external = 3;  // VMs counted against this limit that the agent doesn't manage
+    uint32 active = 4;    // the agent's own VMs counted against this limit
 }
 
 // A set of labels representing one capability an agent can fulfill.
 message LabelSet {
     repeated string labels = 1;
+    // Names of the CapacityLimits a VM for this set counts against, e.g. ["macos", "total"] for a macOS image,
+    // ["total"] for a linux one. When every set leaves this empty (older agents), every VM counts against every limit
+    repeated string limits = 2;
+    // Runners to keep for this set in fixed-capacity mode. Unset on every set (older agents, or none configured) means
+    // the legacy pool: base labels, max_vms runners
+    optional uint32 pool_size = 3;
+    // The resource runners for this set are created from (tart image, proxmox template VMID). The coordinator sends it
+    // back in CreateRunnerCommand.label_set_id for pool runners. Empty from older agents
+    string id = 4;
+    // The agent's default resource, used for jobs that don't ask for any mapping. A mapping can have the same labels,
+    // so this can't be told from the labels
+    bool is_default = 5;
 }
 
 message VmInfo {
@@ -167,6 +190,7 @@ message CreateRunnerCommand {
     repeated string labels = 4;     // Labels for GitHub runner registration
     string runner_scope_url = 5;    // GitHub org/repo URL for runner registration
     string jit_config = 6;          // JIT config blob (webhook mode): if set, skip config.sh and use run.sh --jitconfig
+    string label_set_id = 7;        // LabelSet.id to create from (fixed-capacity pools). Empty: pick by labels
 }
 
 message DestroyRunnerCommand {

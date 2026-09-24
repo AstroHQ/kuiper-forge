@@ -20,7 +20,7 @@ Kuiper automatically provisions and destroys VMs for each CI job, giving you cle
 ```
 
 - **kuiper-forge** - Central coordinator. Manages GitHub App auth, issues runner registration tokens, dispatches jobs to agents.
-- **kuiper-tart-agent** - Runs on macOS hosts. Creates VMs using [Tart](https://github.com/cirruslabs/tart).
+- **kuiper-tart-agent** - Runs on macOS hosts. Creates macOS & Linux VMs using [Tart](https://github.com/cirruslabs/tart).
 - **kuiper-proxmox-agent** - Runs on Proxmox hosts. Creates VMs via Proxmox API (Linux/Windows).
 
 ## Quick Start
@@ -142,7 +142,7 @@ See `examples/` for sample configuration files.
 
 ## Provisioning Modes
 
-- **Fixed Capacity** (default) - Maintains a constant pool of ready runners
+- **Fixed Capacity** (default) - Maintains a constant pool of ready runners, sized per image/template mapping with `pool`
 - **Webhook** - Creates runners on-demand via GitHub webhook events
 
 ## Requirements

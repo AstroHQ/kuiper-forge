@@ -39,7 +39,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::admin::AdminState;
 use crate::agent_logs::{self, AgentLogStore};
-use crate::agent_registry::{AgentRegistry, AgentType};
+use crate::agent_registry::{AgentCapacity, AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::{TlsConfig, WebhookConfig};
 use crate::fleet::FleetNotifier;
@@ -51,6 +51,10 @@ use crate::webhook::{self, WebhookNotifier, WebhookState};
 /// How long a disconnected agent gets to come back before its in-flight runners are failed over.
 /// Short blips (agent restart, tls hiccup) reconnect well inside this.
 const AGENT_DISCONNECT_GRACE: Duration = Duration::from_secs(30);
+
+/// A reservation is made before its runner is saved, with GitHub API calls in between, so the DB check leaves new ones
+/// alone this long.
+const RESERVATION_DB_GRACE: Duration = Duration::from_secs(60);
 
 /// Parse PROXY protocol header from an incoming TCP connection.
 ///
@@ -408,6 +412,7 @@ impl AgentService for AgentServiceImpl {
             active_vms,
             vm_names,
             agent_version,
+            capacity,
         ) = match &first_msg.payload {
             Some(AgentPayload::Status(status)) => {
                 let agent_type = match status.agent_type.to_lowercase().as_str() {
@@ -441,6 +446,7 @@ impl AgentService for AgentServiceImpl {
                     vm_names,
                     // older agents leave this empty
                     Some(status.agent_version.clone()).filter(|v| !v.is_empty()),
+                    AgentCapacity::from(status),
                 )
             }
             _ => {
@@ -458,6 +464,7 @@ impl AgentService for AgentServiceImpl {
             label_sets = ?label_sets,
             max_vms = max_vms,
             active_vms = active_vms,
+            capacity = ?capacity,
             agent_version = agent_version.as_deref().unwrap_or("unknown"),
             "Agent stream connected"
         );
@@ -519,6 +526,9 @@ impl AgentService for AgentServiceImpl {
                 command_tx,
             )
             .await;
+
+        // before the fleet notify below, so the first scheduling pass already sees external usage
+        self.agent_registry.set_capacity(&agent_id, capacity).await;
 
         // Notify fleet manager to check if runners need to be created
         // If agent has VMs, also send recovery info to match against persisted runners
@@ -682,6 +692,10 @@ async fn handle_agent_message(
                 .iter()
                 .map(|ls| ls.labels.clone())
                 .collect();
+
+            registry
+                .set_capacity(agent_id, AgentCapacity::from(&status))
+                .await;
             registry
                 .update_status(
                     agent_id,
@@ -691,6 +705,8 @@ async fn handle_agent_message(
                     label_sets,
                 )
                 .await;
+            let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
+            registry.settle_reservations(agent_id, &vm_names).await;
 
             // Reconcile persisted runner state against the agent's current VM list
             // This allows the recovery watcher to detect when VMs have completed
@@ -728,18 +744,23 @@ async fn handle_agent_message(
                         // fall back to local-only cleanup.
                         for (runner_name, _runner_info) in &missing {
                             rs.remove_runner(runner_name).await;
-                            registry.release_slot(agent_id).await;
+                            registry.release_slot(agent_id, runner_name).await;
                         }
                     }
                 }
 
-                // Reconcile reserved_slots against the DB runner count.
-                // This catches leaked reserved_slots even when no runners are
-                // missing (e.g., a CreateRunner was acked but the VM never
-                // appeared and the runner record was already cleaned up).
-                let db_runner_count = rs.count_runners_for_agent(agent_id).await;
+                // Drop reservations whose runner is gone from the DB. This catches
+                // leaked reservations even when no runners are missing (e.g., a
+                // CreateRunner was acked but the VM never appeared and the runner
+                // record was already cleaned up).
+                let db_runners: Vec<String> = rs
+                    .get_runners_for_agent(agent_id)
+                    .await
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
                 registry
-                    .reconcile_reserved_slots(agent_id, db_runner_count)
+                    .reconcile_reservations(agent_id, &db_runners, RESERVATION_DB_GRACE)
                     .await;
             }
         }
