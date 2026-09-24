@@ -63,16 +63,19 @@ impl From<&kuiper_agent_proto::CapacityLimit> for VmLimit {
     }
 }
 
-/// An agent's limits and which of them each label set's VMs count against, from its latest status.
+/// An agent's limits, which of them each label set's VMs count against, and its fixed-capacity pools, from its
+/// latest status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentLimits {
+pub struct AgentCapacity {
     pub limits: Vec<VmLimit>,
     /// Limit names per label set, same order as `label_sets`. All empty from older agents, where every VM counts
     /// against every limit
     pub label_set_limits: Vec<Vec<String>>,
+    /// Pool size per label set, same order as `label_sets`. All `None` means the legacy pool (base labels, `max_vms`)
+    pub label_set_pools: Vec<Option<u32>>,
 }
 
-impl From<&kuiper_agent_proto::AgentStatus> for AgentLimits {
+impl From<&kuiper_agent_proto::AgentStatus> for AgentCapacity {
     fn from(status: &kuiper_agent_proto::AgentStatus) -> Self {
         Self {
             limits: status.limits.iter().map(VmLimit::from).collect(),
@@ -81,6 +84,7 @@ impl From<&kuiper_agent_proto::AgentStatus> for AgentLimits {
                 .iter()
                 .map(|ls| ls.limits.clone())
                 .collect(),
+            label_set_pools: status.label_sets.iter().map(|ls| ls.pool_size).collect(),
         }
     }
 }
@@ -115,6 +119,9 @@ pub struct ConnectedAgent {
 
     /// Which `limits` each label set's VMs count against, same order as `label_sets`
     label_set_limits: Vec<Vec<String>>,
+
+    /// Fixed-capacity pool size per label set, same order as `label_sets`
+    label_set_pools: Vec<Option<u32>>,
 
     /// Reserved slots (commands sent but not yet reflected in active_vms)
     /// This prevents over-scheduling when sending multiple commands quickly
@@ -160,6 +167,7 @@ impl ConnectedAgent {
             active_vms,
             limits: Vec::new(),
             label_set_limits: Vec::new(),
+            label_set_pools: Vec::new(),
             reserved_slots: 0,
             labels,
             label_sets,
@@ -678,15 +686,27 @@ impl AgentRegistry {
         }
     }
 
-    /// Replace the agent's extra limits with the ones from its latest status.
-    pub async fn set_limits(&self, agent_id: &str, limits: AgentLimits) {
+    /// Replace the agent's limits and pools with the ones from its latest status.
+    pub async fn set_capacity(&self, agent_id: &str, capacity: AgentCapacity) {
         if let Some(agent) = self.get(agent_id).await {
             let mut agent = agent.write().await;
-            if agent.limits != limits.limits || agent.label_set_limits != limits.label_set_limits {
-                debug!(agent_id = %agent_id, limits = ?limits, "Agent limits changed");
-                agent.limits = limits.limits;
-                agent.label_set_limits = limits.label_set_limits;
+            if agent.limits != capacity.limits
+                || agent.label_set_limits != capacity.label_set_limits
+                || agent.label_set_pools != capacity.label_set_pools
+            {
+                debug!(agent_id = %agent_id, capacity = ?capacity, "Agent capacity changed");
+                agent.limits = capacity.limits;
+                agent.label_set_limits = capacity.label_set_limits;
+                agent.label_set_pools = capacity.label_set_pools;
             }
+        }
+    }
+
+    /// Free slots on one agent for a job with these labels, 0 if it's not connected.
+    pub async fn agent_capacity(&self, agent_id: &str, labels: &[String]) -> usize {
+        match self.get(agent_id).await {
+            Some(agent) => agent.read().await.available_capacity(labels),
+            None => 0,
         }
     }
 
@@ -783,6 +803,7 @@ impl AgentRegistry {
                         ..l.clone()
                     })
                     .collect(),
+                explicit_pools: agent.label_set_pools.iter().any(Option::is_some),
                 last_seen_secs: agent.last_seen.elapsed().as_secs(),
             });
         }
@@ -828,29 +849,47 @@ impl AgentRegistry {
         use std::collections::HashMap;
 
         let agents = self.agents.read().await;
-        let mut pools: HashMap<Vec<String>, u32> = HashMap::new();
+        let mut legacy: HashMap<Vec<String>, u32> = HashMap::new();
+        let mut explicit = Vec::new();
 
         for agent in agents.values() {
             let agent = agent.read().await;
 
-            // Normalize labels: sort and lowercase for consistent grouping
-            let mut normalized_labels: Vec<String> =
-                agent.labels.iter().map(|l| l.to_lowercase()).collect();
-            normalized_labels.sort();
+            if agent.label_set_pools.iter().any(Option::is_some) {
+                for (set, pool) in agent.label_sets.iter().zip(&agent.label_set_pools) {
+                    let target_count = pool.unwrap_or(0);
+                    if target_count > 0 {
+                        explicit.push(PoolDefinition {
+                            labels: normalize_labels(set),
+                            target_count,
+                            agent_id: Some(agent.agent_id.clone()),
+                        });
+                    }
+                }
+                continue;
+            }
 
             // Add this agent's capacity to the pool for this label combination
-            *pools.entry(normalized_labels).or_insert(0) += agent.max_vms as u32;
+            *legacy.entry(normalize_labels(&agent.labels)).or_insert(0) += agent.max_vms as u32;
         }
 
-        // Convert to PoolDefinition vec
-        pools
+        legacy
             .into_iter()
             .map(|(labels, target_count)| PoolDefinition {
                 labels,
                 target_count,
+                agent_id: None,
             })
+            .chain(explicit)
             .collect()
     }
+}
+
+/// Lowercased and sorted, so the same labels in any order make the same pool.
+pub fn normalize_labels(labels: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = labels.iter().map(|l| l.to_lowercase()).collect();
+    normalized.sort();
+    normalized
 }
 
 /// Summary information about an agent (for listing)
@@ -865,21 +904,32 @@ pub struct AgentInfo {
     pub active_vms: usize,
     /// `active` is filled in for older agents too
     pub limits: Vec<VmLimit>,
+    /// Returns true if the agent sets its own fixed-capacity pools per label set
+    pub explicit_pools: bool,
     pub last_seen_secs: u64,
 }
 
-/// Pool definition derived from connected agents.
+/// Fixed-capacity pool derived from connected agents.
 ///
-/// In the new agent-driven mode, each unique label combination
-/// forms a separate pool with a target count equal to the sum
-/// of max_vms across all agents with those labels.
+/// An agent that sets `pool` on its mappings gets one pool per label set, owned by that agent. Other agents share a
+/// legacy pool per base label combination, with a target count of the sum of their max_vms.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PoolDefinition {
     /// Labels that define this pool (sorted for consistent comparison)
     pub labels: Vec<String>,
 
-    /// Target count: sum of max_vms across all agents with these labels
+    /// Runners to keep
     pub target_count: u32,
+
+    /// The agent an explicit pool belongs to. None for legacy pools
+    pub agent_id: Option<String>,
+}
+
+impl PoolDefinition {
+    /// Key stored on the runners of an explicit pool, to count them.
+    pub fn key(&self) -> String {
+        self.labels.join(",")
+    }
 }
 
 impl AgentInfo {
@@ -970,15 +1020,16 @@ mod tests {
             external,
             active: 0,
         };
-        let limits = |limits| AgentLimits {
+        let limits = |limits| AgentCapacity {
             limits,
             label_set_limits: Vec::new(),
+            label_set_pools: Vec::new(),
         };
         let labels = ["macos".to_string()];
 
         // someone runs a mac VM by hand: one macOS slot left
         registry
-            .set_limits(
+            .set_capacity(
                 "agent_1",
                 limits(vec![limit("macos", 2, 1), limit("total", 5, 1)]),
             )
@@ -987,7 +1038,7 @@ mod tests {
 
         // plus four linux VMs: total limit is full
         registry
-            .set_limits(
+            .set_capacity(
                 "agent_1",
                 limits(vec![limit("macos", 2, 1), limit("total", 5, 5)]),
             )
@@ -997,7 +1048,7 @@ mod tests {
 
         // external VMs gone, back to max_vms
         registry
-            .set_limits(
+            .set_capacity(
                 "agent_1",
                 limits(vec![limit("macos", 2, 0), limit("total", 5, 0)]),
             )
@@ -1031,14 +1082,15 @@ mod tests {
             external: 0,
             active,
         };
-        let set_limits = |macos_active, total_active| AgentLimits {
+        let set_limits = |macos_active, total_active| AgentCapacity {
             limits: vec![
                 limit("macos", 2, macos_active),
                 limit("total", 4, total_active),
             ],
             label_set_limits: vec![strings(&["macos", "total"]), strings(&["total"])],
+            label_set_pools: Vec::new(),
         };
-        registry.set_limits("agent_1", set_limits(2, 2)).await;
+        registry.set_capacity("agent_1", set_limits(2, 2)).await;
         let macos = strings(&["macos"]);
         let linux = strings(&["linux"]);
 
@@ -1068,7 +1120,7 @@ mod tests {
                 ],
             )
             .await;
-        registry.set_limits("agent_1", set_limits(1, 1)).await;
+        registry.set_capacity("agent_1", set_limits(1, 1)).await;
         assert!(registry.reserve_slot("agent_1", &linux).await);
         assert_eq!(registry.available_capacity(&macos).await, 0);
         assert_eq!(registry.available_capacity(&linux).await, 2);
@@ -1238,6 +1290,74 @@ mod tests {
             .find(|p| p.labels.contains(&"linux".to_string()))
             .unwrap();
         assert_eq!(linux_pool.target_count, 5);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_pools_per_label_set() {
+        let registry = AgentRegistry::new();
+        let strings = |labels: &[&str]| labels.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let (tx1, _rx1) = mpsc::channel(32);
+        let (tx2, _rx2) = mpsc::channel(32);
+        registry
+            .register(
+                "explicit".to_string(),
+                AgentType::Tart,
+                "mac-mini-1".to_string(),
+                4,
+                0,
+                strings(&["self-hosted"]),
+                vec![
+                    strings(&["self-hosted", "macOS"]),
+                    strings(&["self-hosted", "linux"]),
+                    strings(&["self-hosted", "windows"]),
+                ],
+                tx1,
+            )
+            .await;
+        registry
+            .set_capacity(
+                "explicit",
+                AgentCapacity {
+                    label_set_pools: vec![Some(1), Some(2), Some(0)],
+                    ..Default::default()
+                },
+            )
+            .await;
+        registry
+            .register(
+                "legacy".to_string(),
+                AgentType::Tart,
+                "mac-mini-2".to_string(),
+                2,
+                0,
+                strings(&["self-hosted", "macos"]),
+                vec![strings(&["self-hosted", "macos"])],
+                tx2,
+            )
+            .await;
+
+        let mut pools = registry.get_pool_definitions().await;
+        pools.sort_by(|a, b| (&a.agent_id, &a.labels).cmp(&(&b.agent_id, &b.labels)));
+        let explicit = |labels: &[&str], target_count| PoolDefinition {
+            labels: strings(labels),
+            target_count,
+            agent_id: Some("explicit".to_string()),
+        };
+
+        // the size-0 set gets no pool, and the explicit agent isn't in the legacy pool
+        assert_eq!(
+            pools,
+            vec![
+                PoolDefinition {
+                    labels: strings(&["macos", "self-hosted"]),
+                    target_count: 2,
+                    agent_id: None,
+                },
+                explicit(&["linux", "self-hosted"], 2),
+                explicit(&["macos", "self-hosted"], 1),
+            ]
+        );
+        assert_eq!(pools[1].key(), "linux,self-hosted");
     }
 
     #[tokio::test]

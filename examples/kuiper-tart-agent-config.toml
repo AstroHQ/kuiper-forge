@@ -86,6 +86,12 @@ max_total_vms = 5
 #
 # Example: A job with runs-on: [self-hosted, macOS, sonoma] will match the
 # first mapping below, but not the second (missing "ventura" label).
+#
+# Fixed-capacity mode: set `pool` on a mapping to keep that many runners of it,
+# e.g. `pool = 1` on a macOS mapping and on a linux one keeps 1 of each. Once any
+# mapping has `pool`, mappings without it get none. With no `pool` anywhere the
+# coordinator keeps a pool of runners with only [agent] labels, which always use
+# base_image. max_macos_vms/max_total_vms still cap everything.
 
 # Example 1: macOS Sonoma
 # [[tart.image_mappings]]
@@ -113,6 +119,7 @@ max_total_vms = 5
 # [[tart.image_mappings]]
 # labels = ["linux"]
 # image = "ghcr.io/cirruslabs/ubuntu:latest"
+# pool = 1
 
 # =============================================================================
 # SSH Configuration for VM Access

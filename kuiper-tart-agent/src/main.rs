@@ -216,6 +216,19 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>()
     );
 
+    let pooled: u32 = config
+        .tart
+        .image_mappings
+        .iter()
+        .filter_map(|m| m.pool)
+        .sum();
+    if pooled > config.tart.max_total_vms {
+        warn!(
+            "Mapping pools add up to {} runners but max_total_vms is {}, the coordinator can't fill them all",
+            pooled, config.tart.max_total_vms
+        );
+    }
+
     // Initialize VM manager with SSH config from file
     let tart_config = config.tart.clone();
     let ssh_config = SshConfig::from_config(&config.tart.ssh);
@@ -403,10 +416,12 @@ async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<
                 config::ImageMapping {
                     labels: vec!["macOS".to_string(), "sonoma".to_string()],
                     image: "ghcr.io/cirruslabs/macos-sonoma-base:latest".to_string(),
+                    pool: None,
                 },
                 config::ImageMapping {
                     labels: vec!["macOS".to_string(), "ventura".to_string()],
                     image: "ghcr.io/cirruslabs/macos-ventura-base:latest".to_string(),
+                    pool: None,
                 },
             ],
         },
@@ -873,12 +888,23 @@ impl TartAgent {
         // each set also says which limits its VMs use, so the coordinator doesn't hold linux jobs to the macOS limit
         let mut label_sets = Vec::with_capacity(self.label_sets.len());
         let mut available_slots = 0;
-        for (labels, image) in self.label_sets.iter().zip(self.label_set_images()) {
+
+        // fixed-capacity pools use max_vms as their target, so a macOS-only agent mustn't claim the total limit
+        let mut max_vms = 0;
+        let pools = kuiper_agent_lib::labels::pool_sizes(&self.config.tart.image_mappings);
+        for ((labels, image), pool_size) in self
+            .label_sets
+            .iter()
+            .zip(self.label_set_images())
+            .zip(pools)
+        {
             let os = self.vm_manager.image_os(image).await;
             available_slots = available_slots.max(self.vm_manager.available_slots(os).await);
+            max_vms = max_vms.max(self.vm_manager.max_vms(os));
             label_sets.push(LabelSet {
                 labels: labels.clone(),
                 limits: os.limit_names().iter().map(|l| l.to_string()).collect(),
+                pool_size,
             });
         }
 
@@ -891,7 +917,7 @@ impl TartAgent {
             hostname,
             agent_type: self.agent_config.agent_type.clone(),
             labels: self.labels.clone(),
-            max_vms: self.vm_manager.max_vms(),
+            max_vms,
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             limits: self.vm_manager.limits().await,

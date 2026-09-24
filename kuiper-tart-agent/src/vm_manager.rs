@@ -225,10 +225,12 @@ impl VmManager {
         }
     }
 
-    /// Get maximum VM capacity of any OS when nothing else is running on the host. The macOS limit goes out
-    /// separately in `limits()`.
-    pub fn max_vms(&self) -> u32 {
-        self.config.max_total_vms
+    /// Get maximum capacity for VMs with this OS when nothing else is running on the host.
+    pub fn max_vms(&self, os: GuestOs) -> u32 {
+        match os {
+            GuestOs::Linux => self.config.max_total_vms,
+            GuestOs::MacOS => self.config.max_macos_vms.min(self.config.max_total_vms),
+        }
     }
 
     /// The host-wide limits with current usage, for `AgentStatus`.
@@ -800,7 +802,8 @@ mod tests {
         let log_dir = std::env::temp_dir().join("kuiper-tart-agent-test-logs");
         let manager = VmManager::new(config, SshConfig::default(), log_dir);
 
-        assert_eq!(manager.max_vms(), 3);
+        assert_eq!(manager.max_vms(GuestOs::MacOS), 2);
+        assert_eq!(manager.max_vms(GuestOs::Linux), 3);
         assert_eq!(manager.available_slots(GuestOs::MacOS).await, 2);
         assert_eq!(manager.available_slots(GuestOs::Linux).await, 3);
         assert_eq!(manager.active_count().await, 0);

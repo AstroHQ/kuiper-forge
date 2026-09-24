@@ -12,6 +12,11 @@
 pub trait LabelMapping {
     /// The labels that must all be present in a job's labels for this rule to match.
     fn labels(&self) -> &[String];
+
+    /// Runners to keep for this mapping in fixed-capacity mode, if configured.
+    fn pool(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Return the first mapping whose capability set covers `job_labels` — i.e. the
@@ -82,6 +87,22 @@ pub fn label_sets<M: LabelMapping>(base: &[String], mappings: &[M]) -> Vec<Vec<S
         .collect()
 }
 
+/// Fixed-capacity pool size per label set, same order as [`label_sets`].
+///
+/// Setting `pool` on any mapping switches the agent to explicit pools, and mappings without it get 0. With no
+/// `pool` anywhere every entry is `None`, which tells the coordinator to use the legacy pool (base labels, `max_vms`
+/// runners), so existing fixed-capacity setups keep working.
+pub fn pool_sizes<M: LabelMapping>(mappings: &[M]) -> Vec<Option<u32>> {
+    if mappings.is_empty() {
+        return vec![None];
+    }
+    let explicit = mappings.iter().any(|m| m.pool().is_some());
+    mappings
+        .iter()
+        .map(|m| explicit.then(|| m.pool().unwrap_or(0)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,11 +110,16 @@ mod tests {
     struct Mapping {
         labels: Vec<String>,
         value: u32,
+        pool: Option<u32>,
     }
 
     impl LabelMapping for Mapping {
         fn labels(&self) -> &[String] {
             &self.labels
+        }
+
+        fn pool(&self) -> Option<u32> {
+            self.pool
         }
     }
 
@@ -101,7 +127,32 @@ mod tests {
         Mapping {
             labels: labels.iter().map(|s| s.to_string()).collect(),
             value,
+            pool: None,
         }
+    }
+
+    fn pooled(labels: &[&str], pool: Option<u32>) -> Mapping {
+        Mapping {
+            pool,
+            ..mapping(labels, 0)
+        }
+    }
+
+    #[test]
+    fn pool_sizes_legacy_without_any_pool() {
+        assert_eq!(pool_sizes::<Mapping>(&[]), vec![None]);
+        assert_eq!(
+            pool_sizes(&[pooled(&["macos"], None), pooled(&["linux"], None)]),
+            vec![None, None]
+        );
+    }
+
+    #[test]
+    fn pool_sizes_explicit_once_any_mapping_has_one() {
+        assert_eq!(
+            pool_sizes(&[pooled(&["macos"], Some(1)), pooled(&["linux"], None)]),
+            vec![Some(1), Some(0)]
+        );
     }
 
     fn labels(labels: &[&str]) -> Vec<String> {

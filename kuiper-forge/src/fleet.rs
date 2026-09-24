@@ -18,7 +18,7 @@ use kuiper_agent_proto::{
 };
 
 use crate::agent_failures::{AgentFailureStore, FailureKind};
-use crate::agent_registry::{AgentRegistry, PoolDefinition};
+use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
 use crate::github::RunnerTokenProvider;
 use crate::pending_jobs::PendingJobStore;
@@ -818,6 +818,7 @@ impl FleetManager {
                 job_name.map(String::from),
                 repository.map(String::from),
                 workflow_name.map(String::from),
+                None, // pool
             )
             .await;
 
@@ -1481,12 +1482,12 @@ impl FleetManager {
 
     /// Warn (once per agent) about capabilities fixed-capacity mode can't pre-create.
     ///
-    /// Fixed-capacity pools are derived from each agent's flat `labels` (its base
+    /// Legacy fixed-capacity pools are derived from each agent's flat `labels` (its base
     /// labels), not its `label_sets`. So an agent advertising mapping-specific
     /// capabilities — e.g. via `vm.template_mappings` — gets runners pre-created
     /// with only its base labels, and jobs requiring a mapped label won't match.
-    /// Webhook provisioning is the mode that matches on `label_sets`; surface this
-    /// so the mismatch isn't silent.
+    /// Setting `pool` on the mappings or using webhook provisioning both match on
+    /// `label_sets`; surface this so the mismatch isn't silent.
     async fn warn_unprovisionable_capabilities(&self) {
         let agents = self.agent_registry.list_all().await;
         let mut warned = self
@@ -1494,7 +1495,7 @@ impl FleetManager {
             .lock()
             .expect("warned_capability_agents mutex poisoned");
 
-        for agent in &agents {
+        for agent in agents.iter().filter(|a| !a.explicit_pools) {
             let base: std::collections::HashSet<String> =
                 agent.labels.iter().map(|l| l.to_lowercase()).collect();
             let mut extra: Vec<String> = agent
@@ -1513,24 +1514,27 @@ impl FleetManager {
                     "Agent advertises capabilities {:?} only via label sets (e.g. \
                      vm.template_mappings), but fixed-capacity provisioning pre-creates runners \
                      from base labels {:?} only — jobs requiring those extra labels won't match \
-                     pre-created runners. Use webhook provisioning for label-based template selection.",
+                     pre-created runners. Set `pool` on the mappings to pre-create runners per \
+                     mapping, or use webhook provisioning.",
                     extra, agent.labels
                 );
             }
         }
     }
 
-    /// Count current runners (pending + active) for a pool by checking
-    /// the runner_state DB for all agents matching the pool's labels.
-    async fn count_runners_for_pool(&self, labels: &[String]) -> u32 {
+    /// Count current runners (pending + active) for a pool from the runner_state DB. An explicit pool counts its
+    /// agent's runners tagged with the pool, a legacy one all runners of the agents with its base labels.
+    async fn count_runners_for_pool(&self, pool_def: &PoolDefinition) -> u32 {
+        if let Some(agent_id) = &pool_def.agent_id {
+            return self
+                .runner_state
+                .count_runners_for_pool(agent_id, &pool_def.key())
+                .await as u32;
+        }
         let agents = self.agent_registry.list_all().await;
         let mut total = 0u32;
         for agent in &agents {
-            // Exact match: normalize agent labels the same way get_pool_definitions() does
-            let mut normalized: Vec<String> =
-                agent.labels.iter().map(|l| l.to_lowercase()).collect();
-            normalized.sort();
-            if normalized == labels {
+            if !agent.explicit_pools && normalize_labels(&agent.labels) == pool_def.labels {
                 total += self
                     .runner_state
                     .count_runners_for_agent(&agent.agent_id)
@@ -1553,7 +1557,7 @@ impl FleetManager {
         // Count current runners from the database (source of truth).
         // This replaces the old in-memory pending_runners counter which could
         // diverge from reality when runners completed without decrementing.
-        let current = self.count_runners_for_pool(&pool_def.labels).await;
+        let current = self.count_runners_for_pool(pool_def).await;
 
         let target = pool_def.target_count;
 
@@ -1573,10 +1577,18 @@ impl FleetManager {
         let needed = target - current;
 
         // Check available capacity before trying to create runners
-        let capacity = self
-            .agent_registry
-            .available_capacity(&pool_def.labels)
-            .await;
+        let capacity = match &pool_def.agent_id {
+            Some(agent_id) => {
+                self.agent_registry
+                    .agent_capacity(agent_id, &pool_def.labels)
+                    .await
+            }
+            None => {
+                self.agent_registry
+                    .available_capacity(&pool_def.labels)
+                    .await
+            }
+        };
 
         // Log all agents for debugging
         let all_agents = self.agent_registry.list_all().await;
@@ -1626,12 +1638,16 @@ impl FleetManager {
                 to_create
             );
 
-            // Find an available agent with matching labels
-            let agent_id = match self
-                .agent_registry
-                .find_available_agent(&pool_def.labels)
-                .await
-            {
+            // Find an available agent with matching labels, an explicit pool always uses its own agent
+            let found = match &pool_def.agent_id {
+                Some(agent_id) => Some(agent_id.clone()),
+                None => {
+                    self.agent_registry
+                        .find_available_agent(&pool_def.labels)
+                        .await
+                }
+            };
+            let agent_id = match found {
                 Some(id) => {
                     info!("Found available agent: {}", id);
                     id
@@ -1691,6 +1707,7 @@ impl FleetManager {
                     None, // job_name
                     None, // repository
                     None, // workflow_name
+                    pool_def.agent_id.as_ref().map(|_| pool_def.key()),
                 )
                 .await;
 

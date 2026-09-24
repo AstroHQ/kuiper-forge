@@ -114,6 +114,9 @@ message LabelSet {
     // Names of the CapacityLimits a VM for this set counts against, e.g. ["macos", "total"] for a macOS image,
     // ["total"] for a linux one. When every set leaves this empty (older agents), every VM counts against every limit
     repeated string limits = 2;
+    // Runners to keep for this set in fixed-capacity mode. Unset on every set (older agents, or none configured) means
+    // the legacy pool: base labels, max_vms runners
+    optional uint32 pool_size = 3;
 }
 
 message VmInfo {

@@ -771,14 +771,16 @@ impl ProxmoxAgent {
         // plus the mapping's labels), so the coordinator can route jobs for each
         // mapped template here. With no mappings this is a single set: agent.labels.
         let labels = self.config.agent.labels.clone();
-        let label_sets: Vec<LabelSet> =
-            kuiper_agent_lib::labels::label_sets(&labels, &self.config.vm.template_mappings)
-                .into_iter()
-                .map(|labels| LabelSet {
-                    labels,
-                    limits: Vec::new(),
-                })
-                .collect();
+        let mappings = &self.config.vm.template_mappings;
+        let label_sets: Vec<LabelSet> = kuiper_agent_lib::labels::label_sets(&labels, mappings)
+            .into_iter()
+            .zip(kuiper_agent_lib::labels::pool_sizes(mappings))
+            .map(|(labels, pool_size)| LabelSet {
+                labels,
+                limits: Vec::new(),
+                pool_size,
+            })
+            .collect();
 
         AgentStatus {
             active_vms: active_count,

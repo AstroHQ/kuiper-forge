@@ -64,11 +64,18 @@ pub struct ImageMapping {
     pub labels: Vec<String>,
     /// The Tart image to use when this mapping matches
     pub image: String,
+    /// Runners to keep for this mapping in fixed-capacity mode. Setting it on any mapping means unset ones get none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<u32>,
 }
 
 impl kuiper_agent_lib::labels::LabelMapping for ImageMapping {
     fn labels(&self) -> &[String] {
         &self.labels
+    }
+
+    fn pool(&self) -> Option<u32> {
+        self.pool
     }
 }
 

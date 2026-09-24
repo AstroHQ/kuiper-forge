@@ -87,6 +87,7 @@ impl RunnerStateStore {
         job_name: Option<String>,
         repository: Option<String>,
         workflow_name: Option<String>,
+        pool: Option<String>,
     ) {
         let created_at = Utc::now();
         let scope_json = match serde_json::to_string(&runner_scope) {
@@ -109,6 +110,7 @@ impl RunnerStateStore {
             .bind(&job_name)
             .bind(&repository)
             .bind(&workflow_name)
+            .bind(&pool)
             .execute(&self.pool)
             .await;
 
@@ -162,6 +164,29 @@ impl RunnerStateStore {
             }
             Err(e) => {
                 error!("Failed to count runners for agent {}: {}", agent_id, e);
+                0
+            }
+        }
+    }
+
+    /// Count an agent's runners created for one fixed-capacity pool.
+    pub async fn count_runners_for_pool(&self, agent_id: &str, pool: &str) -> usize {
+        let result = sqlx::query(sql::COUNT_RUNNERS_BY_AGENT_POOL)
+            .bind(agent_id)
+            .bind(pool)
+            .fetch_one(&self.pool)
+            .await;
+
+        match result {
+            Ok(row) => {
+                let count: i64 = row.try_get("count").unwrap_or(0);
+                count as usize
+            }
+            Err(e) => {
+                error!(
+                    "Failed to count runners for agent {} pool {}: {}",
+                    agent_id, pool, e
+                );
                 0
             }
         }
@@ -354,5 +379,50 @@ impl RunnerStateStore {
                 workflow_name,
             },
         ))
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+    use crate::config::DatabaseConfig;
+    use crate::db::Database;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_count_runners_for_pool() {
+        let temp = TempDir::new().unwrap();
+        let db = Database::new(&DatabaseConfig::default(), temp.path())
+            .await
+            .unwrap();
+        let state = RunnerStateStore::new(db.pool());
+        let scope = RunnerScope::Organization { name: "org".into() };
+        let add = |name: &str, agent: &str, pool: Option<&str>| {
+            state.add_runner(
+                name.into(),
+                agent.into(),
+                name.into(),
+                scope.clone(),
+                None,
+                None,
+                None,
+                None,
+                pool.map(String::from),
+            )
+        };
+        add("r1", "a", Some("linux,self-hosted")).await;
+        add("r2", "a", Some("macos,self-hosted")).await;
+        add("r3", "a", None).await;
+        add("r4", "b", Some("linux,self-hosted")).await;
+
+        assert_eq!(
+            state.count_runners_for_pool("a", "linux,self-hosted").await,
+            1
+        );
+        assert_eq!(
+            state.count_runners_for_pool("a", "macos,self-hosted").await,
+            1
+        );
+        assert_eq!(state.count_runners_for_agent("a").await, 3);
     }
 }

@@ -39,7 +39,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::admin::AdminState;
 use crate::agent_logs::{self, AgentLogStore};
-use crate::agent_registry::{AgentLimits, AgentRegistry, AgentType};
+use crate::agent_registry::{AgentCapacity, AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::{TlsConfig, WebhookConfig};
 use crate::fleet::FleetNotifier;
@@ -408,7 +408,7 @@ impl AgentService for AgentServiceImpl {
             active_vms,
             vm_names,
             agent_version,
-            limits,
+            capacity,
         ) = match &first_msg.payload {
             Some(AgentPayload::Status(status)) => {
                 let agent_type = match status.agent_type.to_lowercase().as_str() {
@@ -442,7 +442,7 @@ impl AgentService for AgentServiceImpl {
                     vm_names,
                     // older agents leave this empty
                     Some(status.agent_version.clone()).filter(|v| !v.is_empty()),
-                    AgentLimits::from(status),
+                    AgentCapacity::from(status),
                 )
             }
             _ => {
@@ -460,7 +460,7 @@ impl AgentService for AgentServiceImpl {
             label_sets = ?label_sets,
             max_vms = max_vms,
             active_vms = active_vms,
-            limits = ?limits,
+            capacity = ?capacity,
             agent_version = agent_version.as_deref().unwrap_or("unknown"),
             "Agent stream connected"
         );
@@ -524,7 +524,7 @@ impl AgentService for AgentServiceImpl {
             .await;
 
         // before the fleet notify below, so the first scheduling pass already sees external usage
-        self.agent_registry.set_limits(&agent_id, limits).await;
+        self.agent_registry.set_capacity(&agent_id, capacity).await;
 
         // Notify fleet manager to check if runners need to be created
         // If agent has VMs, also send recovery info to match against persisted runners
@@ -691,7 +691,7 @@ async fn handle_agent_message(
 
             // before update_status, its reserved_slots clamp uses them
             registry
-                .set_limits(agent_id, AgentLimits::from(&status))
+                .set_capacity(agent_id, AgentCapacity::from(&status))
                 .await;
             registry
                 .update_status(

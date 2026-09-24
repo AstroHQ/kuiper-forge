@@ -127,14 +127,14 @@ pub const CHECK_AGENT_VALID: &str =
 
 #[cfg(feature = "sqlite")]
 pub const INSERT_RUNNER: &str = r#"
-    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, pool)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#;
 
 #[cfg(feature = "postgres")]
 pub const INSERT_RUNNER: &str = r#"
-    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, pool)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 "#;
 
 #[cfg(feature = "sqlite")]
@@ -173,6 +173,14 @@ pub const COUNT_RUNNERS_BY_AGENT: &str =
 #[cfg(feature = "postgres")]
 pub const COUNT_RUNNERS_BY_AGENT: &str =
     "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = $1";
+
+#[cfg(feature = "sqlite")]
+pub const COUNT_RUNNERS_BY_AGENT_POOL: &str =
+    "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = ? AND pool = ?";
+
+#[cfg(feature = "postgres")]
+pub const COUNT_RUNNERS_BY_AGENT_POOL: &str =
+    "SELECT COUNT(*) as count FROM active_runners WHERE agent_id = $1 AND pool = $2";
 
 // Bulk delete for agent disconnect cleanup
 #[cfg(feature = "sqlite")]

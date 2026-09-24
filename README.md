@@ -142,7 +142,7 @@ See `examples/` for sample configuration files.
 
 ## Provisioning Modes
 
-- **Fixed Capacity** (default) - Maintains a constant pool of ready runners
+- **Fixed Capacity** (default) - Maintains a constant pool of ready runners, sized per image/template mapping with `pool`
 - **Webhook** - Creates runners on-demand via GitHub webhook events
 
 ## Requirements
