@@ -110,11 +110,10 @@ pub const DELETE_OLD_REVOKED_AGENTS: &str = "DELETE FROM registered_agents WHERE
 /// `revoke_agent` between read-modify-write can't be silently undone.
 #[cfg(feature = "sqlite")]
 pub const UPDATE_AGENT_METADATA: &str =
-    "UPDATE registered_agents SET labels = ?, max_vms = ? WHERE agent_id = ?";
+    "UPDATE registered_agents SET labels = ?, max_vms = ?, agent_version = ? WHERE agent_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const UPDATE_AGENT_METADATA: &str =
-    "UPDATE registered_agents SET labels = $1, max_vms = $2 WHERE agent_id = $3";
+pub const UPDATE_AGENT_METADATA: &str = "UPDATE registered_agents SET labels = $1, max_vms = $2, agent_version = $3 WHERE agent_id = $4";
 
 #[cfg(feature = "sqlite")]
 pub const CHECK_AGENT_VALID: &str =

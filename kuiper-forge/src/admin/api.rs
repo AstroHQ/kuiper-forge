@@ -124,6 +124,8 @@ struct AgentResponse {
     /// Only known while the agent is connected
     label_sets: Vec<Vec<String>>,
     max_vms: u32,
+    /// Null for agents that predate version reporting
+    version: Option<String>,
     active_runners: usize,
     /// Only set while the agent is connected
     last_seen_secs: Option<u64>,
@@ -172,6 +174,7 @@ async fn agents(State(state): State<Arc<AdminState>>) -> Response {
                 agent_type: a.agent_type,
                 labels: a.labels,
                 max_vms: a.max_vms,
+                version: a.agent_version,
                 created_at: a.created_at,
                 cert_expires_at: a.expires_at,
             }

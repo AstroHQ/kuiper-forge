@@ -65,6 +65,8 @@ pub struct AgentSummary {
     pub active_vms: usize,
     pub created_at: DateTime<Utc>,
     pub revoked: bool,
+    /// None for agents that predate version reporting
+    pub version: Option<String>,
 }
 
 /// Agent detail page template

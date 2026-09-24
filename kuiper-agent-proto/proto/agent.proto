@@ -93,6 +93,8 @@ message AgentStatus {
     // A job matches if its labels are a subset of ANY label set.
     // Example: [["self-hosted","macos","sequoia"], ["self-hosted","macos","ventura"]]
     repeated LabelSet label_sets = 9;
+    // Agent build version, e.g. "0.4.0". Empty from agents that predate this field
+    string agent_version = 10;
 }
 
 // A set of labels representing one capability an agent can fulfill.

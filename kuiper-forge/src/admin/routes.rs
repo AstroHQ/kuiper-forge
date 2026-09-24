@@ -251,6 +251,7 @@ async fn render_dashboard(
                 active_vms,
                 created_at: a.created_at,
                 revoked: a.revoked,
+                version: a.agent_version,
             }
         })
         .collect();
@@ -435,6 +436,7 @@ async fn agent_detail(
         active_vms: runners.len(),
         created_at: agent.created_at,
         revoked: agent.revoked,
+        version: agent.agent_version,
     };
 
     let now = Utc::now();

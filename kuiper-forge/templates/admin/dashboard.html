@@ -102,6 +102,7 @@
                     <th>Agent ID</th>
                     <th>Hostname</th>
                     <th>Type</th>
+                    <th>Version</th>
                     <th>Status</th>
                     <th>Capacity</th>
                     <th>Labels</th>
@@ -116,6 +117,7 @@
                     </td>
                     <td>{{ agent.hostname }}</td>
                     <td>{{ agent.agent_type }}</td>
+                    <td>{% if let Some(v) = agent.version %}{{ v }}{% else %}<span class="muted" title="agent doesn't report its version">unknown</span>{% endif %}</td>
                     <td>
                         {% if agent.revoked %}
                         <span class="badge badge-revoked">Revoked</span>

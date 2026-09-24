@@ -854,10 +854,17 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
             }
 
             println!(
-                "{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
-                "AGENT ID", "TYPE", "HOSTNAME", "MAX_VMS", "CREATED", "EXPIRES", "STATUS"
+                "{:<30} {:<12} {:<15} {:<10} {:<8} {:<12} {:<12} {:<10}",
+                "AGENT ID",
+                "TYPE",
+                "HOSTNAME",
+                "VERSION",
+                "MAX_VMS",
+                "CREATED",
+                "EXPIRES",
+                "STATUS"
             );
-            println!("{}", "-".repeat(105));
+            println!("{}", "-".repeat(116));
 
             for agent in &resp.agents {
                 let status = if agent.revoked {
@@ -893,11 +900,18 @@ async fn handle_agent_command(command: AgentCommands, data_dir: &Path) -> Result
                 let expires = chrono::DateTime::parse_from_rfc3339(&agent.expires_at)
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or(agent.expires_at.clone());
+                // empty from agents older than version reporting, or an older coordinator
+                let version = if agent.agent_version.is_empty() {
+                    "-"
+                } else {
+                    agent.agent_version.as_str()
+                };
                 println!(
-                    "{:<30} {:<12} {:<15} {:<8} {:<12} {:<12} {:<10}",
+                    "{:<30} {:<12} {:<15} {:<10} {:<8} {:<12} {:<12} {:<10}",
                     id_short,
                     agent.agent_type,
                     hostname_short,
+                    version,
                     agent.max_vms,
                     created,
                     expires,

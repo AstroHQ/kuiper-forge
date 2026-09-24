@@ -858,6 +858,7 @@ impl TartAgent {
             labels: self.labels.clone(),
             max_vms: self.config.tart.max_concurrent_vms,
             label_sets,
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 }

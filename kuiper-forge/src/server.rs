@@ -399,47 +399,56 @@ impl AgentService for AgentServiceImpl {
             .map_err(|e| Status::internal(format!("Stream error: {e}")))?;
 
         // Extract metadata from status message (identity comes from cert, not message)
-        let (hostname, agent_type, labels, label_sets, max_vms, active_vms, vm_names) =
-            match &first_msg.payload {
-                Some(AgentPayload::Status(status)) => {
-                    let agent_type = match status.agent_type.to_lowercase().as_str() {
-                        "tart" => AgentType::Tart,
-                        "proxmox" => AgentType::Proxmox,
-                        _ => {
-                            return Err(Status::invalid_argument(format!(
-                                "Unknown agent type: {}",
-                                status.agent_type
-                            )));
-                        }
-                    };
+        let (
+            hostname,
+            agent_type,
+            labels,
+            label_sets,
+            max_vms,
+            active_vms,
+            vm_names,
+            agent_version,
+        ) = match &first_msg.payload {
+            Some(AgentPayload::Status(status)) => {
+                let agent_type = match status.agent_type.to_lowercase().as_str() {
+                    "tart" => AgentType::Tart,
+                    "proxmox" => AgentType::Proxmox,
+                    _ => {
+                        return Err(Status::invalid_argument(format!(
+                            "Unknown agent type: {}",
+                            status.agent_type
+                        )));
+                    }
+                };
 
-                    // Extract VM names for recovery
-                    let vm_names: Vec<String> =
-                        status.vms.iter().map(|vm| vm.name.clone()).collect();
+                // Extract VM names for recovery
+                let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();
 
-                    // Extract label_sets (capability sets) - each LabelSet becomes a Vec<String>
-                    let label_sets: Vec<Vec<String>> = status
-                        .label_sets
-                        .iter()
-                        .map(|ls| ls.labels.clone())
-                        .collect();
+                // Extract label_sets (capability sets) - each LabelSet becomes a Vec<String>
+                let label_sets: Vec<Vec<String>> = status
+                    .label_sets
+                    .iter()
+                    .map(|ls| ls.labels.clone())
+                    .collect();
 
-                    (
-                        status.hostname.clone(),
-                        agent_type,
-                        status.labels.clone(),
-                        label_sets,
-                        status.max_vms as usize,
-                        status.active_vms as usize,
-                        vm_names,
-                    )
-                }
-                _ => {
-                    return Err(Status::invalid_argument(
-                        "First message must be a status message",
-                    ));
-                }
-            };
+                (
+                    status.hostname.clone(),
+                    agent_type,
+                    status.labels.clone(),
+                    label_sets,
+                    status.max_vms as usize,
+                    status.active_vms as usize,
+                    vm_names,
+                    // older agents leave this empty
+                    Some(status.agent_version.clone()).filter(|v| !v.is_empty()),
+                )
+            }
+            _ => {
+                return Err(Status::invalid_argument(
+                    "First message must be a status message",
+                ));
+            }
+        };
 
         info!(
             agent_id = %agent_id,
@@ -449,6 +458,7 @@ impl AgentService for AgentServiceImpl {
             label_sets = ?label_sets,
             max_vms = max_vms,
             active_vms = active_vms,
+            agent_version = agent_version.as_deref().unwrap_or("unknown"),
             "Agent stream connected"
         );
 
@@ -465,17 +475,22 @@ impl AgentService for AgentServiceImpl {
             let new_max = max_vms as u32;
             let labels_changed = stored.labels != labels;
             let max_changed = stored.max_vms != new_max;
-            if labels_changed || max_changed {
+
+            // an agent downgraded to one that doesn't report a version clears it rather than keeping a stale one
+            let version_changed = stored.agent_version != agent_version;
+            if labels_changed || max_changed || version_changed {
                 info!(
                     agent_id = %agent_id,
                     old_max = stored.max_vms,
                     new_max = new_max,
                     labels_changed = labels_changed,
+                    old_version = ?stored.agent_version,
+                    new_version = ?agent_version,
                     "Syncing persisted agent record from live status"
                 );
                 if let Err(e) = self
                     .auth_manager
-                    .update_agent_metadata(&agent_id, &labels, new_max)
+                    .update_agent_metadata(&agent_id, &labels, new_max, agent_version.as_deref())
                     .await
                 {
                     warn!(error = %e, agent_id = %agent_id,

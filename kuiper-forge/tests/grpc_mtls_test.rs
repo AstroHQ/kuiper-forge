@@ -309,6 +309,7 @@ async fn test_agent_service_requires_mtls_grpc_only_mode() {
             labels: vec![],
             max_vms: 2,
             label_sets: vec![],
+            agent_version: String::new(),
         })),
     })
     .await
@@ -390,6 +391,7 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
             labels: vec![],
             max_vms: 2,
             label_sets: vec![],
+            agent_version: String::new(),
         })),
     })
     .await
@@ -722,4 +724,62 @@ async fn test_log_upload_grpc_only_mode() {
 #[tokio::test]
 async fn test_log_upload_webhook_mode() {
     check_log_upload(true).await;
+}
+
+/// Open an agent stream whose first status reports `version`, returning once the server has accepted it
+async fn connect_with_version(
+    channel: Channel,
+    version: &str,
+) -> tokio::sync::mpsc::Sender<AgentMessage> {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(AgentMessage {
+        payload: Some(AgentPayload::Status(AgentStatus {
+            active_vms: 0,
+            available_slots: 1,
+            vms: vec![],
+            agent_id: String::new(),
+            hostname: "test-host".to_string(),
+            agent_type: "tart".to_string(),
+            labels: vec!["self-hosted".to_string()],
+            max_vms: 1,
+            label_sets: vec![],
+            agent_version: version.to_string(),
+        })),
+    })
+    .await
+    .unwrap();
+
+    // the record sync happens before the server answers the stream call
+    AgentServiceClient::new(channel)
+        .agent_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .unwrap();
+    tx
+}
+
+#[tokio::test]
+async fn test_agent_version_reported_and_cleared() {
+    install_crypto_provider();
+    let fixture = TestFixture::new(false).await;
+    let (agent_id, channel) = fixture.register_agent().await;
+    let stored_version = || async {
+        fixture
+            .auth_manager
+            .list_agents()
+            .await
+            .into_iter()
+            .find(|a| a.agent_id == agent_id)
+            .unwrap()
+            .agent_version
+    };
+    assert_eq!(stored_version().await, None);
+
+    let stream = connect_with_version(channel.clone(), "1.2.3").await;
+    assert_eq!(stored_version().await.as_deref(), Some("1.2.3"));
+    drop(stream);
+
+    // an older agent sends no version, which must not leave the newer one behind
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _stream = connect_with_version(channel, "").await;
+    assert_eq!(stored_version().await, None);
 }

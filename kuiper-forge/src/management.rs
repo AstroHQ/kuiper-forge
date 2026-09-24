@@ -116,6 +116,7 @@ impl ManagementService for ManagementServiceImpl {
                 created_at: a.created_at.to_rfc3339(),
                 expires_at: a.expires_at.to_rfc3339(),
                 revoked: a.revoked,
+                agent_version: a.agent_version.unwrap_or_default(),
             })
             .collect();
 
