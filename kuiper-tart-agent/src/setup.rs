@@ -29,7 +29,40 @@ const PRESET_IMAGES: &[(&str, &str)] = &[
     ("Ubuntu", "ghcr.io/cirruslabs/ubuntu:latest"),
 ];
 
-const DEFAULT_LABELS: &str = "self-hosted, macOS, ARM64";
+/// Default agent labels. macOS is only added when every image is macOS, agent labels go on every runner
+const DEFAULT_LABELS: &str = "self-hosted, ARM64";
+const DEFAULT_MACOS_LABELS: &str = "self-hosted, macOS, ARM64";
+
+/// Guest OS guessed from an image name, since tart only knows it once the image is pulled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageOs {
+    MacOS,
+    Linux,
+}
+
+impl ImageOs {
+    fn guess(image: &str) -> Option<Self> {
+        let image = image.to_lowercase();
+        if image.contains("macos") {
+            Some(ImageOs::MacOS)
+        } else if ["linux", "ubuntu", "debian", "fedora"]
+            .iter()
+            .any(|n| image.contains(n))
+        {
+            Some(ImageOs::Linux)
+        } else {
+            None
+        }
+    }
+
+    /// The agent label that says a runner is this OS
+    fn label(self) -> &'static str {
+        match self {
+            ImageOs::MacOS => "macos",
+            ImageOs::Linux => "linux",
+        }
+    }
+}
 
 /// Walk a fresh host through tart + DHCP checks, registration, labels, image mappings and limits, write the config,
 /// pull the images and optionally install the LaunchAgent. Re-running it edits the existing config.
@@ -55,7 +88,6 @@ pub async fn run_setup(config_path: &Path) -> Result<()> {
 
     println!("\n== Labels & images ==");
     let local = host_checks::list_images().unwrap_or_default();
-    labels_step(&theme, &mut config)?;
     config.tart.base_image = pick_image(
         &theme,
         "Default image (used when no mapping matches)",
@@ -63,6 +95,7 @@ pub async fn run_setup(config_path: &Path) -> Result<()> {
         Some(&config.tart.base_image).filter(|i| !i.is_empty()),
     )?;
     mappings_step(&theme, &mut config, &local)?;
+    labels_step(&theme, &mut config)?;
 
     println!("\n== Limits & SSH ==");
     limits_step(&theme, &mut config)?;
@@ -269,23 +302,36 @@ async fn registration_step(
     Ok(Some(config))
 }
 
+/// Runs after the images are picked, so the default and the check can go by their OS.
 fn labels_step(theme: &ColorfulTheme, config: &mut Config) -> Result<()> {
     println!(
-        "Agent labels go on every runner this host offers. Keep OS labels like macOS out if you add linux images."
+        "\nAgent labels go on every runner this host offers. Put OS labels like macOS on the mappings if you have \
+         linux images."
     );
-    let current = if config.agent.labels.is_empty() {
-        DEFAULT_LABELS.to_string()
-    } else {
+    let images = image_names(config);
+    let current = if !config.agent.labels.is_empty() {
         config.agent.labels.join(", ")
+    } else if images
+        .iter()
+        .all(|i| ImageOs::guess(i) == Some(ImageOs::MacOS))
+    {
+        DEFAULT_MACOS_LABELS.to_string()
+    } else {
+        DEFAULT_LABELS.to_string()
     };
     let input: String = Input::with_theme(theme)
         .with_prompt("Agent labels (comma separated)")
         .default(current)
         .validate_with(|s: &String| {
-            if parse_labels(s).is_empty() {
-                Err("need at least one label")
-            } else {
-                Ok(())
+            let labels = parse_labels(s);
+            if labels.is_empty() {
+                return Err("need at least one label".to_string());
+            }
+            match os_label_conflict(&labels, &images) {
+                Some((label, image)) => Err(format!(
+                    "{label} would go on {image} too, put it on the mappings instead"
+                )),
+                None => Ok(()),
             }
         })
         .interact_text()?;
@@ -551,6 +597,27 @@ fn pick_image(
         .to_string())
 }
 
+fn image_names(config: &Config) -> Vec<&str> {
+    std::iter::once(config.tart.base_image.as_str())
+        .chain(config.tart.image_mappings.iter().map(|m| m.image.as_str()))
+        .collect()
+}
+
+/// An OS label in `labels` and an image that's clearly another OS, if there's one.
+fn os_label_conflict<'a>(labels: &[String], images: &[&'a str]) -> Option<(String, &'a str)> {
+    images.iter().find_map(|image| {
+        let os = ImageOs::guess(image)?;
+        labels
+            .iter()
+            .find(|l| {
+                [ImageOs::MacOS, ImageOs::Linux]
+                    .iter()
+                    .any(|other| *other != os && l.eq_ignore_ascii_case(other.label()))
+            })
+            .map(|l| (l.clone(), *image))
+    })
+}
+
 fn describe_mapping(m: &config::ImageMapping) -> String {
     let pool = m.pool.map(|p| format!(" (pool {p})")).unwrap_or_default();
     format!("[{}] → {}{pool}", m.labels.join(", "), m.image)
@@ -616,5 +683,24 @@ mod tests {
         assert_eq!(parse_labels("  a  b,,a "), ["a", "b"]);
         assert_eq!(parse_labels("macOS, macos"), ["macOS"]);
         assert!(parse_labels(" , ").is_empty());
+    }
+
+    #[test]
+    fn test_os_label_conflict() {
+        let labels = parse_labels("self-hosted, macOS, ARM64");
+        let mac = "ghcr.io/cirruslabs/macos-tahoe-base:latest";
+        let ubuntu = "ghcr.io/cirruslabs/ubuntu:latest";
+        assert_eq!(os_label_conflict(&labels, &[mac]), None);
+        assert_eq!(
+            os_label_conflict(&labels, &[mac, ubuntu]),
+            Some(("macOS".to_string(), ubuntu))
+        );
+        assert_eq!(
+            os_label_conflict(&parse_labels("self-hosted, linux"), &[ubuntu, mac]),
+            Some(("linux".to_string(), mac))
+        );
+
+        // can't tell a custom image's OS, so no complaint
+        assert_eq!(os_label_conflict(&labels, &["my-runner"]), None);
     }
 }
