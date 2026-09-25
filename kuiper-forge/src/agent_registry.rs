@@ -200,6 +200,20 @@ impl ConnectedAgent {
         }
     }
 
+    /// Label sets to show people. The default set is just the base labels, and every mapping's set covers it, so
+    /// it's only listed when there's nothing else
+    fn display_label_sets(&self) -> Vec<Vec<String>> {
+        if self.label_sets.len() <= 1 {
+            return self.label_sets.clone();
+        }
+        self.label_sets
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != self.default_set)
+            .map(|(_, set)| set.clone())
+            .collect()
+    }
+
     /// Returns true if the agent says which limits each label set's VMs count against. Older agents don't, and every
     /// VM counts against every limit.
     fn limits_per_set(&self) -> bool {
@@ -932,6 +946,7 @@ impl AgentRegistry {
                 hostname: agent.hostname.clone(),
                 labels: agent.labels.clone(),
                 label_sets: agent.label_sets.clone(),
+                display_label_sets: agent.display_label_sets(),
                 max_vms: agent.max_vms,
                 active_vms: agent.active_vms,
                 limits: agent
@@ -1043,6 +1058,8 @@ pub struct AgentInfo {
     pub hostname: String,
     pub labels: Vec<String>,
     pub label_sets: Vec<Vec<String>>,
+    /// `label_sets` without the default set when there are others, see [`ConnectedAgent::display_label_sets`]
+    pub display_label_sets: Vec<Vec<String>>,
     pub max_vms: usize,
     pub active_vms: usize,
     /// `active` is filled in for older agents too
@@ -1403,6 +1420,43 @@ mod tests {
 
         // the mapping is still reachable by its id
         assert_eq!(registry.agent_capacity("agent_1", &base, "noble").await, 5);
+    }
+
+    #[tokio::test]
+    async fn test_display_label_sets_hides_default_only_with_mappings() {
+        let registry = linux_base_macos_mapping(0).await;
+        let agents = registry.list_all().await;
+        assert_eq!(agents[0].label_sets.len(), 2);
+        assert_eq!(
+            agents[0].display_label_sets,
+            vec![vec!["self-hosted".to_string(), "macos".to_string()]]
+        );
+
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        let base = vec!["self-hosted".to_string()];
+        registry
+            .register(
+                "agent_1".to_string(),
+                AgentType::Proxmox,
+                "pve".to_string(),
+                3,
+                0,
+                base.clone(),
+                vec![base.clone()],
+                tx,
+            )
+            .await;
+        registry
+            .set_capacity(
+                "agent_1",
+                AgentCapacity {
+                    default_set: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(registry.list_all().await[0].display_label_sets, vec![base]);
     }
 
     #[tokio::test]

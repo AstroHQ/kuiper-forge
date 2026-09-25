@@ -6,7 +6,7 @@ use crate::admin::auth::AdminSession;
 use crate::admin::middleware::{AdminState, SESSION_COOKIE};
 use crate::admin::templates::{
     AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, FailureSummary, LimitView,
-    LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary,
+    LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary, split_labels,
 };
 use crate::admin::{agent_log_routes, api_token_routes, user_routes};
 use crate::agent_failures::FailureKind;
@@ -238,12 +238,13 @@ async fn render_dashboard(
                 .filter(|(_, r)| r.agent_id == a.agent_id)
                 .count();
             let live = connected.get(&a.agent_id);
-            let label_sets = live.map(|c| c.label_sets.clone()).unwrap_or_default();
+            let (base_labels, mapping_labels) = live.map(split_labels).unwrap_or_default();
             AgentSummary {
                 agent_id: a.agent_id.clone(),
                 hostname: a.hostname,
                 agent_type: a.agent_type,
-                label_sets,
+                base_labels,
+                mapping_labels,
                 max_vms: a.max_vms,
                 limits: live.map(LimitView::from_agent).unwrap_or_default(),
                 is_online: connected.contains_key(&a.agent_id),
@@ -422,12 +423,13 @@ async fn agent_detail(
         .collect();
 
     let live = connected.get(&agent.agent_id);
-    let label_sets = live.map(|c| c.label_sets.clone()).unwrap_or_default();
+    let (base_labels, mapping_labels) = live.map(split_labels).unwrap_or_default();
     let agent_summary = AgentSummary {
         agent_id: agent.agent_id.clone(),
         hostname: agent.hostname,
         agent_type: agent.agent_type,
-        label_sets,
+        base_labels,
+        mapping_labels,
         max_vms: agent.max_vms,
         limits: live.map(LimitView::from_agent).unwrap_or_default(),
         is_online: connected.contains_key(&agent.agent_id),

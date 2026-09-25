@@ -23,6 +23,7 @@ mod config;
 mod error;
 mod host_checks;
 mod install;
+mod setup;
 mod ssh;
 mod vm_manager;
 
@@ -32,7 +33,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use kuiper_agent_lib::labels::Capability;
-use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture, RegistrationBundle, runtime};
+use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture, runtime};
 use kuiper_agent_proto::{
     AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType,
 };
@@ -64,6 +65,9 @@ struct Args {
 
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
+    /// First-run wizard: checks the host, registers, then walks through labels, image mappings and limits. Re-run it
+    /// to change an existing config
+    Setup,
     /// Register this agent with the coordinator using a registration bundle
     Register {
         /// Registration bundle token from coordinator (kfr1_...)
@@ -101,6 +105,9 @@ async fn main() -> anyhow::Result<()> {
     // Handle subcommands
     if let Some(command) = args.command {
         match command {
+            Commands::Setup => {
+                return setup::run_setup(&config_path).await;
+            }
             Commands::Register { bundle } => {
                 return cmd_register(&bundle, &config_path).await;
             }
@@ -116,8 +123,8 @@ async fn main() -> anyhow::Result<()> {
     // Normal agent mode - load existing config
     if !config_path.exists() {
         eprintln!("Error: Agent not registered\n");
-        eprintln!("Run registration first:");
-        eprintln!("  kuiper-tart-agent register <kfr1_token>\n");
+        eprintln!("Run the setup wizard first:");
+        eprintln!("  kuiper-tart-agent setup\n");
         eprintln!("To get a registration bundle, run on the coordinator:");
         eprintln!("  coordinator token create --expires 1h --url https://your-coordinator:9443");
         std::process::exit(1);
@@ -341,119 +348,33 @@ async fn main() -> anyhow::Result<()> {
 /// Handle the register subcommand to set up agent registration with the coordinator.
 async fn cmd_register(bundle_token: &str, config_path: &Path) -> anyhow::Result<()> {
     println!("Registering agent with coordinator...\n");
+    let (coordinator, tls) = setup::register(bundle_token).await?;
 
-    // 1. Parse bundle
-    let bundle = RegistrationBundle::decode(bundle_token)
-        .map_err(|e| anyhow::anyhow!("Invalid registration bundle: {e}"))?;
-
-    println!("Coordinator: {}", bundle.coordinator_url);
-
-    // 2. Create cert store and save server trust
-    let data_dir = Config::default_data_dir();
-    let certs_dir = data_dir.join("certs");
-    std::fs::create_dir_all(&certs_dir)?;
-
-    let cert_store = AgentCertStore::new(certs_dir.clone());
-    if let Some(ca_pem) = bundle.server_ca_pem.as_deref() {
-        cert_store.save_ca(ca_pem)?;
-        println!("✓ Saved server CA certificate");
-    }
-    cert_store.save_server_trust_mode(match bundle.server_trust_mode {
-        kuiper_agent_lib::bundle::ServerTrustMode::Ca => "ca",
-        kuiper_agent_lib::bundle::ServerTrustMode::Chain => "chain",
-    })?;
-
-    // 3. Extract hostname from URL for TLS verification
-    let hostname = url::Url::parse(&bundle.coordinator_url)
-        .ok()
-        .and_then(|u| u.host_str().map(String::from))
-        .unwrap_or_else(|| "localhost".to_string());
-
-    // 4. Build agent config for registration. labels/max_vms aren't here —
-    // they're sent in the first AgentStatus when the daemon connects.
-    let agent_config = kuiper_agent_lib::AgentConfig {
-        coordinator_url: bundle.coordinator_url.clone(),
-        coordinator_hostname: hostname.clone(),
-        registration_token: Some(bundle.token),
-        agent_type: "tart".to_string(),
-    };
-
-    // 5. Connect and register.
-    // Use register() (not connect()): a `register` invocation always re-registers
-    // with this token instead of silently reusing an existing (possibly revoked)
-    // cert. The new identity is written only on success, so a bad/expired token
-    // leaves any existing certificate untouched.
-    println!("Connecting to coordinator...");
-    let mut connector = kuiper_agent_lib::AgentConnector::new(agent_config, cert_store.clone());
-    let _client = connector
-        .register()
-        .await
-        .map_err(|e| anyhow::anyhow!("Registration failed: {e}"))?;
-
-    let agent_id = cert_store
-        .get_agent_id()
-        .ok_or_else(|| anyhow::anyhow!("Failed to get agent ID after registration"))?;
-
-    println!("✓ Registration successful");
-    println!("✓ Agent ID: {agent_id}");
-
-    // 6. Generate initial config with placeholders
-    let config = Config {
-        coordinator: config::CoordinatorConfig {
-            url: bundle.coordinator_url,
-            hostname,
-        },
-        tls: config::TlsConfig {
-            ca_cert: Some(certs_dir.join("ca.crt")),
-            certs_dir,
-        },
-        agent: config::AgentConfig { labels: vec![] },
-        tart: config::TartConfig {
-            base_image: String::new(), // User must set
-            max_macos_vms: config::MACOS_GUEST_LIMIT,
-            max_total_vms: 5,
-            shared_cache_dir: None,
-            ssh: config::SshAuthConfig::default(),
-            runner_version: "latest".to_string(),
-            image_mappings: vec![
-                config::ImageMapping {
-                    labels: vec!["macOS".to_string(), "sonoma".to_string()],
-                    image: "ghcr.io/cirruslabs/macos-sonoma-base:latest".to_string(),
-                    pool: None,
-                },
-                config::ImageMapping {
-                    labels: vec!["macOS".to_string(), "ventura".to_string()],
-                    image: "ghcr.io/cirruslabs/macos-ventura-base:latest".to_string(),
-                    pool: None,
-                },
-            ],
-        },
-        cleanup: config::CleanupConfig::default(),
-        reconnect: config::ReconnectConfig::default(),
-        host: config::HostConfig::default(),
-        logging: config::LoggingConfig::default(),
-    };
-
-    config.save(config_path)?;
+    setup::blank_config(coordinator, tls).save(config_path)?;
     println!("✓ Configuration saved\n");
 
-    // 7. Print next steps
     println!("Next steps:");
-    println!("  1. Edit {} and configure:", config_path.display());
+    println!(
+        "  1. Run `kuiper-tart-agent setup` to pick labels and images, or edit {} and set:",
+        config_path.display()
+    );
     println!("     • agent.labels (e.g., [\"macos\", \"arm64\", \"sequoia\"])");
     println!("     • tart.base_image (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
     println!("     • tart.max_macos_vms (default: 2) and tart.max_total_vms (default: 5)");
     println!("  2. Ensure base image is pulled: tart pull <image>");
     println!("  3. Start agent: kuiper-tart-agent\n");
 
-    println!("Certificate location: {}", cert_store.base_dir().display());
-    println!("Config location:      {}", config_path.display());
+    println!("Config location: {}", config_path.display());
 
     Ok(())
 }
 
 /// Handle the install subcommand to set up the agent as a LaunchAgent.
-async fn cmd_install(no_load: bool, force: bool, config_path: &Path) -> anyhow::Result<()> {
+pub(crate) async fn cmd_install(
+    no_load: bool,
+    force: bool,
+    config_path: &Path,
+) -> anyhow::Result<()> {
     println!("Installing kuiper-tart-agent as LaunchAgent...\n");
 
     // 1. Check binary is in PATH

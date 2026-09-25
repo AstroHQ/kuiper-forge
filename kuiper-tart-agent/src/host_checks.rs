@@ -61,24 +61,7 @@ pub fn check_tart_version() -> Result<String, String> {
 ///
 /// Returns `Ok(())` if all local images exist, or `Err` listing missing images.
 pub fn check_local_images(images: &[&str]) -> Result<(), String> {
-    // Get list of local images from tart
-    let output = Command::new("tart")
-        .args(["list", "--format", "json"])
-        .output()
-        .map_err(|e| format!("Failed to run 'tart list': {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to list tart images: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let local_images: HashSet<String> = serde_json::from_slice::<Vec<TartImage>>(&output.stdout)
-        .map_err(|e| format!("Failed to parse tart list output: {e}"))?
-        .into_iter()
-        .map(|img| img.name)
-        .collect();
+    let local_images: HashSet<String> = list_images()?.into_iter().collect();
 
     // Check each configured image
     let mut missing = Vec::new();
@@ -96,6 +79,27 @@ pub fn check_local_images(images: &[&str]) -> Result<(), String> {
             missing.join(", ")
         ))
     }
+}
+
+/// Names from `tart list`: local VMs plus already-pulled OCI refs (listed by their full ref).
+pub fn list_images() -> Result<Vec<String>, String> {
+    let output = Command::new("tart")
+        .args(["list", "--format", "json"])
+        .output()
+        .map_err(|e| format!("Failed to run 'tart list': {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to list tart images: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(serde_json::from_slice::<Vec<TartImage>>(&output.stdout)
+        .map_err(|e| format!("Failed to parse tart list output: {e}"))?
+        .into_iter()
+        .map(|img| img.name)
+        .collect())
 }
 
 #[derive(serde::Deserialize)]
@@ -181,9 +185,23 @@ fn parse_dhcp_lease_time(output: &str) -> Option<u32> {
 
 /// Get the command to fix DHCP lease time.
 pub fn dhcp_lease_fix_command() -> String {
-    format!(
-        "sudo defaults write {PLIST_PATH} bootpd -dict DHCPLeaseTimeSecs -int {EXPECTED_LEASE_SECS}"
-    )
+    format!("sudo {}", dhcp_lease_fix_args().join(" "))
+}
+
+/// The `defaults write` that sets the lease time, without the `sudo`.
+pub fn dhcp_lease_fix_args() -> Vec<String> {
+    [
+        "defaults",
+        "write",
+        PLIST_PATH,
+        "bootpd",
+        "-dict",
+        "DHCPLeaseTimeSecs",
+        "-int",
+        &EXPECTED_LEASE_SECS.to_string(),
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 #[cfg(test)]

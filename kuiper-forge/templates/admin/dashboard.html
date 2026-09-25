@@ -99,8 +99,7 @@
         <table>
             <thead>
                 <tr>
-                    <th>Agent ID</th>
-                    <th>Hostname</th>
+                    <th>Agent</th>
                     <th>Type</th>
                     <th>Version</th>
                     <th>Status</th>
@@ -113,9 +112,9 @@
                 {% for agent in agents %}
                 <tr>
                     <td>
-                        <a href="/admin/agents/{{ agent.agent_id }}">{{ agent.agent_id }}</a>
+                        <a href="/admin/agents/{{ agent.agent_id }}">{{ agent.hostname }}</a>
+                        <div class="muted agent-id">{{ agent.agent_id }}</div>
                     </td>
-                    <td>{{ agent.hostname }}</td>
                     <td>{{ agent.agent_type }}</td>
                     <td>{% if let Some(v) = agent.version %}{{ v }}{% else %}<span class="muted" title="agent doesn't report its version">unknown</span>{% endif %}</td>
                     <td>
@@ -134,13 +133,7 @@
                         {% endfor %}
                     </td>
                     <td>
-                        {% for label_set in agent.label_sets %}
-                        <div style="margin-bottom: 2px;">
-                            {% for label in label_set %}
-                            <span class="badge badge-label">{{ label }}</span>
-                            {% endfor %}
-                        </div>
-                        {% endfor %}
+                        {% call m::labels(agent) %}{% endcall %}
                     </td>
                     <td>
                         <a href="/admin/agents/{{ agent.agent_id }}" class="btn btn-secondary btn-sm">View</a>
