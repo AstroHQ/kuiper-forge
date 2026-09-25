@@ -2,6 +2,13 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.7.2 - 2026-09-25
+#### Bug Fixes
+- cleaner label display in dashboard - (fa20bfd) - *jfro*
+- name runners after their hosts - fixes ENG-4764 - (c67bfdd) - *jfro*
+
+- - -
+
 ## kuiper-forge-v0.7.1 - 2026-09-24
 #### Bug Fixes
 - make PROXY protocol optional so in-cluster connections aren't an issue - (55ed2ff) - *jfro*
