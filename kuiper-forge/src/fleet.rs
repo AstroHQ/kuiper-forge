@@ -184,6 +184,16 @@ pub struct FleetManager {
 }
 
 impl FleetManager {
+    /// Picks a unique runner/VM name that starts with the agent's short hostname, so you can tell where a runner
+    /// lives from GitHub's runner list.
+    async fn new_runner_name(&self, agent_id: &str) -> String {
+        let hostname = match self.agent_registry.get(agent_id).await {
+            Some(agent) => agent.read().await.hostname.clone(),
+            None => String::new(),
+        };
+        runner_name_for_host(&hostname, &Uuid::new_v4().simple().to_string()[..8])
+    }
+
     /// Create a new fleet manager and notification handles.
     ///
     /// Returns the fleet manager, a notifier for triggering reconciliation,
@@ -753,7 +763,7 @@ impl FleetManager {
         );
 
         // Generate runner name and command ID, the reservation is per runner
-        let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
+        let runner_name = self.new_runner_name(&agent_id).await;
         let command_id = Uuid::new_v4().to_string();
 
         // Reserve a slot on the agent
@@ -1686,7 +1696,7 @@ impl FleetManager {
             };
 
             // Generate runner name and command ID, the reservation is per runner
-            let runner_name = format!("runner-{}", &Uuid::new_v4().to_string()[..8]);
+            let runner_name = self.new_runner_name(&agent_id).await;
             let command_id = Uuid::new_v4().to_string();
 
             // Reserve a slot on the agent to prevent over-scheduling
@@ -1901,5 +1911,67 @@ impl FleetManager {
         }
 
         Ok(())
+    }
+}
+
+/// Longest hostname prefix kept in a runner name, keeps names short in GitHub's UI
+const MAX_RUNNER_HOST_LEN: usize = 20;
+
+/// Builds `<short-host>-<suffix>`, falling back to `runner-<suffix>` when there's no usable hostname.
+fn runner_name_for_host(hostname: &str, suffix: &str) -> String {
+    // drop the domain (`.local`, `.lan`, fqdn) and anything proxmox/tart/github won't take in a name
+    let short = hostname.split('.').next().unwrap_or_default();
+    let mut host: String = short
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .take(MAX_RUNNER_HOST_LEN)
+        .collect();
+    host = host.trim_matches('-').to_string();
+    if host.is_empty() {
+        host = "runner".to_string();
+    }
+    format!("{host}-{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runner_name_for_host;
+
+    #[test]
+    fn runner_name_uses_short_hostname() {
+        assert_eq!(
+            runner_name_for_host("Jeremys-Mac-mini.local", "abcd1234"),
+            "jeremys-mac-mini-abcd1234"
+        );
+        assert_eq!(
+            runner_name_for_host("pve01.example.com", "abcd1234"),
+            "pve01-abcd1234"
+        );
+        assert_eq!(
+            runner_name_for_host("build_box 2", "abcd1234"),
+            "build-box-2-abcd1234"
+        );
+    }
+
+    #[test]
+    fn runner_name_truncates_long_hostnames() {
+        let name = runner_name_for_host("a-really-long-hostname-for-a-build-machine", "abcd1234");
+        assert_eq!(name, "a-really-long-hostna-abcd1234");
+        assert_eq!(
+            runner_name_for_host("a-really-long-host--x", "abcd1234"),
+            "a-really-long-host-abcd1234"
+        );
+    }
+
+    #[test]
+    fn runner_name_falls_back_without_hostname() {
+        assert_eq!(runner_name_for_host("", "abcd1234"), "runner-abcd1234");
+        assert_eq!(runner_name_for_host("...", "abcd1234"), "runner-abcd1234");
     }
 }
