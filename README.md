@@ -44,11 +44,9 @@ kuiper-forge serve --config config.toml
 # Generate a registration bundle from the coordinator (includes server trust)
 kuiper-forge token create --url https://coordinator:9443
 
-# On a macOS host with Tart installed:
-kuiper-tart-agent register kfr1_BUNDLE_TOKEN
-kuiper-tart-agent \
-  --labels macos,arm64 \
-  --base-image ghcr.io/cirruslabs/macos-sequoia-base:latest
+# On a macOS host: the wizard checks tart + DHCP, asks for the bundle, then walks
+# through labels, image mappings and limits, pulls the images and can install the LaunchAgent
+kuiper-tart-agent setup
 
 # On a Proxmox host:
 kuiper-proxmox-agent register kfr1_BUNDLE_TOKEN

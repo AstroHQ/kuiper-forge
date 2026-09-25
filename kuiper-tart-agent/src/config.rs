@@ -276,6 +276,36 @@ impl Default for ReconnectConfig {
 impl Config {
     /// Load configuration from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
+        let config = Self::read(path)?;
+
+        // Validate required fields
+        let mut errors = Vec::new();
+
+        if config.agent.labels.is_empty() {
+            errors
+                .push("agent.labels: Labels to identify this agent (e.g., [\"macos\", \"arm64\"])");
+        }
+
+        if config.tart.base_image.is_empty() {
+            errors.push("tart.base_image: Tart image to use for VMs (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
+        }
+
+        errors.extend(config.tart.limit_errors());
+
+        if !errors.is_empty() {
+            let error_msg = format!(
+                "Configuration incomplete\n\nPlease edit {} and set:\n  - {}\n\nOr run `kuiper-tart-agent setup`, then start the agent:\n  kuiper-tart-agent",
+                path.display(),
+                errors.join("\n  - ")
+            );
+            return Err(Error::Config(error_msg));
+        }
+
+        Ok(config)
+    }
+
+    /// Read a config file without validating it, so `setup` can start from a half-filled one.
+    pub fn read(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             Error::Config(format!(
                 "Failed to read config file {}: {}",
@@ -300,29 +330,6 @@ impl Config {
         }
         if let Some(ref key_path) = config.tart.ssh.private_key {
             config.tart.ssh.private_key = Some(expand_tilde(key_path));
-        }
-
-        // Validate required fields
-        let mut errors = Vec::new();
-
-        if config.agent.labels.is_empty() {
-            errors
-                .push("agent.labels: Labels to identify this agent (e.g., [\"macos\", \"arm64\"])");
-        }
-
-        if config.tart.base_image.is_empty() {
-            errors.push("tart.base_image: Tart image to use for VMs (e.g., \"ghcr.io/cirruslabs/macos-sequoia-base:latest\")");
-        }
-
-        errors.extend(config.tart.limit_errors());
-
-        if !errors.is_empty() {
-            let error_msg = format!(
-                "Configuration incomplete\n\nPlease edit {} and set:\n  - {}\n\nThen start the agent:\n  kuiper-tart-agent",
-                path.display(),
-                errors.join("\n  - ")
-            );
-            return Err(Error::Config(error_msg));
         }
 
         Ok(config)
