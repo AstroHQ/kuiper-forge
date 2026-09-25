@@ -178,7 +178,9 @@ async fn agents(State(state): State<Arc<AdminState>>) -> Response {
                     .iter()
                     .filter(|(_, r)| r.agent_id == a.agent_id)
                     .count(),
-                label_sets: live.map(|c| c.label_sets.clone()).unwrap_or_default(),
+                label_sets: live
+                    .map(|c| c.display_label_sets.clone())
+                    .unwrap_or_default(),
                 limits: live
                     .map(|c| {
                         c.limits

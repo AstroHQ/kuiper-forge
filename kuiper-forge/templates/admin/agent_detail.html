@@ -43,15 +43,9 @@
                 {% endfor %}
             </div>
 
-            <div class="detail-label">Label Sets</div>
+            <div class="detail-label">Labels</div>
             <div>
-                {% for label_set in agent.label_sets %}
-                <div style="margin-bottom: 4px;">
-                    {% for label in label_set %}
-                    <span class="badge badge-label">{{ label }}</span>
-                    {% endfor %}
-                </div>
-                {% endfor %}
+                {% call m::labels(agent) %}{% endcall %}
             </div>
 
             <div class="detail-label">Registered</div>

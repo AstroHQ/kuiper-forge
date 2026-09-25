@@ -46,7 +46,7 @@ pub async fn run_setup(config_path: &Path) -> Result<()> {
         .then(|| Config::read(config_path))
         .transpose()
         .context("existing config is unreadable, fix or remove it first")?;
-    let Some(mut config) = registration_step(&theme, existing).await? else {
+    let Some(mut config) = registration_step(&theme, config_path, existing).await? else {
         println!(
             "Skipped registration, run `kuiper-tart-agent setup` again when you have a bundle."
         );
@@ -222,6 +222,7 @@ fn check_dhcp(theme: &ColorfulTheme) -> Result<()> {
 /// Returns the config to fill in, or `None` if there's no registration yet and the operator skipped it.
 async fn registration_step(
     theme: &ColorfulTheme,
+    config_path: &Path,
     existing: Option<Config>,
 ) -> Result<Option<Config>> {
     let registered = existing.as_ref().and_then(|c| {
@@ -253,14 +254,19 @@ async fn registration_step(
     }
 
     let (coordinator, tls) = register(bundle).await?;
-    Ok(Some(match existing {
+    let config = match existing {
         Some(mut c) => {
             c.coordinator = coordinator;
             c.tls = tls;
             c
         }
         None => blank_config(coordinator, tls),
-    }))
+    };
+
+    // the bundle is single use, so save now. otherwise quitting before the end loses the link to the new cert and a
+    // re-run asks for another bundle
+    config.save(config_path)?;
+    Ok(Some(config))
 }
 
 fn labels_step(theme: &ColorfulTheme, config: &mut Config) -> Result<()> {

@@ -13,3 +13,15 @@
 {% macro ts_title(t, text) -%}
 <time class="local-time" data-ms="{{ t.timestamp_millis() }}" data-fmt="title" title="{{ t.format("%Y-%m-%d %H:%M:%S") }} UTC">{{ text }}</time>
 {%- endmacro %}
+
+{# base labels once, then one row per mapping with only the labels it adds #}
+{% macro labels(agent) %}
+<div class="label-sets">
+    {% if !agent.base_labels.is_empty() %}
+    <div>{% for label in agent.base_labels %}<span class="badge badge-label">{{ label }}</span>{% endfor %}</div>
+    {% endif %}
+    {% for extra in agent.mapping_labels %}
+    <div><span class="label-plus">+</span>{% for label in extra %}<span class="badge badge-label">{{ label }}</span>{% endfor %}</div>
+    {% endfor %}
+</div>
+{% endmacro %}

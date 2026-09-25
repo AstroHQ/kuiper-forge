@@ -59,7 +59,10 @@ pub struct AgentSummary {
     pub agent_id: String,
     pub hostname: String,
     pub agent_type: String,
-    pub label_sets: Vec<Vec<String>>,
+    /// Labels every runner of this agent has
+    pub base_labels: Vec<String>,
+    /// What each mapping adds on top of `base_labels`
+    pub mapping_labels: Vec<Vec<String>>,
     pub max_vms: u32,
     /// Only known while the agent is connected
     pub limits: Vec<LimitView>,
@@ -93,6 +96,23 @@ impl LimitView {
             })
             .collect()
     }
+}
+
+/// Split an agent's label sets into its base labels and what each mapping adds, so the base isn't repeated per set.
+pub fn split_labels(agent: &crate::agent_registry::AgentInfo) -> (Vec<String>, Vec<Vec<String>>) {
+    let is_base = |l: &String| agent.labels.iter().any(|b| b.eq_ignore_ascii_case(l));
+    let mappings = agent
+        .display_label_sets
+        .iter()
+        .map(|set| {
+            set.iter()
+                .filter(|l| !is_base(l))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|extra| !extra.is_empty())
+        .collect();
+    (agent.labels.clone(), mappings)
 }
 
 /// Agent detail page template
@@ -197,4 +217,57 @@ pub struct RunnerSummary {
     pub job_name: Option<String>,
     pub repository: Option<String>,
     pub workflow_name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_registry::{AgentInfo, AgentType};
+
+    fn strings(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|l| l.to_string()).collect()
+    }
+
+    fn agent(base: &[&str], sets: &[&[&str]]) -> AgentInfo {
+        AgentInfo {
+            agent_id: "agent_1".to_string(),
+            agent_type: AgentType::Proxmox,
+            hostname: "pve".to_string(),
+            labels: strings(base),
+            label_sets: vec![],
+            display_label_sets: sets.iter().map(|s| strings(s)).collect(),
+            max_vms: 3,
+            active_vms: 0,
+            limits: vec![],
+            explicit_pools: false,
+            last_seen_secs: 0,
+        }
+    }
+
+    #[test]
+    fn split_labels_keeps_only_what_mappings_add() {
+        let agent = agent(
+            &["Self-Hosted"],
+            &[
+                &["self-hosted", "windows"],
+                &["self-hosted", "linux", "ubuntu-24.04"],
+            ],
+        );
+        assert_eq!(
+            split_labels(&agent),
+            (
+                strings(&["Self-Hosted"]),
+                vec![strings(&["windows"]), strings(&["linux", "ubuntu-24.04"])]
+            )
+        );
+    }
+
+    #[test]
+    fn split_labels_without_mappings_is_just_the_base() {
+        let agent = agent(&["self-hosted", "macos"], &[&["self-hosted", "macos"]]);
+        assert_eq!(
+            split_labels(&agent),
+            (strings(&["self-hosted", "macos"]), vec![])
+        );
+    }
 }

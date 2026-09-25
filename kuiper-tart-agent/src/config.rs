@@ -346,7 +346,7 @@ impl Config {
         let content = toml::to_string_pretty(self)
             .map_err(|e| Error::Config(format!("Failed to serialize config: {e}")))?;
 
-        std::fs::write(path, content)
+        write_private(path, content.as_bytes())
             .map_err(|e| Error::Config(format!("Failed to write config file: {e}")))?;
 
         Ok(())
@@ -372,6 +372,23 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("kuiper-tart-agent")
     }
+}
+
+/// Write `content` readable by the owner only, since the config can hold the VM SSH password.
+fn write_private(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+
+    // `mode` only applies when the file is created, so tighten an existing one before the secret goes in
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(content)
 }
 
 /// Expand ~ to the user's home directory.
@@ -422,6 +439,22 @@ base_image = "macos-runner"
         assert_eq!(config.tart.max_macos_vms, 2);
         assert_eq!(config.tart.max_total_vms, 5);
         assert_eq!(config.cleanup.max_vm_age_hours, 2);
+    }
+
+    #[test]
+    fn test_write_private_tightens_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("kta-config-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private(&path, b"new").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(mode, 0o600);
+        assert_eq!(content, "new");
     }
 
     #[test]
