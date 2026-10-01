@@ -40,23 +40,36 @@ case "$arch" in
     *) die "unsupported architecture: $arch" ;;
 esac
 
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
 version="${KUIPER_VERSION:-}"
 version="${version#v}"
 if [ -z "$version" ]; then
-    # the repo releases several crates so /releases/latest may not be ours. the list is newest first, and the
-    # pattern skips pre-release tags like -rc1
-    version=$(api "https://api.github.com/repos/$REPO/releases?per_page=100" |
-        grep -o "\"tag_name\": *\"$BIN-v[0-9]*\.[0-9]*\.[0-9]*\"" |
-        head -1 |
-        sed "s/.*$BIN-v\([^\"]*\)\"/\1/") || true
+    # the repo releases several crates so /releases/latest may not be ours. grepping tag names isn't enough either: a
+    # token with push access also sees drafts. jq only ships with macOS 15+, JXA is always there
+    api -o "$tmp/releases.json" "https://api.github.com/repos/$REPO/releases?per_page=100" ||
+        die "couldn't list releases"
+    version=$(osascript -l JavaScript -e '
+        function run(argv) {
+            ObjC.import("Foundation");
+            const text = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js;
+            const re = new RegExp("^" + argv[1] + "-v(\\d+)\\.(\\d+)\\.(\\d+)$");
+            const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+            let best = null;
+            for (const r of JSON.parse(text)) {
+                const m = re.exec(r.tag_name);
+                if (r.draft || r.prerelease || !m) continue;
+                const v = m.slice(1).map(Number);
+                if (!best || cmp(v, best) > 0) best = v;
+            }
+            return best ? best.join(".") : "";
+        }' "$tmp/releases.json" "$BIN") || true
     [ -n "$version" ] || die "couldn't find a $BIN release"
 fi
 
 archive="$BIN-v$version-$target.tar.gz"
 url="https://github.com/$REPO/releases/download/$BIN-v$version/$archive"
-
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
 
 echo "Downloading $archive..."
 curl -fsSL -o "$tmp/$archive" "$url" || die "download failed: $url"
