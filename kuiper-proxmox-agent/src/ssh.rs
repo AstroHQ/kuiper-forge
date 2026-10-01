@@ -350,7 +350,7 @@ impl Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        _server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
         // Accept all server keys for now
         // In production, you might want to implement known_hosts checking

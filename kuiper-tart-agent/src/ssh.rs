@@ -11,7 +11,7 @@ use chrono::Local;
 use russh::ChannelMsg;
 use russh::client::{self, Config, Handle, Handler};
 use russh::keys::key::PrivateKeyWithHashAlg;
-use russh::keys::ssh_key::PublicKey;
+use russh::keys::PublicKeyOrCertificate;
 use russh::keys::{HashAlg, PrivateKey};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -107,7 +107,7 @@ impl Handler for SshHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        _server_public_key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
         // Accept all host keys for ephemeral VMs
         // In production, you might want to verify against known hosts
