@@ -31,6 +31,11 @@ fn domain_target() -> String {
     format!("gui/{uid}")
 }
 
+/// The launchctl target for the service, e.g. `gui/501/com.astropad.kuiper-tart-agent`.
+pub fn service_target() -> String {
+    format!("{}/{SERVICE_LABEL}", domain_target())
+}
+
 /// Check if the binary is in PATH and return its absolute path.
 pub fn find_binary_in_path() -> Result<PathBuf> {
     let output = Command::new("which")
@@ -139,8 +144,7 @@ pub fn load_service() -> Result<()> {
 
 /// Unload the service using launchctl.
 pub fn unload_service() -> Result<()> {
-    let domain = domain_target();
-    let service_target = format!("{domain}/{SERVICE_LABEL}");
+    let service_target = service_target();
 
     // Use modern bootout syntax
     let output = Command::new("launchctl")
@@ -162,12 +166,25 @@ pub fn unload_service() -> Result<()> {
 
 /// Check if the service is currently running.
 pub fn is_service_running() -> bool {
-    let domain = domain_target();
-    let service_target = format!("{domain}/{SERVICE_LABEL}");
-
     let output = Command::new("launchctl")
-        .args(["print", &service_target])
+        .args(["print", &service_target()])
         .output();
 
     output.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Restart the loaded service so it picks up a new binary.
+pub fn restart_service() -> Result<()> {
+    let output = Command::new("launchctl")
+        .args(["kickstart", "-k", &service_target()])
+        .output()
+        .map_err(|e| Error::Install(format!("Failed to run launchctl: {e}")))?;
+
+    if !output.status.success() {
+        return Err(Error::Install(format!(
+            "launchctl kickstart failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
 }

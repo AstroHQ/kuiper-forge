@@ -123,6 +123,9 @@ jobs:
           fi
 
           tar czf "${ARCHIVE}" -C "target/${TARGET}/release" "${BINARY}"
+
+          # the install script and `kuiper-tart-agent update` verify against this
+          shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=${ARCHIVE}" >> $GITHUB_ENV
 
       - name: Package (windows)
@@ -134,6 +137,8 @@ jobs:
           $target = "${{ matrix.target }}"
           $archive = "${binary}-v${version}-${target}.zip"
           Compress-Archive -Path "target\${target}\release\${binary}.exe" -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline -Path "$archive.sha256" -Value "$hash  $archive"
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
       # Build .deb/.rpm for the proxmox agent's Linux targets via nfpm (run from
@@ -176,6 +181,7 @@ jobs:
           name: ${{ needs.setup.outputs.binary }}-${{ matrix.target }}
           path: |
             ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
             *.deb
             *.rpm
           if-no-files-found: ignore
