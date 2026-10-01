@@ -41,6 +41,7 @@ hex = "0.4"
 axum = "0.8"
 hmac = "0.12"
 sha2 = "0.10"
+semver = "1.0.28"
 
 # Agent-specific dependencies
 toml = "0.9"

@@ -44,7 +44,10 @@ kuiper-forge serve --config config.toml
 # Generate a registration bundle from the coordinator (includes server trust)
 kuiper-forge token create --url https://coordinator:9443
 
-# On a macOS host: the wizard checks tart + DHCP, asks for the bundle, then walks
+# On a macOS host: install the agent (later updates: `kuiper-tart-agent update`)
+curl -fsSL https://raw.githubusercontent.com/AstroHQ/kuiper-forge/main/scripts/install-tart-agent.sh | sh
+
+# the wizard checks tart + DHCP, asks for the bundle, then walks
 # through labels, image mappings and limits, pulls the images and can install the LaunchAgent
 kuiper-tart-agent setup
 

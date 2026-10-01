@@ -25,6 +25,7 @@ mod host_checks;
 mod install;
 mod setup;
 mod ssh;
+mod update;
 mod vm_manager;
 
 use std::path::{Path, PathBuf};
@@ -88,6 +89,17 @@ enum Commands {
         #[arg(long)]
         purge: bool,
     },
+    /// Update to the latest release from GitHub, restarting the LaunchAgent if it's running
+    Update {
+        /// Install this version instead of the latest (e.g. 0.4.0), allows downgrades
+        version: Option<String>,
+        /// Only check whether an update is available
+        #[arg(long)]
+        check: bool,
+        /// Restart the LaunchAgent without asking, even if VMs are running
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -116,6 +128,13 @@ async fn main() -> anyhow::Result<()> {
             }
             Commands::Uninstall { purge } => {
                 return cmd_uninstall(purge, &config_path).await;
+            }
+            Commands::Update {
+                version,
+                check,
+                yes,
+            } => {
+                return update::run(version, check, yes).await;
             }
         }
     }
