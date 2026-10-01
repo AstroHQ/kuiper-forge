@@ -2,6 +2,16 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-tart-agent-v0.5.0 - 2026-10-01
+#### Features
+- install script & `kuiper-tart-agent update` self-update from GitHub releases - (efca8cf) - *jfro*
+- setup wizard for kuiper-tart-agent - (d05875b) - *jfro*
+
+#### Bug Fixes
+- setup label issue & API returning incomplete labels from recent change - (231bb63) - *jfro*
+- cleaner label display in dashboard - (fa20bfd) - *jfro*
+
+- - -
 ## kuiper-tart-agent-v0.4.0 - 2026-09-24
 #### Features
 - linux VMs supported in tart-agent - (d01cb4a) - *jfro*
