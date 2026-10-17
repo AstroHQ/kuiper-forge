@@ -13,8 +13,8 @@ Status: **step 1 implemented** (GitHub polling); Forgejo steps proposed
   didn't list are checked with `get_job_status` before they're dropped, rather than
   removed outright.
 - Label mappings are applied to polled jobs through `webhook::resolve_runner_scope`,
-  shared with the webhook handler. The webhook-mode recovery scan still doesn't apply
-  mappings (unchanged behaviour).
+  shared with the webhook handler. The webhook-mode recovery scan now applies them too;
+  before, it accepted recovered jobs the webhook handler would have ignored.
 
 A third provisioning mode, alongside `fixed_capacity` and `webhook`, in which the
 coordinator discovers queued jobs by periodically asking the forge's API rather than

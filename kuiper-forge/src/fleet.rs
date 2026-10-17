@@ -597,13 +597,14 @@ impl FleetManager {
     /// Add queued jobs found by scanning the GitHub API to the pending queue.
     ///
     /// In webhook mode this recovers jobs queued while the coordinator was down or
-    /// whose webhooks were lost. In polling mode it's the poll itself, and
-    /// `apply_mappings` filters jobs through the label mappings exactly as the
-    /// webhook handler does.
+    /// whose webhooks were lost. In polling mode it's the poll itself (`polling`
+    /// only quiets the per-scan logging). Either way, jobs go through the label
+    /// mappings exactly as the webhook handler does, so a scan never accepts a job
+    /// a webhook would have ignored.
     ///
     /// Returns the ids of every job the scan listed as queued, or `None` if the
     /// scan didn't run or failed.
-    async fn recover_queued_jobs_from_github(&self, apply_mappings: bool) -> Option<HashSet<u64>> {
+    async fn recover_queued_jobs_from_github(&self, polling: bool) -> Option<HashSet<u64>> {
         use crate::webhook::{WebhookRunnerRequest, has_required_labels, resolve_runner_scope};
 
         let Some(filters) = self.config.provisioning.on_demand_filters() else {
@@ -612,7 +613,7 @@ impl FleetManager {
         };
         let required_labels = filters.required_labels;
 
-        if apply_mappings {
+        if polling {
             debug!("Polling GitHub API for queued jobs...");
         } else {
             info!("Polling GitHub API for queued jobs that may have been missed...");
@@ -629,7 +630,7 @@ impl FleetManager {
         let seen: HashSet<u64> = queued_jobs.iter().map(|job| job.job_id).collect();
 
         if queued_jobs.is_empty() {
-            if apply_mappings {
+            if polling {
                 debug!("No queued jobs found in GitHub");
             } else {
                 info!("No queued jobs found in GitHub");
@@ -678,17 +679,14 @@ impl FleetManager {
                 continue;
             }
 
-            // In polling mode, accept only jobs a label mapping accepts, as webhooks would
-            let (runner_scope, runner_group) = if apply_mappings {
-                let scan_scope = job.runner_scope.clone();
-                match resolve_runner_scope(job.job_id, &job.labels, &filters.label_mappings, || {
+            // Accept only jobs a label mapping accepts, as the webhook handler would
+            let scan_scope = job.runner_scope;
+            let Some((runner_scope, runner_group)) =
+                resolve_runner_scope(job.job_id, &job.labels, &filters.label_mappings, || {
                     scan_scope
-                }) {
-                    Some(resolved) => resolved,
-                    None => continue,
-                }
-            } else {
-                (job.runner_scope, None)
+                })
+            else {
+                continue;
             };
 
             // Add to pending queue
