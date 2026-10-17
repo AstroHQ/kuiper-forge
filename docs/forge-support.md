@@ -31,7 +31,9 @@ forge every `interval_secs` (default 120, min 10, warning below 60) and feeds th
 DB-backed pending queue webhook mode uses. Label mappings are applied through
 `webhook::resolve_runner_scope`, shared with the webhook handler. A pending job a scan
 no longer lists is checked with its forge before it's dropped, because the GitHub scan
-silently skips repos whose API calls fail. See [polling-mode.md](polling-mode.md) and
+silently skips repos whose API calls fail. The GitHub scan reads every page of workflow
+runs, of each run's jobs, and of App installations, so large matrix runs aren't stuck
+behind the first page. See [polling-mode.md](polling-mode.md) and
 [provisioning-flow.md](provisioning-flow.md).
 
 **Multi-forge groundwork.**
