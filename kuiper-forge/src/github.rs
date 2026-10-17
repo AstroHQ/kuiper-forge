@@ -18,111 +18,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::config::RunnerScope;
-
-/// Information about a queued workflow job discovered from GitHub API.
-#[derive(Debug, Clone)]
-pub struct QueuedJob {
-    /// The workflow job ID
-    pub job_id: u64,
-    /// Labels requested by this job
-    pub labels: Vec<String>,
-    /// The scope (org or repo) where this job was queued
-    pub runner_scope: RunnerScope,
-    /// Repository full name (owner/repo)
-    pub repository: Option<String>,
-}
-
-/// Trait for obtaining runner registration tokens and managing runners.
-///
-/// This abstracts the token source so we can use either:
-/// - Real GitHub API (production)
-/// - Mock tokens (dry-run/testing)
-#[async_trait]
-pub trait RunnerTokenProvider: Send + Sync {
-    /// Get a registration token for the given runner scope.
-    async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String>;
-
-    /// Generate a JIT (Just-In-Time) runner configuration.
-    /// Returns an encoded config blob that can be passed to `run.sh --jitconfig`.
-    /// The runner is pre-assigned to a specific job and auto-deregisters.
-    async fn generate_jitconfig(
-        &self,
-        scope: &RunnerScope,
-        runner_name: &str,
-        labels: &[String],
-        runner_group_id: u64,
-    ) -> Result<String>;
-
-    /// Remove a runner from GitHub by name.
-    /// This is called when a runner VM is destroyed or agent disconnects.
-    async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()>;
-
-    /// List all queued workflow jobs across all installations.
-    /// This is used on startup to recover jobs that may have been missed.
-    async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>>;
-
-    /// Get the status of a specific workflow job.
-    /// Returns the job status ("queued", "in_progress", "completed", etc.)
-    /// or None if the job is not found (404).
-    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>>;
-}
-
-/// Mock token provider for dry-run/testing mode.
-///
-/// Returns fake tokens that won't work with GitHub but allow testing
-/// the full agent VM lifecycle.
-pub struct MockTokenProvider;
-
-#[async_trait]
-impl RunnerTokenProvider for MockTokenProvider {
-    async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
-        let fake_token = format!("dry-run-token-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        info!(
-            "DRY-RUN: Generated fake registration token for {:?}: {}",
-            scope, fake_token
-        );
-        Ok(fake_token)
-    }
-
-    async fn generate_jitconfig(
-        &self,
-        scope: &RunnerScope,
-        runner_name: &str,
-        labels: &[String],
-        _runner_group_id: u64,
-    ) -> Result<String> {
-        let fake_jit = format!(
-            "dry-run-jitconfig-{}",
-            &uuid::Uuid::new_v4().to_string()[..8]
-        );
-        info!(
-            "DRY-RUN: Generated fake JIT config for runner '{}' in {:?} with labels {:?}",
-            runner_name, scope, labels
-        );
-        Ok(fake_jit)
-    }
-
-    async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {
-        info!(
-            "DRY-RUN: Would remove runner '{}' from {:?}",
-            runner_name, scope
-        );
-        Ok(())
-    }
-
-    async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
-        info!("DRY-RUN: list_queued_jobs returns empty (no GitHub API access)");
-        Ok(Vec::new())
-    }
-
-    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>> {
-        info!(
-            "DRY-RUN: get_job_status for job {} in {} returns None",
-            job_id, repo
-        );
-        Ok(None)
-    }
-}
+use crate::forge::{Forge, QueuedJob};
 
 /// GitHub API base URL
 const GITHUB_API_URL: &str = "https://api.github.com";
@@ -1007,7 +903,7 @@ impl GitHubClient {
                             name: repo.owner.login.clone(),
                         };
                         jobs.push(QueuedJob {
-                            job_id: job.id,
+                            id: job.id.to_string(),
                             labels: job.labels,
                             runner_scope: scope,
                             repository: Some(repo.full_name.clone()),
@@ -1022,7 +918,11 @@ impl GitHubClient {
 }
 
 #[async_trait]
-impl RunnerTokenProvider for GitHubClient {
+impl Forge for GitHubClient {
+    fn scope_url(&self, scope: &RunnerScope) -> String {
+        scope.to_url()
+    }
+
     async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
         // Delegate to the inherent method
         GitHubClient::get_registration_token(self, scope).await
@@ -1048,8 +948,10 @@ impl RunnerTokenProvider for GitHubClient {
         GitHubClient::list_queued_jobs(self).await
     }
 
-    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>> {
-        // Delegate to the inherent method
+    async fn get_job_status(&self, repo: &str, job_id: &str) -> Result<Option<String>> {
+        let job_id: u64 = job_id
+            .parse()
+            .map_err(|_| anyhow!("invalid GitHub job id '{job_id}'"))?;
         GitHubClient::get_job_status(self, repo, job_id).await
     }
 }

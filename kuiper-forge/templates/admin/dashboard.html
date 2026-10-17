@@ -57,7 +57,7 @@
                 <tr>
                     <td>
                         {% if let Some(w) = job.workflow_name %}{{ w }} / {% endif %}{% if let Some(n) = job.job_name %}{{ n }}{% else %}job{% endif %}
-                        <div class="muted">#{{ job.job_id }}</div>
+                        <div class="muted">{{ job.job_id.forge() }} #{{ job.job_id.id() }}</div>
                     </td>
                     <td>{% if let Some(r) = job.repository %}{{ r }}{% else %}-{% endif %}</td>
                     <td>

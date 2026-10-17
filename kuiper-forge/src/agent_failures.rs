@@ -7,6 +7,7 @@ use sqlx::Row;
 use tracing::warn;
 
 use crate::db::{DbPool, DbRow};
+use crate::forge::JobKey;
 use crate::sql;
 
 const MAX_PER_AGENT: i64 = 100;
@@ -55,7 +56,7 @@ pub struct AgentFailure {
     /// `FailureKind::as_str` value, kept as a string so old rows survive new kinds
     pub kind: String,
     pub runner_name: Option<String>,
-    pub job_id: Option<u64>,
+    pub job_id: Option<JobKey>,
     pub message: String,
 }
 
@@ -75,7 +76,7 @@ impl AgentFailureStore {
         agent_id: &str,
         kind: FailureKind,
         runner_name: Option<&str>,
-        job_id: Option<u64>,
+        job_id: Option<&JobKey>,
         message: &str,
     ) {
         if let Err(e) = self
@@ -91,7 +92,7 @@ impl AgentFailureStore {
         agent_id: &str,
         kind: FailureKind,
         runner_name: Option<&str>,
-        job_id: Option<u64>,
+        job_id: Option<&JobKey>,
         message: &str,
     ) -> Result<(), sqlx::Error> {
         // fixed-width timestamps so ORDER BY on the text column sorts correctly
@@ -103,7 +104,7 @@ impl AgentFailureStore {
             .bind(now)
             .bind(kind.as_str())
             .bind(runner_name)
-            .bind(job_id.map(|id| id as i64))
+            .bind(job_id.map(JobKey::to_string))
             .bind(message)
             .execute(&self.pool)
             .await?;
@@ -142,7 +143,9 @@ fn row_to_failure(row: &DbRow) -> Option<AgentFailure> {
             .with_timezone(&Utc),
         kind: row.get("kind"),
         runner_name: row.get("runner_name"),
-        job_id: row.get::<Option<i64>, _>("job_id").map(|id| id as u64),
+        job_id: row
+            .get::<Option<String>, _>("job_id")
+            .and_then(|k| k.parse().ok()),
         message: row.get("message"),
     })
 }
@@ -168,7 +171,10 @@ mod tests {
                     "a1",
                     FailureKind::RunnerFailed,
                     Some("r"),
-                    Some(30_000_000_000 + i as u64),
+                    Some(&JobKey::new(
+                        "github",
+                        (30_000_000_000 + i as u64).to_string(),
+                    )),
                     &format!("boom {i}"),
                 )
                 .await;
@@ -181,10 +187,13 @@ mod tests {
         assert_eq!(a1.len() as i64, MAX_PER_AGENT);
         assert_eq!(a1[0].message, format!("boom {}", MAX_PER_AGENT + 4));
 
-        // job ids past i32 range must round-trip
+        // job keys must round-trip
         assert_eq!(
             a1[0].job_id,
-            Some(30_000_000_000 + MAX_PER_AGENT as u64 + 4)
+            Some(JobKey::new(
+                "github",
+                (30_000_000_000 + MAX_PER_AGENT as u64 + 4).to_string()
+            ))
         );
 
         let a2 = store.recent("a2", 10).await.unwrap();

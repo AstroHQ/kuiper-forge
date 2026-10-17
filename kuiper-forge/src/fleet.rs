@@ -21,7 +21,7 @@ use kuiper_agent_proto::{
 use crate::agent_failures::{AgentFailureStore, FailureKind};
 use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
-use crate::github::RunnerTokenProvider;
+use crate::forge::{Forge, ForgeRegistry, JobKey};
 use crate::pending_jobs::{PendingJobInfo, PendingJobStore};
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{WebhookEvent, WebhookNotifier};
@@ -136,16 +136,16 @@ enum JobCheck {
 /// So "the runner we made for job X finished" doesn't mean X ran. Check before dropping X from the
 /// pending queue, or the last job in a same-label burst is left queued with no runner and no record.
 async fn check_job_after_runner(
-    token_provider: &dyn RunnerTokenProvider,
+    forge: &dyn Forge,
     repository: Option<&str>,
-    job_id: u64,
+    job_id: &JobKey,
 ) -> JobCheck {
     let Some(repo) = repository else {
         // nothing to ask with, ever. keeping such a record would re-provision a runner every time
         // one finished until the stale sweep removed it, so fall back to trusting the runner
         return JobCheck::Done;
     };
-    match token_provider.get_job_status(repo, job_id).await {
+    match forge.get_job_status(repo, job_id.id()).await {
         Ok(Some(status)) if status == "queued" => JobCheck::Queued,
         Ok(_) => JobCheck::Done,
         Err(e) => {
@@ -159,8 +159,8 @@ async fn check_job_after_runner(
 pub struct FleetManager {
     /// Configuration
     config: Config,
-    /// Token provider for getting registration tokens (GitHub API or mock)
-    token_provider: Arc<dyn RunnerTokenProvider>,
+    /// Forges runners register with (GitHub API or mock), by configured name
+    forges: Arc<ForgeRegistry>,
     /// Agent registry for sending commands
     agent_registry: Arc<AgentRegistry>,
     /// Persistent runner state for crash recovery
@@ -185,6 +185,16 @@ pub struct FleetManager {
 }
 
 impl FleetManager {
+    /// The forge a stored runner is registered with. A runner recorded against a
+    /// forge that's no longer configured falls back to the default, where cleanup
+    /// calls fail harmlessly.
+    fn runner_forge(&self, forge: Option<&str>) -> Arc<dyn Forge> {
+        self.forges.for_runner(forge).unwrap_or_else(|e| {
+            warn!("{e} - using the default forge for runner cleanup");
+            self.forges.default_forge()
+        })
+    }
+
     /// Picks a unique runner/VM name that starts with the agent's short hostname, so you can tell where a runner
     /// lives from GitHub's runner list.
     async fn new_runner_name(&self, agent_id: &str) -> String {
@@ -201,7 +211,7 @@ impl FleetManager {
     /// and optionally a webhook notifier (only in webhook provisioning mode).
     pub fn new(
         config: Config,
-        token_provider: Arc<dyn RunnerTokenProvider>,
+        forges: Arc<ForgeRegistry>,
         agent_registry: Arc<AgentRegistry>,
         runner_state: Arc<RunnerStateStore>,
         pending_job_store: Arc<PendingJobStore>,
@@ -222,7 +232,7 @@ impl FleetManager {
 
         let manager = Self {
             config,
-            token_provider,
+            forges,
             agent_registry,
             runner_state,
             pending_job_store,
@@ -457,7 +467,7 @@ impl FleetManager {
             }
             WebhookEvent::JobCompleted { job_id } => {
                 // Remove from pending queue if it was waiting
-                self.pending_job_store.remove_job(job_id).await;
+                self.pending_job_store.remove_job(&job_id).await;
                 debug!("Cleaned up state for completed job {}", job_id);
 
                 // Job completed means an agent may be free - try pending jobs
@@ -491,7 +501,7 @@ impl FleetManager {
         );
 
         for (job_id, info) in pending {
-            self.verify_pending_job(job_id, &info).await;
+            self.verify_pending_job(&job_id, &info).await;
         }
     }
 
@@ -502,8 +512,8 @@ impl FleetManager {
     ///   webhook handler does), then verify only the pending jobs the scan no longer saw.
     async fn scan_github(&self) {
         if self.config.provisioning.mode == ProvisioningMode::Polling {
-            if let Some(seen) = self.recover_queued_jobs_from_github(true).await {
-                self.verify_dropped_pending_jobs(&seen).await;
+            if let Some(scan) = self.recover_queued_jobs_from_github(true).await {
+                self.verify_dropped_pending_jobs(&scan).await;
             }
         } else {
             self.verify_pending_jobs_with_github().await;
@@ -515,8 +525,9 @@ impl FleetManager {
     ///
     /// A job missing from the scan was probably cancelled or started, but the scan
     /// skips repos whose API calls fail and repos outside the lookback window, so a
-    /// missing job is checked with GitHub before it's dropped.
-    async fn verify_dropped_pending_jobs(&self, seen: &HashSet<u64>) {
+    /// missing job is checked with its forge before it's dropped. Jobs on forges the
+    /// scan couldn't list are left alone.
+    async fn verify_dropped_pending_jobs(&self, scan: &QueueScan) {
         let pending = match self.pending_job_store.get_all_pending_jobs().await {
             Ok(jobs) => jobs,
             Err(e) => {
@@ -524,7 +535,7 @@ impl FleetManager {
                 return;
             }
         };
-        let dropped = dropped_pending_jobs(pending, seen);
+        let dropped = dropped_pending_jobs(pending, scan);
         if dropped.is_empty() {
             return;
         }
@@ -533,13 +544,13 @@ impl FleetManager {
             dropped.len()
         );
         for (job_id, info) in dropped {
-            self.verify_pending_job(job_id, &info).await;
+            self.verify_pending_job(&job_id, &info).await;
         }
     }
 
     /// Check one pending job's status on GitHub and drop it from the queue unless
     /// it's still queued (or GitHub couldn't be asked).
-    async fn verify_pending_job(&self, job_id: u64, info: &PendingJobInfo) {
+    async fn verify_pending_job(&self, job_id: &JobKey, info: &PendingJobInfo) {
         // Age threshold for jobs without repository info (can't check GitHub status)
         let max_age_without_repo = chrono::Duration::hours(24);
         let now = chrono::Utc::now();
@@ -563,7 +574,16 @@ impl FleetManager {
             return;
         };
 
-        match self.token_provider.get_job_status(repo, job_id).await {
+        let forge = match self.forges.for_job(job_id) {
+            Ok(forge) => forge,
+            Err(e) => {
+                warn!("Pending job {}: {} - removing from queue", job_id, e);
+                self.pending_job_store.remove_job(job_id).await;
+                return;
+            }
+        };
+
+        match forge.get_job_status(repo, job_id.id()).await {
             Ok(Some(status)) if status == "queued" || status == "waiting" => {
                 // Job is still pending on GitHub - keep it
                 debug!("Job {} is still {} on GitHub", job_id, status);
@@ -602,9 +622,9 @@ impl FleetManager {
     /// mappings exactly as the webhook handler does, so a scan never accepts a job
     /// a webhook would have ignored.
     ///
-    /// Returns the ids of every job the scan listed as queued, or `None` if the
-    /// scan didn't run or failed.
-    async fn recover_queued_jobs_from_github(&self, polling: bool) -> Option<HashSet<u64>> {
+    /// Returns which forges were listed and every job they listed as queued, or
+    /// `None` if the scan didn't run or no forge could be listed.
+    async fn recover_queued_jobs_from_github(&self, polling: bool) -> Option<QueueScan> {
         use crate::webhook::{WebhookRunnerRequest, has_required_labels, resolve_runner_scope};
 
         let Some(filters) = self.config.provisioning.on_demand_filters() else {
@@ -619,15 +639,27 @@ impl FleetManager {
             info!("Polling GitHub API for queued jobs that may have been missed...");
         }
 
-        // Query GitHub for queued jobs
-        let queued_jobs = match self.token_provider.list_queued_jobs().await {
-            Ok(jobs) => jobs,
-            Err(e) => {
-                warn!("Failed to list queued jobs from GitHub: {}", e);
-                return None;
+        // Query every forge for queued jobs; a forge that fails is left out of this scan
+        let mut scan = QueueScan::default();
+        let mut queued_jobs = Vec::new();
+        for (name, forge) in self.forges.iter() {
+            match forge.list_queued_jobs().await {
+                Ok(jobs) => {
+                    scan.forges.insert(name.to_string());
+                    for job in jobs {
+                        let key = JobKey::new(name, job.id.clone());
+                        scan.seen.insert(key.clone());
+                        queued_jobs.push((key, job));
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to list queued jobs from forge '{}': {}", name, e);
+                }
             }
-        };
-        let seen: HashSet<u64> = queued_jobs.iter().map(|job| job.job_id).collect();
+        }
+        if scan.forges.is_empty() {
+            return None;
+        }
 
         if queued_jobs.is_empty() {
             if polling {
@@ -635,7 +667,7 @@ impl FleetManager {
             } else {
                 info!("No queued jobs found in GitHub");
             }
-            return Some(seen);
+            return Some(scan);
         }
 
         let total_jobs = queued_jobs.len();
@@ -645,34 +677,34 @@ impl FleetManager {
         );
 
         let mut added_count = 0;
-        for job in queued_jobs {
+        for (job_id, job) in queued_jobs {
             // Check if job matches required_labels
             if !has_required_labels(&job.labels, &required_labels) {
                 debug!(
                     "Job {} doesn't match required labels {:?} - skipping",
-                    job.job_id, required_labels
+                    job_id, required_labels
                 );
                 continue;
             }
 
             // Check if we already have this job in pending queue
-            if self.pending_job_store.has_job(job.job_id).await {
-                debug!("Job {} already in pending queue - skipping", job.job_id);
+            if self.pending_job_store.has_job(&job_id).await {
+                debug!("Job {} already in pending queue - skipping", job_id);
                 continue;
             }
 
             // Check if we already have a runner for this job
-            let existing = self.runner_state.runners_for_job(job.job_id).await;
+            let existing = self.runner_state.runners_for_job(&job_id).await;
             if !existing.is_empty() {
                 if existing.len() > 1 {
                     error!(
-                        job_id = %job.job_id,
+                        job_id = %job_id,
                         runners = ?existing,
                         "Multiple runners exist for the same job — state corruption"
                     );
                 }
                 info!(
-                    job_id = %job.job_id,
+                    job_id = %job_id,
                     runners = ?existing,
                     "Job already has active runner - skipping GitHub recovery"
                 );
@@ -682,16 +714,14 @@ impl FleetManager {
             // Accept only jobs a label mapping accepts, as the webhook handler would
             let scan_scope = job.runner_scope;
             let Some((runner_scope, runner_group)) =
-                resolve_runner_scope(job.job_id, &job.labels, &filters.label_mappings, || {
-                    scan_scope
-                })
+                resolve_runner_scope(&job_id, &job.labels, &filters.label_mappings, || scan_scope)
             else {
                 continue;
             };
 
             // Add to pending queue
             let request = WebhookRunnerRequest {
-                job_id: job.job_id,
+                job_id: job_id.clone(),
                 job_labels: job.labels.clone(),
                 agent_labels: job.labels.clone(), // Use job labels for agent matching
                 runner_scope,
@@ -702,10 +732,7 @@ impl FleetManager {
             };
 
             if self.pending_job_store.add_job(&request).await {
-                info!(
-                    "Recovered queued job {} from GitHub (labels: {:?})",
-                    job.job_id, job.labels
-                );
+                info!("Recovered queued job {} (labels: {:?})", job_id, job.labels);
                 added_count += 1;
             }
         }
@@ -722,7 +749,7 @@ impl FleetManager {
                 total_jobs
             );
         }
-        Some(seen)
+        Some(scan)
     }
 
     /// Process pending jobs when capacity becomes available.
@@ -752,12 +779,12 @@ impl FleetManager {
                     "Pending job {} has exceeded max retries ({}) - abandoning",
                     job_id, MAX_RETRIES
                 );
-                self.pending_job_store.remove_job(job_id).await;
+                self.pending_job_store.remove_job(&job_id).await;
                 continue;
             }
 
             // Skip if a runner already exists for this job (it's already being processed)
-            let existing = self.runner_state.runners_for_job(job_id).await;
+            let existing = self.runner_state.runners_for_job(&job_id).await;
             if !existing.is_empty() {
                 if existing.len() > 1 {
                     error!(
@@ -785,7 +812,7 @@ impl FleetManager {
                         .as_deref()
                         .and_then(|g| g.parse::<u64>().ok())
                         .unwrap_or(1),
-                    job_id,
+                    &job_id,
                     job_info.job_name.as_deref(),
                     job_info.repository.as_deref(),
                     job_info.workflow_name.as_deref(),
@@ -811,7 +838,7 @@ impl FleetManager {
                         // Different error (token fetch failed, etc.) - increment retry count
                         if let Some(new_count) = self
                             .pending_job_store
-                            .increment_retry_count(job_id, None)
+                            .increment_retry_count(&job_id, None)
                             .await
                         {
                             if new_count >= MAX_RETRIES {
@@ -819,7 +846,7 @@ impl FleetManager {
                                     "Job {} failed to create runner and exceeded max retries: {}",
                                     job_id, e
                                 );
-                                self.pending_job_store.remove_job(job_id).await;
+                                self.pending_job_store.remove_job(&job_id).await;
                             } else {
                                 warn!(
                                     "Job {} failed to create runner (attempt {}/{}): {}",
@@ -844,11 +871,13 @@ impl FleetManager {
         avoid_agents: &[String],
         runner_scope: &RunnerScope,
         runner_group_id: u64,
-        job_id: u64,
+        job_id: &JobKey,
         job_name: Option<&str>,
         repository: Option<&str>,
         workflow_name: Option<&str>,
     ) -> anyhow::Result<()> {
+        let forge = self.forges.for_job(job_id)?;
+
         // Find the least loaded agent with matching labels, steering away from ones that already
         // failed this job
         let agent_id = self
@@ -877,7 +906,7 @@ impl FleetManager {
 
         // Verify the job is still queued before committing resources
         if let Some(repo) = repository {
-            match self.token_provider.get_job_status(repo, job_id).await {
+            match forge.get_job_status(repo, job_id.id()).await {
                 Ok(Some(status)) if status != "queued" => {
                     info!(
                         "Job {} is no longer queued (status: {}) — skipping runner creation",
@@ -912,8 +941,7 @@ impl FleetManager {
         }
 
         // Generate JIT config (webhook mode — runner is pre-assigned to this job)
-        let jit_config = match self
-            .token_provider
+        let jit_config = match forge
             .generate_jitconfig(runner_scope, &runner_name, labels, runner_group_id)
             .await
         {
@@ -934,7 +962,8 @@ impl FleetManager {
                 agent_id.clone(),
                 runner_name.clone(), // vm_name is same as runner_name
                 runner_scope.clone(),
-                Some(job_id),
+                job_id.forge(),
+                Some(job_id.clone()),
                 job_name.map(String::from),
                 repository.map(String::from),
                 workflow_name.map(String::from),
@@ -948,7 +977,7 @@ impl FleetManager {
             vm_name: runner_name.clone(),
             registration_token: String::new(), // Not needed for JIT
             labels: labels.to_vec(),
-            runner_scope_url: runner_scope.to_url(),
+            runner_scope_url: forge.scope_url(runner_scope),
             jit_config,
             label_set_id: String::new(), // the agent picks by job labels
         };
@@ -964,7 +993,8 @@ impl FleetManager {
 
         // Clone for async task
         let agent_registry = self.agent_registry.clone();
-        let token_provider = self.token_provider.clone();
+        let forge = forge.clone();
+        let job_id = job_id.clone();
         let pending_job_store = self.pending_job_store.clone();
         let runner_scope = runner_scope.clone();
         let runner_name_clone = runner_name.clone();
@@ -978,7 +1008,7 @@ impl FleetManager {
         // (agent rejection, timeout, unexpected response)
         async fn handle_command_failure(
             pending_job_store: &crate::pending_jobs::PendingJobStore,
-            job_id: u64,
+            job_id: &JobKey,
             agent_id: &str,
             error_context: &str,
         ) {
@@ -1031,16 +1061,15 @@ impl FleetManager {
                                     &agent_id_clone,
                                     FailureKind::CommandRejected,
                                     Some(&runner_name_clone),
-                                    Some(job_id),
+                                    Some(&job_id),
                                     &ack.error,
                                 )
                                 .await;
                             agent_registry
                                 .release_slot(&agent_id_clone, &runner_name_clone)
                                 .await;
-                            if let Err(e) = token_provider
-                                .remove_runner(&runner_scope, &runner_name_clone)
-                                .await
+                            if let Err(e) =
+                                forge.remove_runner(&runner_scope, &runner_name_clone).await
                             {
                                 warn!(
                                     "Could not remove runner '{}' from GitHub: {}",
@@ -1063,9 +1092,9 @@ impl FleetManager {
                         let mut reprovision = false;
                         if result.success {
                             match check_job_after_runner(
-                                token_provider.as_ref(),
+                                forge.as_ref(),
                                 repository_clone.as_deref(),
-                                job_id,
+                                &job_id,
                             )
                             .await
                             {
@@ -1088,7 +1117,7 @@ impl FleetManager {
                                         "Runner {} completed successfully (webhook)",
                                         runner_name_clone
                                     );
-                                    pending_job_store.remove_job(job_id).await;
+                                    pending_job_store.remove_job(&job_id).await;
                                 }
                             }
                         } else {
@@ -1098,21 +1127,19 @@ impl FleetManager {
                                     &agent_id_clone,
                                     FailureKind::RunnerFailed,
                                     Some(&runner_name_clone),
-                                    Some(job_id),
+                                    Some(&job_id),
                                     &result.error,
                                 )
                                 .await;
                             handle_command_failure(
                                 &pending_job_store,
-                                job_id,
+                                &job_id,
                                 &agent_id_clone,
                                 &format!("runner failure: {}", result.error),
                             )
                             .await;
                         }
-                        if let Err(e) = token_provider
-                            .remove_runner(&runner_scope, &runner_name_clone)
-                            .await
+                        if let Err(e) = forge.remove_runner(&runner_scope, &runner_name_clone).await
                         {
                             warn!(
                                 "Could not remove runner '{}' from GitHub: {}",
@@ -1136,16 +1163,14 @@ impl FleetManager {
                                 &agent_id_clone,
                                 FailureKind::CommandFailed,
                                 Some(&runner_name_clone),
-                                Some(job_id),
+                                Some(&job_id),
                                 &format!("unexpected response to CreateRunner: {other:?}"),
                             )
                             .await;
                         agent_registry
                             .release_slot(&agent_id_clone, &runner_name_clone)
                             .await;
-                        if let Err(e) = token_provider
-                            .remove_runner(&runner_scope, &runner_name_clone)
-                            .await
+                        if let Err(e) = forge.remove_runner(&runner_scope, &runner_name_clone).await
                         {
                             warn!(
                                 "Could not remove runner '{}' from GitHub: {}",
@@ -1155,7 +1180,7 @@ impl FleetManager {
                         runner_state.remove_runner(&runner_name_clone).await;
                         handle_command_failure(
                             &pending_job_store,
-                            job_id,
+                            &job_id,
                             &agent_id_clone,
                             "unexpected agent response",
                         )
@@ -1169,16 +1194,15 @@ impl FleetManager {
                             &agent_id_clone,
                             FailureKind::CommandFailed,
                             Some(&runner_name_clone),
-                            Some(job_id),
+                            Some(&job_id),
                             &format!("CreateRunner: {e:#}"),
                         )
                         .await;
                     agent_registry
                         .release_slot(&agent_id_clone, &runner_name_clone)
                         .await;
-                    if let Err(e_inner) = token_provider
-                        .remove_runner(&runner_scope, &runner_name_clone)
-                        .await
+                    if let Err(e_inner) =
+                        forge.remove_runner(&runner_scope, &runner_name_clone).await
                     {
                         warn!(
                             "Could not remove runner '{}' from GitHub: {}",
@@ -1188,7 +1212,7 @@ impl FleetManager {
                     runner_state.remove_runner(&runner_name_clone).await;
                     handle_command_failure(
                         &pending_job_store,
-                        job_id,
+                        &job_id,
                         &agent_id_clone,
                         &format!("command error: {e}"),
                     )
@@ -1242,6 +1266,7 @@ impl FleetManager {
                     runner_name.clone(),
                     recovery_info.agent_id.clone(),
                     runner_info.runner_scope,
+                    self.runner_forge(runner_info.forge.as_deref()),
                 );
             } else {
                 // VM is gone - the runner completed or failed while coordinator was down
@@ -1250,8 +1275,8 @@ impl FleetManager {
                     runner_name, recovery_info.agent_id
                 );
 
-                // Clean up from GitHub
-                let token_provider = self.token_provider.clone();
+                // Clean up from the forge
+                let token_provider = self.runner_forge(runner_info.forge.as_deref());
                 let runner_scope = runner_info.runner_scope.clone();
                 let runner_name_clone = runner_name.clone();
                 let runner_state = self.runner_state.clone();
@@ -1317,7 +1342,7 @@ impl FleetManager {
                             &event.agent_id,
                             FailureKind::RunnerFailed,
                             Some(&runner_name),
-                            runner_info.as_ref().and_then(|r| r.job_id),
+                            runner_info.as_ref().and_then(|r| r.job_id.as_ref()),
                             &event.event.error,
                         )
                         .await;
@@ -1355,25 +1380,34 @@ impl FleetManager {
                             &event.agent_id,
                             FailureKind::RunnerLost,
                             Some(&runner_name),
-                            runner_info.job_id,
+                            runner_info.job_id.as_ref(),
                             message,
                         )
                         .await;
                 }
 
                 // Handle pending job state based on runner outcome
-                if let Some(job_id) = runner_info.job_id {
+                if let Some(job_id) = runner_info.job_id.clone() {
                     use crate::pending_jobs::MAX_RETRIES;
 
                     match event_type {
                         RunnerEventType::Completed => {
-                            match check_job_after_runner(
-                                self.token_provider.as_ref(),
-                                runner_info.repository.as_deref(),
-                                job_id,
-                            )
-                            .await
-                            {
+                            let check = match self.forges.for_job(&job_id) {
+                                Ok(forge) => {
+                                    check_job_after_runner(
+                                        forge.as_ref(),
+                                        runner_info.repository.as_deref(),
+                                        &job_id,
+                                    )
+                                    .await
+                                }
+                                Err(e) => {
+                                    // the forge is no longer configured, nobody can run the job here
+                                    warn!(job_id = %job_id, "Can't verify job after runner completion: {e}");
+                                    JobCheck::Done
+                                }
+                            };
+                            match check {
                                 JobCheck::Queued => {
                                     // the runner ran some sibling job; leave ours pending so the
                                     // reprocess below makes it a fresh runner
@@ -1395,7 +1429,7 @@ impl FleetManager {
                                     );
                                 }
                                 JobCheck::Done => {
-                                    self.pending_job_store.remove_job(job_id).await;
+                                    self.pending_job_store.remove_job(&job_id).await;
                                     info!(
                                         agent_id = %event.agent_id,
                                         runner_name = %runner_name,
@@ -1409,7 +1443,7 @@ impl FleetManager {
                             // Failure - increment retry count for potential retry
                             if let Some(new_count) = self
                                 .pending_job_store
-                                .increment_retry_count(job_id, Some(&event.agent_id))
+                                .increment_retry_count(&job_id, Some(&event.agent_id))
                                 .await
                             {
                                 if new_count >= MAX_RETRIES {
@@ -1421,7 +1455,7 @@ impl FleetManager {
                                         "Runner failed and job exceeded max retries ({}) - abandoning",
                                         MAX_RETRIES
                                     );
-                                    self.pending_job_store.remove_job(job_id).await;
+                                    self.pending_job_store.remove_job(&job_id).await;
                                 } else {
                                     warn!(
                                         agent_id = %event.agent_id,
@@ -1476,7 +1510,7 @@ impl FleetManager {
 
                 self.runner_state.remove_runner(&runner_name).await;
 
-                let token_provider = self.token_provider.clone();
+                let token_provider = self.runner_forge(runner_info.forge.as_deref());
                 let runner_scope = runner_info.runner_scope.clone();
                 let runner_name_clone = runner_name.clone();
                 tokio::spawn(async move {
@@ -1508,9 +1542,9 @@ impl FleetManager {
         runner_name: String,
         agent_id: String,
         runner_scope: crate::config::RunnerScope,
+        token_provider: Arc<dyn Forge>,
     ) {
         let agent_registry = self.agent_registry.clone();
-        let token_provider = self.token_provider.clone();
         let runner_state = self.runner_state.clone();
 
         tokio::spawn(async move {
@@ -1818,12 +1852,10 @@ impl FleetManager {
             }
             info!("Reserved slot on agent {}", agent_id);
 
-            // Get registration token from provider (GitHub API or mock)
-            let token = match self
-                .token_provider
-                .get_registration_token(runner_scope)
-                .await
-            {
+            // Get registration token from the default forge (GitHub API or mock):
+            // fixed-capacity pools register there
+            let forge = self.forges.default_forge();
+            let token = match forge.get_registration_token(runner_scope).await {
                 Ok(t) => t,
                 Err(e) => {
                     error!("Failed to get registration token: {}", e);
@@ -1842,6 +1874,7 @@ impl FleetManager {
                     agent_id.clone(),
                     runner_name.clone(), // vm_name is same as runner_name
                     runner_scope.clone(),
+                    self.forges.default_name(),
                     None, // job_id
                     None, // job_name
                     None, // repository
@@ -1856,7 +1889,7 @@ impl FleetManager {
                 vm_name: runner_name.clone(),
                 registration_token: token,
                 labels: pool_def.labels.clone(),
-                runner_scope_url: runner_scope.to_url(),
+                runner_scope_url: forge.scope_url(runner_scope),
                 jit_config: String::new(),
                 label_set_id: pool_def.label_set_id.clone(),
             };
@@ -1873,7 +1906,7 @@ impl FleetManager {
             // Clone for async task
             let agent_registry = self.agent_registry.clone();
             let agent_id_clone = agent_id.clone();
-            let token_provider = self.token_provider.clone();
+            let token_provider = forge.clone();
             let runner_scope = runner_scope.clone();
             let runner_name_clone = runner_name.clone();
             let runner_state = self.runner_state.clone();
@@ -2039,23 +2072,33 @@ fn runner_name_for_host(hostname: &str, suffix: &str) -> String {
     format!("{host}-{suffix}")
 }
 
-/// Pending jobs a successful scan no longer listed as queued, oldest first.
+/// What one scan of the forges' queues found.
+#[derive(Debug, Default)]
+struct QueueScan {
+    /// Forges whose queues were listed successfully
+    forges: HashSet<String>,
+    /// Every job those forges listed as queued
+    seen: HashSet<JobKey>,
+}
+
+/// Pending jobs the scan no longer listed as queued, oldest first. Only jobs on
+/// forges the scan actually listed count: an unreachable forge drops nothing.
 fn dropped_pending_jobs(
-    pending: Vec<(u64, PendingJobInfo)>,
-    seen: &HashSet<u64>,
-) -> Vec<(u64, PendingJobInfo)> {
+    pending: Vec<(JobKey, PendingJobInfo)>,
+    scan: &QueueScan,
+) -> Vec<(JobKey, PendingJobInfo)> {
     pending
         .into_iter()
-        .filter(|(job_id, _)| !seen.contains(job_id))
+        .filter(|(job_id, _)| scan.forges.contains(job_id.forge()) && !scan.seen.contains(job_id))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{dropped_pending_jobs, runner_name_for_host};
+    use super::{QueueScan, dropped_pending_jobs, runner_name_for_host};
     use crate::config::RunnerScope;
+    use crate::forge::JobKey;
     use crate::pending_jobs::PendingJobInfo;
-    use std::collections::HashSet;
 
     fn pending_job() -> PendingJobInfo {
         PendingJobInfo {
@@ -2072,22 +2115,52 @@ mod tests {
         }
     }
 
+    fn key(forge: &str, id: &str) -> JobKey {
+        JobKey::new(forge, id)
+    }
+
+    fn scan(forges: &[&str], seen: &[JobKey]) -> QueueScan {
+        QueueScan {
+            forges: forges.iter().map(|f| f.to_string()).collect(),
+            seen: seen.iter().cloned().collect(),
+        }
+    }
+
     #[test]
     fn dropped_pending_jobs_are_those_the_scan_missed() {
-        let pending = vec![(1, pending_job()), (2, pending_job()), (3, pending_job())];
-        let seen: HashSet<u64> = [2, 99].into_iter().collect();
-        let dropped: Vec<u64> = dropped_pending_jobs(pending, &seen)
+        let pending = vec![
+            (key("gh", "1"), pending_job()),
+            (key("gh", "2"), pending_job()),
+            (key("gh", "3"), pending_job()),
+        ];
+        let scan = scan(&["gh"], &[key("gh", "2"), key("gh", "99")]);
+        let dropped: Vec<JobKey> = dropped_pending_jobs(pending, &scan)
             .into_iter()
             .map(|(id, _)| id)
             .collect();
-        assert_eq!(dropped, vec![1, 3]);
+        assert_eq!(dropped, vec![key("gh", "1"), key("gh", "3")]);
     }
 
     #[test]
     fn nothing_dropped_when_scan_lists_everything() {
-        let pending = vec![(1, pending_job())];
-        let seen: HashSet<u64> = [1].into_iter().collect();
-        assert!(dropped_pending_jobs(pending, &seen).is_empty());
+        let pending = vec![(key("gh", "1"), pending_job())];
+        let scan = scan(&["gh"], &[key("gh", "1")]);
+        assert!(dropped_pending_jobs(pending, &scan).is_empty());
+    }
+
+    #[test]
+    fn jobs_on_unlisted_forges_are_not_dropped() {
+        // "fj" failed to list this scan, so its job's absence means nothing
+        let pending = vec![
+            (key("gh", "1"), pending_job()),
+            (key("fj", "1"), pending_job()),
+        ];
+        let scan = scan(&["gh"], &[]);
+        let dropped: Vec<JobKey> = dropped_pending_jobs(pending, &scan)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(dropped, vec![key("gh", "1")]);
     }
 
     #[test]

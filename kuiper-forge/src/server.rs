@@ -899,6 +899,10 @@ pub async fn run_server(
                 // Webhook mode (with optional admin)
                 let pjs = pending_job_store.expect("pending_job_store required in webhook mode");
                 let webhook_state = Arc::new(WebhookState {
+                    forge: wh_config
+                        .forge
+                        .clone()
+                        .unwrap_or_else(|| crate::forge::LEGACY_GITHUB_FORGE.to_string()),
                     config: wh_config.clone(),
                     notifier: wh_notifier,
                     pending_job_store: pjs.clone(),

@@ -193,6 +193,11 @@ pub struct WebhookConfig {
     /// would be missed by a narrow window — keep this generous, or `0`.
     #[serde(default = "default_queued_scan_lookback_hours")]
     pub queued_scan_lookback_hours: u64,
+
+    /// Configured name of the GitHub forge these webhooks come from (default:
+    /// the first GitHub forge). Webhook deliveries are GitHub-only for now.
+    #[serde(default)]
+    pub forge: Option<String>,
 }
 
 /// Polling configuration for dynamic runner provisioning.
@@ -297,13 +302,29 @@ pub struct LabelMapping {
     /// Optional runner group for the created runner.
     #[serde(default)]
     pub runner_group: Option<String>,
+
+    /// Only match jobs from this forge (by configured name). If not specified,
+    /// the mapping matches jobs from any forge.
+    #[serde(default)]
+    pub forge: Option<String>,
 }
 
 /// Main configuration for the coordinator daemon.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    /// GitHub App configuration
-    pub github: GitHubConfig,
+    /// GitHub App configuration (legacy single-forge form).
+    ///
+    /// Equivalent to one `[[forges]]` entry named `github` with `type = "github"`.
+    /// Use either this or `[[forges]]`, not both.
+    #[serde(default)]
+    pub github: Option<GitHubConfig>,
+
+    /// Forges to serve (GitHub, later Forgejo), each under a unique name.
+    ///
+    /// The first forge is the default: fixed-capacity pools and the global
+    /// `runner_scope` register with it.
+    #[serde(default)]
+    pub forges: Vec<ForgeConfig>,
 
     /// gRPC server settings
     #[serde(default)]
@@ -328,7 +349,7 @@ pub struct Config {
     #[serde(default)]
     pub provisioning: ProvisioningConfig,
 
-    /// Global runner scope - where all runners are registered in GitHub.
+    /// Global runner scope - where all runners are registered on the default forge.
     ///
     /// In fixed capacity mode, agents report their labels and capacity,
     /// and all runners are registered to this scope.
@@ -340,6 +361,34 @@ pub struct Config {
     /// org uses custom runner groups.
     #[serde(default)]
     pub runner_group: Option<String>,
+}
+
+/// A forge the coordinator serves, under a unique name.
+///
+/// ```toml
+/// [[forges]]
+/// name = "github"
+/// type = "github"
+/// app_id = 123456
+/// private_key_path = "/etc/kuiper/github-app.pem"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForgeConfig {
+    /// Name jobs and runners refer to this forge by. Must be unique and must not
+    /// contain `:` (it prefixes job keys like `github:123`).
+    pub name: String,
+
+    /// Which forge this is, and its credentials.
+    #[serde(flatten)]
+    pub kind: ForgeKindConfig,
+}
+
+/// Forge type and its settings, tagged by `type`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ForgeKindConfig {
+    /// GitHub, authenticated as a GitHub App.
+    Github(GitHubConfig),
 }
 
 /// GitHub App authentication configuration.
@@ -365,6 +414,40 @@ pub struct GitHubConfig {
     /// Supports `\n` escape sequences for single-line env var values.
     #[serde(default)]
     pub private_key: Option<String>,
+}
+
+impl Config {
+    /// The configured forges, with a legacy `[github]` section turned into a
+    /// forge named [`LEGACY_GITHUB_FORGE`](crate::forge::LEGACY_GITHUB_FORGE).
+    ///
+    /// Errors if none are configured, both forms are used, or names are invalid.
+    pub fn resolved_forges(&self) -> Result<Vec<ForgeConfig>> {
+        let forges = match (&self.github, self.forges.is_empty()) {
+            (Some(_), false) => {
+                anyhow::bail!("Configure forges with either [github] or [[forges]], not both")
+            }
+            (Some(github), true) => vec![ForgeConfig {
+                name: crate::forge::LEGACY_GITHUB_FORGE.to_string(),
+                kind: ForgeKindConfig::Github(github.clone()),
+            }],
+            (None, false) => self.forges.clone(),
+            (None, true) => {
+                anyhow::bail!("No forge configured: add a [github] or [[forges]] section")
+            }
+        };
+        for (i, forge) in forges.iter().enumerate() {
+            if forge.name.is_empty() || forge.name.contains(':') {
+                anyhow::bail!(
+                    "Invalid forge name '{}': must be non-empty and must not contain ':'",
+                    forge.name
+                );
+            }
+            if forges[..i].iter().any(|f| f.name == forge.name) {
+                anyhow::bail!("Forge name '{}' is configured more than once", forge.name);
+            }
+        }
+        Ok(forges)
+    }
 }
 
 impl GitHubConfig {
@@ -694,11 +777,12 @@ impl Config {
         tracing::info!("Using default configuration for dry-run mode");
         tracing::info!("Using agent-driven pool discovery");
         Ok(Config {
-            github: GitHubConfig {
+            github: Some(GitHubConfig {
                 app_id: 0,
                 private_key_path: None,
                 private_key: None,
-            },
+            }),
+            forges: Vec::new(),
             grpc: GrpcConfig::default(),
             tls: TlsConfig::with_defaults(data_dir),
             database: DatabaseConfig::default(),
@@ -747,6 +831,22 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # private_key = "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----"
 # Environment variable: KUIPER_GITHUB__PRIVATE_KEY
 # Note: installation_id is auto-discovered from your GitHub App installations
+
+# To serve several forges from one coordinator, replace [github] with a
+# [[forges]] list. Each forge has a unique name (jobs are tracked as
+# "<name>:<job id>"); the first one is the default, where fixed-capacity pools
+# and [runner_scope] register. A [github] section is the same as one forge
+# named "github".
+#
+# [[forges]]
+# name = "github"
+# type = "github"
+# app_id = 123456
+# private_key_path = "{data_dir_str}/github-app.pem"
+#
+# Label mappings (webhook/polling modes) can be limited to one forge with
+# `forge = "<name>"`, and [provisioning.webhook] takes `forge = "<name>"` to
+# say which GitHub forge its deliveries come from (default: the first).
 
 [grpc]
 listen_addr = "0.0.0.0:9443"
@@ -941,7 +1041,7 @@ name = "my-org"
 "#;
 
         let config = parse_config(config_str);
-        assert_eq!(config.github.app_id, 123456);
+        assert_eq!(config.github.as_ref().unwrap().app_id, 123456);
         assert_eq!(config.grpc.listen_addr, "0.0.0.0:9443");
         assert_eq!(
             config.runner_scope,
@@ -1166,6 +1266,75 @@ repo = "my-repo"
             polling.interval(),
             std::time::Duration::from_secs(MIN_POLL_INTERVAL_SECS)
         );
+    }
+
+    const FORGE_BASE: &str = r#"
+[tls]
+ca_cert = "/etc/ci-runner/ca.crt"
+ca_key = "/etc/ci-runner/ca.key"
+server_cert = "/etc/ci-runner/server.crt"
+server_key = "/etc/ci-runner/server.key"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
+"#;
+
+    #[test]
+    fn test_legacy_github_section_is_a_forge() {
+        let config = parse_config(&format!(
+            "{FORGE_BASE}\n[github]\napp_id = 7\nprivate_key_path = \"/k.pem\"\n"
+        ));
+        let forges = config.resolved_forges().unwrap();
+        assert_eq!(forges.len(), 1);
+        assert_eq!(forges[0].name, "github");
+        let ForgeKindConfig::Github(github) = &forges[0].kind;
+        assert_eq!(github.app_id, 7);
+    }
+
+    #[test]
+    fn test_forges_list() {
+        let config = parse_config(&format!(
+            "{FORGE_BASE}{}",
+            r#"
+[[forges]]
+name = "gh-main"
+type = "github"
+app_id = 1
+private_key_path = "/a.pem"
+
+[[forges]]
+name = "gh-other"
+type = "github"
+app_id = 2
+private_key = "PEM"
+"#
+        ));
+        let forges = config.resolved_forges().unwrap();
+        let names: Vec<_> = forges.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["gh-main", "gh-other"]);
+        let ForgeKindConfig::Github(second) = &forges[1].kind;
+        assert_eq!(second.app_id, 2);
+        assert_eq!(second.private_key.as_deref(), Some("PEM"));
+    }
+
+    #[test]
+    fn test_forge_config_errors() {
+        // neither form
+        assert!(parse_config(FORGE_BASE).resolved_forges().is_err());
+
+        let entry = |name: &str| {
+            format!("\n[[forges]]\nname = \"{name}\"\ntype = \"github\"\napp_id = 1\n")
+        };
+        // both forms
+        let both = format!("{FORGE_BASE}\n[github]\napp_id = 1\n{}", entry("x"));
+        assert!(parse_config(&both).resolved_forges().is_err());
+        // duplicate names
+        let dup = format!("{FORGE_BASE}{}{}", entry("x"), entry("x"));
+        assert!(parse_config(&dup).resolved_forges().is_err());
+        // ':' in a name
+        let colon = format!("{FORGE_BASE}{}", entry("a:b"));
+        assert!(parse_config(&colon).resolved_forges().is_err());
     }
 
     #[test]

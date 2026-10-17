@@ -1,6 +1,6 @@
 # Polling Provisioning Mode
 
-Status: **step 1 implemented** (GitHub polling); Forgejo steps proposed
+Status: **steps 1–2 implemented** (GitHub polling, multi-forge groundwork); Forgejo steps proposed
 
 ### Implementation notes (step 1)
 
@@ -128,14 +128,18 @@ run attempt by `handle` (a string); `id` stays the same across reruns while `att
 increments, and Forgejo's guidance is to use `handle` rather than build a key from the
 other fields.
 
-Proposal: replace `job_id: u64` with an opaque `JobKey(String)` plus a `forge` column.
+Implemented in step 2: jobs are keyed by `JobKey`, the forge's configured name plus
+its own id, stored as text `forge:id` (`github:123456`). One coordinator can serve
+several forges (`[[forges]]` in the config), so the forge name keeps their ids apart.
 
-- GitHub: `JobKey` = the workflow job id as a string.
-- Forgejo: `JobKey` = `handle`. A rerun is a new attempt, gets a new handle, and is
-  correctly treated as a new job.
-
-This needs a DB migration for both SQLite and Postgres (`sql.rs` has both dialects).
-The same change is a prerequisite for multi-forge support generally.
+- GitHub: the id is the workflow job id.
+- Forgejo: the id will be the `handle`. A rerun is a new attempt, gets a new handle, and
+  is correctly treated as a new job.
+- `active_runners` also gets a `forge` column, since fixed-capacity runners have no job.
+  `NULL` (runners stored before the migration) means the default forge.
+- Existing rows are migrated to `github:<id>`, the name a legacy `[github]` section
+  gets. SQLite rebuilds the tables (`migrations/sqlite/`), Postgres alters the column
+  types (`migrations/postgres/`).
 
 ## Forgejo specifics
 

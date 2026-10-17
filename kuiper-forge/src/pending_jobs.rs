@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::RunnerScope;
 use crate::db::DbPool;
+use crate::forge::JobKey;
 use crate::sql;
 use crate::webhook::WebhookRunnerRequest;
 
@@ -118,7 +119,7 @@ impl PendingJobStore {
         let created_at_str = created_at.to_rfc3339();
 
         let result = sqlx::query(sql::INSERT_PENDING_JOB)
-            .bind(request.job_id as i64)
+            .bind(request.job_id.to_string())
             .bind(&job_labels_json)
             .bind(&agent_labels_json)
             .bind(&scope_json)
@@ -146,9 +147,9 @@ impl PendingJobStore {
     }
 
     /// Remove a pending job from the store.
-    pub async fn remove_job(&self, job_id: u64) {
+    pub async fn remove_job(&self, job_id: &JobKey) {
         let result = sqlx::query(sql::DELETE_PENDING_JOB)
-            .bind(job_id as i64)
+            .bind(job_id.to_string())
             .execute(&self.pool)
             .await;
 
@@ -174,11 +175,11 @@ impl PendingJobStore {
     /// Returns the new retry count, or None if the job doesn't exist.
     pub async fn increment_retry_count(
         &self,
-        job_id: u64,
+        job_id: &JobKey,
         failed_agent: Option<&str>,
     ) -> Option<i32> {
         let result = sqlx::query(sql::INCREMENT_PENDING_JOB_RETRY)
-            .bind(job_id as i64)
+            .bind(job_id.to_string())
             .fetch_optional(&self.pool)
             .await;
 
@@ -204,7 +205,7 @@ impl PendingJobStore {
 
     /// Append an agent to the job's failed list. Read-modify-write is fine here: retries for one job
     /// are serialized by the fleet loop, and a lost entry only costs one extra attempt on that agent.
-    async fn record_failed_agent(&self, job_id: u64, agent_id: &str) {
+    async fn record_failed_agent(&self, job_id: &JobKey, agent_id: &str) {
         let Some((_, info)) = self.get_job(job_id).await else {
             return;
         };
@@ -225,7 +226,7 @@ impl PendingJobStore {
         };
         if let Err(e) = sqlx::query(sql::SET_PENDING_JOB_FAILED_AGENTS)
             .bind(&json)
-            .bind(job_id as i64)
+            .bind(job_id.to_string())
             .execute(&self.pool)
             .await
         {
@@ -234,9 +235,9 @@ impl PendingJobStore {
     }
 
     /// Get a single pending job.
-    pub async fn get_job(&self, job_id: u64) -> Option<(u64, PendingJobInfo)> {
+    pub async fn get_job(&self, job_id: &JobKey) -> Option<(JobKey, PendingJobInfo)> {
         match sqlx::query(sql::SELECT_PENDING_JOB)
-            .bind(job_id as i64)
+            .bind(job_id.to_string())
             .fetch_optional(&self.pool)
             .await
         {
@@ -250,9 +251,9 @@ impl PendingJobStore {
     }
 
     /// Get the current retry count for a pending job.
-    pub async fn get_retry_count(&self, job_id: u64) -> Option<i32> {
+    pub async fn get_retry_count(&self, job_id: &JobKey) -> Option<i32> {
         let result = sqlx::query(sql::GET_PENDING_JOB_RETRY_COUNT)
-            .bind(job_id as i64)
+            .bind(job_id.to_string())
             .fetch_optional(&self.pool)
             .await;
 
@@ -267,9 +268,9 @@ impl PendingJobStore {
     }
 
     /// Check if a job exists in the pending store.
-    pub async fn has_job(&self, job_id: u64) -> bool {
+    pub async fn has_job(&self, job_id: &JobKey) -> bool {
         let result = sqlx::query(sql::SELECT_PENDING_JOB)
-            .bind(job_id as i64)
+            .bind(job_id.to_string())
             .fetch_optional(&self.pool)
             .await;
 
@@ -279,7 +280,7 @@ impl PendingJobStore {
     /// Get all pending jobs (for startup recovery and processing).
     ///
     /// Returns jobs ordered by created_at (oldest first - FIFO).
-    pub async fn get_all_pending_jobs(&self) -> Result<Vec<(u64, PendingJobInfo)>, sqlx::Error> {
+    pub async fn get_all_pending_jobs(&self) -> Result<Vec<(JobKey, PendingJobInfo)>, sqlx::Error> {
         let rows = sqlx::query(sql::SELECT_ALL_PENDING_JOBS)
             .fetch_all(&self.pool)
             .await?;
@@ -314,8 +315,18 @@ impl PendingJobStore {
     }
 
     /// Convert a database row to a (job_id, PendingJobInfo) tuple.
-    fn row_to_pending_job(&self, row: crate::db::DbRow) -> Option<(u64, PendingJobInfo)> {
-        let job_id: i64 = row.try_get("job_id").ok()?;
+    fn row_to_pending_job(&self, row: crate::db::DbRow) -> Option<(JobKey, PendingJobInfo)> {
+        let job_id_str: String = row.try_get("job_id").ok()?;
+        let job_id: JobKey = match job_id_str.parse() {
+            Ok(key) => key,
+            Err(e) => {
+                warn!(
+                    "Skipping pending job with invalid key '{}': {}",
+                    job_id_str, e
+                );
+                return None;
+            }
+        };
         let job_labels_json: String = row.try_get("job_labels").ok()?;
         let agent_labels_json: String = row.try_get("agent_labels").ok()?;
         let scope_json: String = row.try_get("runner_scope").ok()?;
@@ -371,7 +382,7 @@ impl PendingJobStore {
         };
 
         Some((
-            job_id as u64,
+            job_id,
             PendingJobInfo {
                 job_labels,
                 agent_labels,
@@ -403,13 +414,17 @@ mod tests {
         (temp, PendingJobStore::new(db.pool()))
     }
 
+    fn key(id: u64) -> JobKey {
+        JobKey::new("github", id.to_string())
+    }
+
     fn request(job_id: u64) -> WebhookRunnerRequest {
         WebhookRunnerRequest {
             job_labels: vec!["self-hosted".into(), "macos".into()],
             agent_labels: vec!["self-hosted".into(), "macos".into()],
             runner_scope: RunnerScope::Organization { name: "org".into() },
             runner_group: None,
-            job_id,
+            job_id: key(job_id),
             repository: Some("org/repo".into()),
             job_name: None,
             workflow_name: None,
@@ -421,21 +436,30 @@ mod tests {
         let (_temp, store) = store().await;
         assert!(store.add_job(&request(1)).await);
 
-        assert_eq!(store.increment_retry_count(1, Some("a")).await, Some(1));
-        assert_eq!(store.increment_retry_count(1, None).await, Some(2));
-        assert_eq!(store.increment_retry_count(1, Some("a")).await, Some(3));
-        assert_eq!(store.increment_retry_count(1, Some("b")).await, Some(4));
+        assert_eq!(
+            store.increment_retry_count(&key(1), Some("a")).await,
+            Some(1)
+        );
+        assert_eq!(store.increment_retry_count(&key(1), None).await, Some(2));
+        assert_eq!(
+            store.increment_retry_count(&key(1), Some("a")).await,
+            Some(3)
+        );
+        assert_eq!(
+            store.increment_retry_count(&key(1), Some("b")).await,
+            Some(4)
+        );
 
-        let (_, info) = store.get_job(1).await.unwrap();
+        let (_, info) = store.get_job(&key(1)).await.unwrap();
         assert_eq!(info.retry_count, 4);
         assert_eq!(info.failed_agents, vec!["a".to_string(), "b".to_string()]);
 
         // fresh job has none
         assert!(store.add_job(&request(2)).await);
-        let (_, info) = store.get_job(2).await.unwrap();
+        let (_, info) = store.get_job(&key(2)).await.unwrap();
         assert!(info.failed_agents.is_empty());
 
         // unknown job is a no-op
-        assert_eq!(store.increment_retry_count(99, Some("a")).await, None);
+        assert_eq!(store.increment_retry_count(&key(99), Some("a")).await, None);
     }
 }

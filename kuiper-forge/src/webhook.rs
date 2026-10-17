@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::config::{LabelMapping, RunnerScope, WebhookConfig};
+use crate::forge::JobKey;
 use crate::pending_jobs::PendingJobStore;
 
 /// GitHub webhook event types we care about
@@ -88,8 +89,8 @@ pub struct WebhookRunnerRequest {
     pub runner_scope: RunnerScope,
     /// Optional runner group
     pub runner_group: Option<String>,
-    /// GitHub job ID (for logging/deduplication)
-    pub job_id: u64,
+    /// Job key (forge name + the forge's job id), for deduplication
+    pub job_id: JobKey,
     /// Repository full name (owner/repo) for GitHub API status checks
     pub repository: Option<String>,
     /// Job name from the workflow file
@@ -108,7 +109,7 @@ pub enum WebhookEvent {
     /// New job(s) available in pending queue - check and process
     NewJobAvailable,
     /// Job completed/cancelled - clean up state and check pending queue
-    JobCompleted { job_id: u64 },
+    JobCompleted { job_id: JobKey },
 }
 
 /// Handle for sending webhook events to the fleet manager
@@ -130,6 +131,8 @@ impl WebhookNotifier {
 /// Shared state for webhook handlers
 pub struct WebhookState {
     pub config: WebhookConfig,
+    /// Configured name of the GitHub forge these webhooks come from
+    pub forge: String,
     pub notifier: WebhookNotifier,
     /// Persistent store for pending jobs - webhook handler writes directly to DB
     pub pending_job_store: Arc<PendingJobStore>,
@@ -175,30 +178,33 @@ pub fn has_required_labels(job_labels: &[String], required_labels: &[String]) ->
 /// Match job labels against configured label mappings.
 ///
 /// Returns the first matching `LabelMapping`, or `None` if no match.
-/// A mapping matches if ALL of its labels are present in the job's labels
+/// A mapping matches if it applies to the job's forge (no `forge`, or the same
+/// name) and ALL of its labels are present in the job's labels
 /// (case-insensitive comparison).
 pub fn match_labels<'a>(
+    forge: &str,
     job_labels: &[String],
     mappings: &'a [LabelMapping],
 ) -> Option<&'a LabelMapping> {
     mappings.iter().find(|mapping| {
-        mapping.labels.iter().all(|required| {
-            job_labels
-                .iter()
-                .any(|job_label| job_label.eq_ignore_ascii_case(required))
-        })
+        mapping.forge.as_deref().is_none_or(|f| f == forge)
+            && mapping.labels.iter().all(|required| {
+                job_labels
+                    .iter()
+                    .any(|job_label| job_label.eq_ignore_ascii_case(required))
+            })
     })
 }
 
-/// Build the Axum router for webhook endpoints.
 /// Decide the runner scope and group for a queued job from the label mappings.
 ///
 /// With no mappings, every job is accepted with `default_scope`. Otherwise the first
 /// matching mapping wins (its scope falling back to `default_scope`), and a job no
-/// mapping matches is rejected with `None`. Shared by the webhook handler and the
-/// polling scan so both accept the same jobs.
+/// mapping matches is rejected with `None`. Mappings restricted to another forge
+/// never match. Shared by the webhook handler and the polling scan so both accept
+/// the same jobs.
 pub fn resolve_runner_scope(
-    job_id: u64,
+    job_id: &JobKey,
     job_labels: &[String],
     mappings: &[LabelMapping],
     default_scope: impl FnOnce() -> RunnerScope,
@@ -211,7 +217,7 @@ pub fn resolve_runner_scope(
         );
         return Some((scope, None));
     }
-    match match_labels(job_labels, mappings) {
+    match match_labels(job_id.forge(), job_labels, mappings) {
         Some(mapping) => {
             let scope = mapping.runner_scope.clone().unwrap_or_else(default_scope);
             info!(
@@ -230,6 +236,7 @@ pub fn resolve_runner_scope(
     }
 }
 
+/// Build the Axum router for webhook endpoints.
 pub fn webhook_router(state: Arc<WebhookState>) -> Router {
     let path = state.config.path.clone();
     Router::new()
@@ -347,8 +354,9 @@ async fn handle_webhook(
             };
 
             // Try to match labels to find runner scope and runner group
+            let job_key = JobKey::new(&state.forge, event.workflow_job.id.to_string());
             let Some((runner_scope, runner_group)) = resolve_runner_scope(
-                event.workflow_job.id,
+                &job_key,
                 &event.workflow_job.labels,
                 &state.config.label_mappings,
                 default_runner_scope,
@@ -363,7 +371,7 @@ async fn handle_webhook(
                 agent_labels: event.workflow_job.labels,
                 runner_scope,
                 runner_group,
-                job_id: event.workflow_job.id,
+                job_id: job_key,
                 repository: Some(event.repository.full_name),
                 job_name: Some(event.workflow_job.name),
                 workflow_name: event.workflow_name,
@@ -394,7 +402,7 @@ async fn handle_webhook(
             let _ = state
                 .notifier
                 .send(WebhookEvent::JobCompleted {
-                    job_id: event.workflow_job.id,
+                    job_id: JobKey::new(&state.forge, event.workflow_job.id.to_string()),
                 })
                 .await;
         }
@@ -471,6 +479,7 @@ mod tests {
                     name: "test-org".into(),
                 }),
                 runner_group: None,
+                forge: None,
             },
             LabelMapping {
                 labels: vec!["self-hosted".into(), "Linux".into()],
@@ -479,12 +488,13 @@ mod tests {
                     repo: "test-repo".into(),
                 }),
                 runner_group: Some("linux-runners".into()),
+                forge: None,
             },
         ];
 
         // Exact match
         let job_labels = vec!["self-hosted".into(), "macOS".into(), "ARM64".into()];
-        let matched = match_labels(&job_labels, &mappings);
+        let matched = match_labels("github", &job_labels, &mappings);
         assert!(matched.is_some());
         assert_eq!(
             matched.unwrap().runner_scope,
@@ -500,27 +510,27 @@ mod tests {
             "ARM64".into(),
             "gpu".into(),
         ];
-        let matched = match_labels(&job_labels, &mappings);
+        let matched = match_labels("github", &job_labels, &mappings);
         assert!(matched.is_some());
 
         // Case-insensitive
         let job_labels = vec!["SELF-HOSTED".into(), "macos".into(), "arm64".into()];
-        let matched = match_labels(&job_labels, &mappings);
+        let matched = match_labels("github", &job_labels, &mappings);
         assert!(matched.is_some());
 
         // No match (missing required label)
         let job_labels = vec!["self-hosted".into(), "macOS".into()];
-        let matched = match_labels(&job_labels, &mappings);
+        let matched = match_labels("github", &job_labels, &mappings);
         assert!(matched.is_none());
 
         // No match (github-hosted runner)
         let job_labels = vec!["ubuntu-latest".into()];
-        let matched = match_labels(&job_labels, &mappings);
+        let matched = match_labels("github", &job_labels, &mappings);
         assert!(matched.is_none());
 
         // Match second mapping
         let job_labels = vec!["self-hosted".into(), "Linux".into()];
-        let matched = match_labels(&job_labels, &mappings);
+        let matched = match_labels("github", &job_labels, &mappings);
         assert!(matched.is_some());
         assert!(matches!(
             matched.unwrap().runner_scope,
@@ -535,7 +545,13 @@ mod tests {
         };
 
         // No mappings: accept with the default scope
-        let (scope, group) = resolve_runner_scope(1, &["self-hosted".into()], &[], org).unwrap();
+        let (scope, group) = resolve_runner_scope(
+            &JobKey::new("github", "1"),
+            &["self-hosted".into()],
+            &[],
+            org,
+        )
+        .unwrap();
         assert!(matches!(scope, RunnerScope::Organization { ref name } if name == "default-org"));
         assert!(group.is_none());
 
@@ -544,6 +560,7 @@ mod tests {
                 labels: vec!["self-hosted".into(), "macOS".into()],
                 runner_scope: None,
                 runner_group: Some("mac".into()),
+                forge: None,
             },
             LabelMapping {
                 labels: vec!["self-hosted".into(), "Linux".into()],
@@ -552,39 +569,83 @@ mod tests {
                     repo: "r".into(),
                 }),
                 runner_group: None,
+                forge: None,
             },
         ];
 
         // Mapping without a scope falls back to the default, keeps its group
-        let (scope, group) =
-            resolve_runner_scope(2, &["self-hosted".into(), "macOS".into()], &mappings, org)
-                .unwrap();
+        let (scope, group) = resolve_runner_scope(
+            &JobKey::new("github", "2"),
+            &["self-hosted".into(), "macOS".into()],
+            &mappings,
+            org,
+        )
+        .unwrap();
         assert!(matches!(scope, RunnerScope::Organization { .. }));
         assert_eq!(group.as_deref(), Some("mac"));
 
         // Mapping scope wins
-        let (scope, _) =
-            resolve_runner_scope(3, &["self-hosted".into(), "Linux".into()], &mappings, org)
-                .unwrap();
+        let (scope, _) = resolve_runner_scope(
+            &JobKey::new("github", "3"),
+            &["self-hosted".into(), "Linux".into()],
+            &mappings,
+            org,
+        )
+        .unwrap();
         assert!(matches!(scope, RunnerScope::Repository { .. }));
 
         // No mapping matches: rejected
-        assert!(resolve_runner_scope(4, &["ubuntu-latest".into()], &mappings, org).is_none());
+        assert!(
+            resolve_runner_scope(
+                &JobKey::new("github", "4"),
+                &["ubuntu-latest".into()],
+                &mappings,
+                org
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_match_labels_empty() {
         let mappings: Vec<LabelMapping> = vec![];
         let job_labels = vec!["self-hosted".into()];
-        assert!(match_labels(&job_labels, &mappings).is_none());
+        assert!(match_labels("github", &job_labels, &mappings).is_none());
 
         let mappings = vec![LabelMapping {
             labels: vec!["self-hosted".into()],
             runner_scope: None, // Test with no runner_scope - will use repo from webhook
             runner_group: None,
+            forge: None,
         }];
         let job_labels: Vec<String> = vec![];
-        assert!(match_labels(&job_labels, &mappings).is_none());
+        assert!(match_labels("github", &job_labels, &mappings).is_none());
+    }
+
+    #[test]
+    fn test_match_labels_respects_forge() {
+        let mappings = vec![
+            LabelMapping {
+                labels: vec!["linux".into()],
+                runner_scope: None,
+                runner_group: Some("forgejo".into()),
+                forge: Some("knope".into()),
+            },
+            LabelMapping {
+                labels: vec!["linux".into()],
+                runner_scope: None,
+                runner_group: Some("any".into()),
+                forge: None,
+            },
+        ];
+        let job_labels = vec!["linux".into()];
+        let matched = match_labels("knope", &job_labels, &mappings).unwrap();
+        assert_eq!(matched.runner_group.as_deref(), Some("forgejo"));
+        // a mapping for another forge is skipped
+        let matched = match_labels("github", &job_labels, &mappings).unwrap();
+        assert_eq!(matched.runner_group.as_deref(), Some("any"));
+        // and is never matched on its own
+        assert!(match_labels("github", &job_labels, &mappings[..1]).is_none());
     }
 
     #[test]

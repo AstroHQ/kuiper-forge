@@ -18,6 +18,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod fleet;
+pub mod forge;
 pub mod github;
 pub mod management;
 pub mod pending_jobs;
