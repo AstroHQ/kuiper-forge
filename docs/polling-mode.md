@@ -183,8 +183,12 @@ GitHub App rate limits, polling every 30s across many repos isn't viable.
 ## Gitea
 
 Gitea 1.24+ has a `workflow_job` webhook and ephemeral runners, so webhook mode is the
-natural fit there. Gitea's API does not offer Forgejo's queued-jobs endpoint, so polling
-mode doesn't apply to Gitea as proposed.
+natural fit. Gitea 1.25+ also has a GitHub-style jobs list,
+`GET /api/v1/{repos/{owner}/{repo} | orgs/{org} | user | admin}/actions/jobs?status=queued`,
+returning `id`, `run_id`, `run_attempt`, `labels`, `status` and more (checked in Gitea
+source; not present in 1.24.0). That is enough for polling mode, as a backup scan in
+webhook mode, or as a primary source. There is no Forgejo-style `handle`, so a runner
+can't be pinned to one job; jobs are matched by labels only.
 
 ## Implementation plan
 
