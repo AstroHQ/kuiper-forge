@@ -6,6 +6,7 @@
 //! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
 //! - Recovering runners when agents reconnect after coordinator restart
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -21,7 +22,7 @@ use crate::agent_failures::{AgentFailureStore, FailureKind};
 use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
 use crate::github::RunnerTokenProvider;
-use crate::pending_jobs::PendingJobStore;
+use crate::pending_jobs::{PendingJobInfo, PendingJobStore};
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{WebhookEvent, WebhookNotifier};
 
@@ -216,7 +217,7 @@ impl FleetManager {
                 let (tx, rx) = mpsc::channel(32);
                 (Some(rx), Some(WebhookNotifier::new(tx)))
             }
-            ProvisioningMode::FixedCapacity => (None, None),
+            ProvisioningMode::FixedCapacity | ProvisioningMode::Polling => (None, None),
         };
 
         let manager = Self {
@@ -250,8 +251,10 @@ impl FleetManager {
     ///
     /// Behavior depends on provisioning mode:
     /// - **Fixed Capacity**: Actively reconciles runner pools to maintain target counts.
-    /// - **Webhook**: Waits passively for webhook-triggered runner creation (not yet implemented).
-    ///   Still handles runner events and recovery for any runners that were created.
+    /// - **Webhook**: Creates runners on-demand for jobs delivered by webhook events.
+    /// - **Polling**: Creates runners on-demand for jobs found by scanning the GitHub API.
+    ///
+    /// All modes handle runner events and recovery for runners that were created.
     pub async fn run(mut self) {
         let provisioning_mode = self.config.provisioning.mode;
 
@@ -270,7 +273,22 @@ impl FleetManager {
                         "Add [provisioning.webhook] section to your config to receive webhook events"
                     );
                 }
-                self.run_webhook_loop().await;
+                self.run_on_demand_loop().await;
+            }
+            ProvisioningMode::Polling => {
+                let interval = self.config.provisioning.polling_config().interval();
+                info!("Fleet manager started in POLLING mode");
+                info!(
+                    "Runners will be created on-demand for queued jobs found by scanning GitHub every {}s",
+                    interval.as_secs()
+                );
+                if interval < Duration::from_secs(60) {
+                    warn!(
+                        "Polling interval {}s is short: each scan lists workflow runs per repo and may exhaust GitHub API rate limits",
+                        interval.as_secs()
+                    );
+                }
+                self.run_on_demand_loop().await;
             }
         }
     }
@@ -325,15 +343,17 @@ impl FleetManager {
         }
     }
 
-    /// Run the webhook provisioning loop.
+    /// Run the on-demand provisioning loop (webhook and polling modes).
     ///
-    /// In webhook mode, the fleet manager does not actively create runners.
-    /// Instead, it waits for webhook events to trigger runner creation.
-    /// This loop still handles recovery and runner lifecycle events.
+    /// Runners are created for jobs in the pending queue. In webhook mode the queue
+    /// is fed by webhook events, with a GitHub scan every 5 minutes as a safety net.
+    /// In polling mode the scan is the only source and runs every `interval_secs`.
+    /// This loop also handles recovery and runner lifecycle events.
     ///
     /// A periodic check ensures pending jobs are processed even if notifications
     /// are lost (e.g., channel was full when webhook handler tried to notify).
-    async fn run_webhook_loop(&mut self) {
+    async fn run_on_demand_loop(&mut self) {
+        let polling = self.config.provisioning.mode == ProvisioningMode::Polling;
         // On startup, log any persisted runners (from previous coordinator run)
         match self.runner_state.get_all_runners().await {
             Ok(persisted) if !persisted.is_empty() => {
@@ -354,27 +374,38 @@ impl FleetManager {
             }
         }
 
-        info!("Webhook provisioning mode active - waiting for webhook events");
+        if polling {
+            info!("Polling provisioning mode active - scanning GitHub for queued jobs");
+        } else {
+            info!("Webhook provisioning mode active - waiting for webhook events");
+        }
 
         // Process any pending jobs from previous run on startup
         info!("Checking for pending jobs from previous run...");
         self.process_pending_jobs().await;
 
-        // Poll GitHub API for queued jobs that may have been missed during downtime
-        self.recover_queued_jobs_from_github().await;
+        // Scan GitHub for queued jobs: in webhook mode, ones missed during downtime;
+        // in polling mode, this is the first poll
+        self.scan_github().await;
 
-        // Periodic check interval - ensures pending jobs are processed even if
-        // notifications are lost (belt-and-suspenders with the DB-backed queue)
-        let check_interval = Duration::from_secs(30);
-        let mut ticker = tokio::time::interval(check_interval);
-
-        // GitHub verification interval - check if pending jobs are still queued on GitHub.
-        // Tracked as an elapsed-time check on the 30s ticker rather than a separate
+        // GitHub scan interval - in webhook mode, verify pending jobs are still queued
+        // and recover missed ones; in polling mode, the poll itself.
+        // Tracked as an elapsed-time check on the ticker rather than a separate
         // select! branch, because select! can starve lower-priority branches when
         // higher-priority ones (notifications, events) have constant traffic.
         // also the backstop that re-adds jobs lost to runner steals, so keep it short-ish
-        let github_verify_interval = Duration::from_secs(300);
+        let github_scan_interval = if polling {
+            self.config.provisioning.polling_config().interval()
+        } else {
+            Duration::from_secs(300)
+        };
         let mut last_github_check = tokio::time::Instant::now();
+
+        // Periodic check interval - ensures pending jobs are processed even if
+        // notifications are lost (belt-and-suspenders with the DB-backed queue).
+        // Never slower than the scan, so a short poll interval is honoured.
+        let check_interval = Duration::from_secs(30).min(github_scan_interval);
+        let mut ticker = tokio::time::interval(check_interval);
 
         loop {
             tokio::select! {
@@ -382,12 +413,11 @@ impl FleetManager {
                     // Periodic check for pending jobs (in case notifications were lost)
                     self.process_pending_jobs().await;
 
-                    // Piggyback GitHub verification on the 30s ticker to avoid
-                    // select! starvation (guaranteed to run within 30s of being due)
-                    if last_github_check.elapsed() >= github_verify_interval {
+                    // Piggyback the GitHub scan on the ticker to avoid select!
+                    // starvation (guaranteed to run within one tick of being due)
+                    if last_github_check.elapsed() >= github_scan_interval {
                         last_github_check = tokio::time::Instant::now();
-                        self.verify_pending_jobs_with_github().await;
-                        self.recover_queued_jobs_from_github().await;
+                        self.scan_github().await;
                     }
                 }
                 Some(()) = self.notify_rx.recv() => {
@@ -460,93 +490,151 @@ impl FleetManager {
             pending.len()
         );
 
+        for (job_id, info) in pending {
+            self.verify_pending_job(job_id, &info).await;
+        }
+    }
+
+    /// Scan GitHub for queued jobs, as the active on-demand mode needs.
+    ///
+    /// - **Webhook**: verify every pending job is still queued, then recover missed jobs.
+    /// - **Polling**: the poll. Add newly queued jobs (applying label mappings like the
+    ///   webhook handler does), then verify only the pending jobs the scan no longer saw.
+    async fn scan_github(&self) {
+        if self.config.provisioning.mode == ProvisioningMode::Polling {
+            if let Some(seen) = self.recover_queued_jobs_from_github(true).await {
+                self.verify_dropped_pending_jobs(&seen).await;
+            }
+        } else {
+            self.verify_pending_jobs_with_github().await;
+            self.recover_queued_jobs_from_github(false).await;
+        }
+    }
+
+    /// Verify pending jobs that a successful poll didn't list as queued.
+    ///
+    /// A job missing from the scan was probably cancelled or started, but the scan
+    /// skips repos whose API calls fail and repos outside the lookback window, so a
+    /// missing job is checked with GitHub before it's dropped.
+    async fn verify_dropped_pending_jobs(&self, seen: &HashSet<u64>) {
+        let pending = match self.pending_job_store.get_all_pending_jobs().await {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                warn!("Failed to get pending jobs for GitHub verification: {}", e);
+                return;
+            }
+        };
+        let dropped = dropped_pending_jobs(pending, seen);
+        if dropped.is_empty() {
+            return;
+        }
+        info!(
+            "{} pending job(s) no longer listed as queued - verifying with GitHub",
+            dropped.len()
+        );
+        for (job_id, info) in dropped {
+            self.verify_pending_job(job_id, &info).await;
+        }
+    }
+
+    /// Check one pending job's status on GitHub and drop it from the queue unless
+    /// it's still queued (or GitHub couldn't be asked).
+    async fn verify_pending_job(&self, job_id: u64, info: &PendingJobInfo) {
         // Age threshold for jobs without repository info (can't check GitHub status)
         let max_age_without_repo = chrono::Duration::hours(24);
         let now = chrono::Utc::now();
+        // Jobs without repository info can't be checked on GitHub
+        // Remove them if they're older than the threshold
+        let Some(ref repo) = info.repository else {
+            let age = now - info.created_at;
+            let age_hours = age.num_hours();
+            if age > max_age_without_repo {
+                warn!(
+                    "Pending job {} has no repository info and is {}h old - removing as stale",
+                    job_id, age_hours
+                );
+                self.pending_job_store.remove_job(job_id).await;
+            } else {
+                debug!(
+                    "Skipping job {} - no repository info for GitHub status check ({}h old)",
+                    job_id, age_hours
+                );
+            }
+            return;
+        };
 
-        for (job_id, info) in pending {
-            // Jobs without repository info can't be checked on GitHub
-            // Remove them if they're older than the threshold
-            let Some(ref repo) = info.repository else {
-                let age = now - info.created_at;
-                let age_hours = age.num_hours();
-                if age > max_age_without_repo {
-                    warn!(
-                        "Pending job {} has no repository info and is {}h old - removing as stale",
-                        job_id, age_hours
-                    );
-                    self.pending_job_store.remove_job(job_id).await;
-                } else {
-                    debug!(
-                        "Skipping job {} - no repository info for GitHub status check ({}h old)",
-                        job_id, age_hours
-                    );
-                }
-                continue;
-            };
-
-            match self.token_provider.get_job_status(repo, job_id).await {
-                Ok(Some(status)) if status == "queued" || status == "waiting" => {
-                    // Job is still pending on GitHub - keep it
-                    debug!("Job {} is still {} on GitHub", job_id, status);
-                }
-                Ok(Some(status)) => {
-                    // Job has progressed or completed - remove from our queue
-                    info!(
-                        "Pending job {} has status '{}' on GitHub - removing from queue",
-                        job_id, status
-                    );
-                    self.pending_job_store.remove_job(job_id).await;
-                }
-                Ok(None) => {
-                    // Job not found (404) - probably deleted or expired
-                    info!(
-                        "Pending job {} not found on GitHub (404) - removing from queue",
-                        job_id
-                    );
-                    self.pending_job_store.remove_job(job_id).await;
-                }
-                Err(e) => {
-                    // API error - log but don't remove (could be transient)
-                    warn!(
-                        "Failed to check status for job {} on GitHub: {} - keeping in queue",
-                        job_id, e
-                    );
-                }
+        match self.token_provider.get_job_status(repo, job_id).await {
+            Ok(Some(status)) if status == "queued" || status == "waiting" => {
+                // Job is still pending on GitHub - keep it
+                debug!("Job {} is still {} on GitHub", job_id, status);
+            }
+            Ok(Some(status)) => {
+                // Job has progressed or completed - remove from our queue
+                info!(
+                    "Pending job {} has status '{}' on GitHub - removing from queue",
+                    job_id, status
+                );
+                self.pending_job_store.remove_job(job_id).await;
+            }
+            Ok(None) => {
+                // Job not found (404) - probably deleted or expired
+                info!(
+                    "Pending job {} not found on GitHub (404) - removing from queue",
+                    job_id
+                );
+                self.pending_job_store.remove_job(job_id).await;
+            }
+            Err(e) => {
+                // API error - log but don't remove (could be transient)
+                warn!(
+                    "Failed to check status for job {} on GitHub: {} - keeping in queue",
+                    job_id, e
+                );
             }
         }
     }
 
-    /// Recover queued jobs from GitHub API that may have been missed.
+    /// Add queued jobs found by scanning the GitHub API to the pending queue.
     ///
-    /// This is called on startup to catch jobs that were queued while the
-    /// coordinator was down or if webhooks were lost.
-    async fn recover_queued_jobs_from_github(&self) {
-        use crate::webhook::{WebhookRunnerRequest, has_required_labels};
+    /// In webhook mode this recovers jobs queued while the coordinator was down or
+    /// whose webhooks were lost. In polling mode it's the poll itself, and
+    /// `apply_mappings` filters jobs through the label mappings exactly as the
+    /// webhook handler does.
+    ///
+    /// Returns the ids of every job the scan listed as queued, or `None` if the
+    /// scan didn't run or failed.
+    async fn recover_queued_jobs_from_github(&self, apply_mappings: bool) -> Option<HashSet<u64>> {
+        use crate::webhook::{WebhookRunnerRequest, has_required_labels, resolve_runner_scope};
 
-        // Get required_labels from webhook config
-        let required_labels = match &self.config.provisioning.webhook {
-            Some(webhook_config) => webhook_config.required_labels.clone(),
-            None => {
-                debug!("No webhook config - skipping GitHub job recovery");
-                return;
-            }
+        let Some(filters) = self.config.provisioning.on_demand_filters() else {
+            debug!("No webhook config - skipping GitHub job recovery");
+            return None;
         };
+        let required_labels = filters.required_labels;
 
-        info!("Polling GitHub API for queued jobs that may have been missed...");
+        if apply_mappings {
+            debug!("Polling GitHub API for queued jobs...");
+        } else {
+            info!("Polling GitHub API for queued jobs that may have been missed...");
+        }
 
         // Query GitHub for queued jobs
         let queued_jobs = match self.token_provider.list_queued_jobs().await {
             Ok(jobs) => jobs,
             Err(e) => {
                 warn!("Failed to list queued jobs from GitHub: {}", e);
-                return;
+                return None;
             }
         };
+        let seen: HashSet<u64> = queued_jobs.iter().map(|job| job.job_id).collect();
 
         if queued_jobs.is_empty() {
-            info!("No queued jobs found in GitHub");
-            return;
+            if apply_mappings {
+                debug!("No queued jobs found in GitHub");
+            } else {
+                info!("No queued jobs found in GitHub");
+            }
+            return Some(seen);
         }
 
         let total_jobs = queued_jobs.len();
@@ -590,13 +678,26 @@ impl FleetManager {
                 continue;
             }
 
+            // In polling mode, accept only jobs a label mapping accepts, as webhooks would
+            let (runner_scope, runner_group) = if apply_mappings {
+                let scan_scope = job.runner_scope.clone();
+                match resolve_runner_scope(job.job_id, &job.labels, &filters.label_mappings, || {
+                    scan_scope
+                }) {
+                    Some(resolved) => resolved,
+                    None => continue,
+                }
+            } else {
+                (job.runner_scope, None)
+            };
+
             // Add to pending queue
             let request = WebhookRunnerRequest {
                 job_id: job.job_id,
                 job_labels: job.labels.clone(),
                 agent_labels: job.labels.clone(), // Use job labels for agent matching
-                runner_scope: job.runner_scope,
-                runner_group: None,
+                runner_scope,
+                runner_group,
                 repository: job.repository,
                 job_name: None,      // Not available from GitHub list_queued_jobs
                 workflow_name: None, // Not available from GitHub list_queued_jobs
@@ -618,11 +719,12 @@ impl FleetManager {
             );
             self.process_pending_jobs().await;
         } else {
-            info!(
-                "All {} GitHub job(s) already in pending queue or have runners - no new jobs to add",
+            debug!(
+                "All {} GitHub job(s) already in pending queue, have runners, or were filtered out - no new jobs to add",
                 total_jobs
             );
         }
+        Some(seen)
     }
 
     /// Process pending jobs when capacity becomes available.
@@ -1939,9 +2041,56 @@ fn runner_name_for_host(hostname: &str, suffix: &str) -> String {
     format!("{host}-{suffix}")
 }
 
+/// Pending jobs a successful scan no longer listed as queued, oldest first.
+fn dropped_pending_jobs(
+    pending: Vec<(u64, PendingJobInfo)>,
+    seen: &HashSet<u64>,
+) -> Vec<(u64, PendingJobInfo)> {
+    pending
+        .into_iter()
+        .filter(|(job_id, _)| !seen.contains(job_id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::runner_name_for_host;
+    use super::{dropped_pending_jobs, runner_name_for_host};
+    use crate::config::RunnerScope;
+    use crate::pending_jobs::PendingJobInfo;
+    use std::collections::HashSet;
+
+    fn pending_job() -> PendingJobInfo {
+        PendingJobInfo {
+            job_labels: vec!["self-hosted".into()],
+            agent_labels: vec!["self-hosted".into()],
+            runner_scope: RunnerScope::Organization { name: "o".into() },
+            runner_group: None,
+            created_at: chrono::Utc::now(),
+            retry_count: 0,
+            repository: Some("o/r".into()),
+            job_name: None,
+            workflow_name: None,
+            failed_agents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dropped_pending_jobs_are_those_the_scan_missed() {
+        let pending = vec![(1, pending_job()), (2, pending_job()), (3, pending_job())];
+        let seen: HashSet<u64> = [2, 99].into_iter().collect();
+        let dropped: Vec<u64> = dropped_pending_jobs(pending, &seen)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(dropped, vec![1, 3]);
+    }
+
+    #[test]
+    fn nothing_dropped_when_scan_lists_everything() {
+        let pending = vec![(1, pending_job())];
+        let seen: HashSet<u64> = [1].into_iter().collect();
+        assert!(dropped_pending_jobs(pending, &seen).is_empty());
+    }
 
     #[test]
     fn runner_name_uses_short_hostname() {

@@ -191,6 +191,45 @@ pub fn match_labels<'a>(
 }
 
 /// Build the Axum router for webhook endpoints.
+/// Decide the runner scope and group for a queued job from the label mappings.
+///
+/// With no mappings, every job is accepted with `default_scope`. Otherwise the first
+/// matching mapping wins (its scope falling back to `default_scope`), and a job no
+/// mapping matches is rejected with `None`. Shared by the webhook handler and the
+/// polling scan so both accept the same jobs.
+pub fn resolve_runner_scope(
+    job_id: u64,
+    job_labels: &[String],
+    mappings: &[LabelMapping],
+    default_scope: impl FnOnce() -> RunnerScope,
+) -> Option<(RunnerScope, Option<String>)> {
+    if mappings.is_empty() {
+        let scope = default_scope();
+        info!(
+            "No label mappings configured - accepting job {} with default scope {:?}",
+            job_id, scope
+        );
+        return Some((scope, None));
+    }
+    match match_labels(job_labels, mappings) {
+        Some(mapping) => {
+            let scope = mapping.runner_scope.clone().unwrap_or_else(default_scope);
+            info!(
+                "Matched job {} to runner scope {:?} (mapping labels: {:?})",
+                job_id, scope, mapping.labels
+            );
+            Some((scope, mapping.runner_group.clone()))
+        }
+        None => {
+            info!(
+                "No label mapping matches job {} labels {:?} - ignoring",
+                job_id, job_labels
+            );
+            None
+        }
+    }
+}
+
 pub fn webhook_router(state: Arc<WebhookState>) -> Router {
     let path = state.config.path.clone();
     Router::new()
@@ -308,36 +347,13 @@ async fn handle_webhook(
             };
 
             // Try to match labels to find runner scope and runner group
-            let (runner_scope, runner_group) = if state.config.label_mappings.is_empty() {
-                // No mappings configured - use default scope for all matching jobs
-                let scope = default_runner_scope();
-                info!(
-                    "No label mappings configured - accepting job {} with default scope {:?}",
-                    event.workflow_job.id, scope
-                );
-                (scope, None)
-            } else {
-                // Match against configured mappings
-                match match_labels(&event.workflow_job.labels, &state.config.label_mappings) {
-                    Some(mapping) => {
-                        let scope = mapping
-                            .runner_scope
-                            .clone()
-                            .unwrap_or_else(default_runner_scope);
-                        info!(
-                            "Matched job {} to runner scope {:?} (mapping labels: {:?})",
-                            event.workflow_job.id, scope, mapping.labels
-                        );
-                        (scope, mapping.runner_group.clone())
-                    }
-                    None => {
-                        info!(
-                            "No label mapping matches job {} labels {:?} - ignoring",
-                            event.workflow_job.id, event.workflow_job.labels
-                        );
-                        return StatusCode::OK;
-                    }
-                }
+            let Some((runner_scope, runner_group)) = resolve_runner_scope(
+                event.workflow_job.id,
+                &event.workflow_job.labels,
+                &state.config.label_mappings,
+                default_runner_scope,
+            ) else {
+                return StatusCode::OK;
             };
 
             // Build request and persist to DB first (this is the critical path)
@@ -510,6 +526,50 @@ mod tests {
             matched.unwrap().runner_scope,
             Some(RunnerScope::Repository { .. })
         ));
+    }
+
+    #[test]
+    fn test_resolve_runner_scope() {
+        let org = || RunnerScope::Organization {
+            name: "default-org".into(),
+        };
+
+        // No mappings: accept with the default scope
+        let (scope, group) = resolve_runner_scope(1, &["self-hosted".into()], &[], org).unwrap();
+        assert!(matches!(scope, RunnerScope::Organization { ref name } if name == "default-org"));
+        assert!(group.is_none());
+
+        let mappings = vec![
+            LabelMapping {
+                labels: vec!["self-hosted".into(), "macOS".into()],
+                runner_scope: None,
+                runner_group: Some("mac".into()),
+            },
+            LabelMapping {
+                labels: vec!["self-hosted".into(), "Linux".into()],
+                runner_scope: Some(RunnerScope::Repository {
+                    owner: "o".into(),
+                    repo: "r".into(),
+                }),
+                runner_group: None,
+            },
+        ];
+
+        // Mapping without a scope falls back to the default, keeps its group
+        let (scope, group) =
+            resolve_runner_scope(2, &["self-hosted".into(), "macOS".into()], &mappings, org)
+                .unwrap();
+        assert!(matches!(scope, RunnerScope::Organization { .. }));
+        assert_eq!(group.as_deref(), Some("mac"));
+
+        // Mapping scope wins
+        let (scope, _) =
+            resolve_runner_scope(3, &["self-hosted".into(), "Linux".into()], &mappings, org)
+                .unwrap();
+        assert!(matches!(scope, RunnerScope::Repository { .. }));
+
+        // No mapping matches: rejected
+        assert!(resolve_runner_scope(4, &["ubuntu-latest".into()], &mappings, org).is_none());
     }
 
     #[test]

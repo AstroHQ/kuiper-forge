@@ -145,6 +145,7 @@ See `examples/` for sample configuration files.
 
 - **Fixed Capacity** (default) - Maintains a constant pool of ready runners, sized per image/template mapping with `pool`
 - **Webhook** - Creates runners on-demand via GitHub webhook events
+- **Polling** - Creates runners on-demand for queued jobs found by periodically scanning the GitHub API; no inbound webhooks needed
 
 ## Requirements
 

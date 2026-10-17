@@ -21,13 +21,14 @@
 //! - `KUIPER_TLS__CA_CERT` → `tls.ca_cert`
 //! - `KUIPER_PROVISIONING__MODE` → `provisioning.mode`
 //! - `KUIPER_PROVISIONING__WEBHOOK__SECRET` → `provisioning.webhook.secret`
+//! - `KUIPER_PROVISIONING__POLLING__INTERVAL_SECS` → `provisioning.polling.interval_secs`
 //!
 //! **Note:** Complex arrays like `runners` and `label_mappings` should be configured
 //! via TOML file, not environment variables.
 //!
 //! # Provisioning Modes
 //!
-//! The coordinator supports two provisioning modes:
+//! The coordinator supports three provisioning modes:
 //!
 //! - **Fixed Capacity**: Maintains a fixed pool of runners per configuration.
 //!   The coordinator ensures the target count of runners is always available.
@@ -35,6 +36,9 @@
 //! - **Webhook (Dynamic)**: Runners are created on-demand in response to GitHub
 //!   webhook events. Labels from the workflow job determine which agent/VM base
 //!   to use.
+//!
+//! - **Polling (Dynamic)**: Like webhook mode, but queued jobs are discovered by
+//!   periodically scanning the GitHub API instead of receiving webhook events.
 
 use anyhow::{Context, Result};
 use figment::{
@@ -62,6 +66,13 @@ pub enum ProvisioningMode {
     /// The job's labels determine which agent/VM base to use. No runners are
     /// pre-provisioned; they are created just-in-time when jobs are queued.
     Webhook,
+
+    /// Polling dynamic mode: create runners on-demand from an API scan.
+    ///
+    /// Same on-demand behaviour as webhook mode, but queued jobs are found by
+    /// periodically listing them through the API rather than via webhook
+    /// delivery. Useful when the coordinator isn't reachable from the forge.
+    Polling,
 }
 
 /// Provisioning configuration.
@@ -74,6 +85,47 @@ pub struct ProvisioningConfig {
     /// Webhook configuration (only used when mode is `webhook`).
     #[serde(default)]
     pub webhook: Option<WebhookConfig>,
+
+    /// Polling configuration (only used when mode is `polling`). Optional:
+    /// every field has a default, so `mode = "polling"` alone is enough.
+    #[serde(default)]
+    pub polling: Option<PollingConfig>,
+}
+
+impl ProvisioningConfig {
+    /// Job filters for the active on-demand mode, or `None` in fixed-capacity mode
+    /// (and in webhook mode without a `[provisioning.webhook]` section).
+    pub fn on_demand_filters(&self) -> Option<OnDemandFilters> {
+        match self.mode {
+            ProvisioningMode::FixedCapacity => None,
+            ProvisioningMode::Webhook => self.webhook.as_ref().map(|w| OnDemandFilters {
+                required_labels: w.required_labels.clone(),
+                label_mappings: w.label_mappings.clone(),
+                queued_scan_lookback_hours: w.queued_scan_lookback_hours,
+            }),
+            ProvisioningMode::Polling => {
+                let p = self.polling_config();
+                Some(OnDemandFilters {
+                    required_labels: p.required_labels,
+                    label_mappings: p.label_mappings,
+                    queued_scan_lookback_hours: p.queued_scan_lookback_hours,
+                })
+            }
+        }
+    }
+
+    /// The polling configuration, falling back to defaults when the section is absent.
+    pub fn polling_config(&self) -> PollingConfig {
+        self.polling.clone().unwrap_or_default()
+    }
+}
+
+/// Job filters shared by the on-demand modes (webhook and polling).
+#[derive(Debug, Clone)]
+pub struct OnDemandFilters {
+    pub required_labels: Vec<String>,
+    pub label_mappings: Vec<LabelMapping>,
+    pub queued_scan_lookback_hours: u64,
 }
 
 impl Default for ProvisioningConfig {
@@ -81,6 +133,7 @@ impl Default for ProvisioningConfig {
         Self {
             mode: ProvisioningMode::FixedCapacity,
             webhook: None,
+            polling: None,
         }
     }
 }
@@ -140,6 +193,62 @@ pub struct WebhookConfig {
     /// would be missed by a narrow window — keep this generous, or `0`.
     #[serde(default = "default_queued_scan_lookback_hours")]
     pub queued_scan_lookback_hours: u64,
+}
+
+/// Polling configuration for dynamic runner provisioning.
+///
+/// Used when `provisioning.mode = "polling"`. The coordinator scans the GitHub
+/// API for queued jobs every `interval_secs` and creates runners on-demand,
+/// exactly as webhook mode does for delivered events. No webhook endpoint is served.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PollingConfig {
+    /// Seconds between scans (default: 120, minimum: 10).
+    ///
+    /// GitHub has no org-wide queued-jobs endpoint, so each scan lists workflow
+    /// runs for every recently pushed repo. Short intervals across many repos can
+    /// exhaust the GitHub App's API rate limit.
+    #[serde(default = "default_poll_interval_secs")]
+    pub interval_secs: u64,
+
+    /// Required labels that ALL jobs must have to be accepted (default: ["self-hosted"]).
+    /// Same meaning as in webhook mode.
+    #[serde(default = "default_required_labels")]
+    pub required_labels: Vec<String>,
+
+    /// Label mappings: maps workflow labels to runner scopes. Same meaning as in
+    /// webhook mode; if empty, jobs are accepted with the scope the scan found them in.
+    #[serde(default)]
+    pub label_mappings: Vec<LabelMapping>,
+
+    /// How far back (in hours) a repository's last push may be for it to be
+    /// scanned (default: 168 = 7 days, `0` = scan every repo). Same as webhook mode.
+    #[serde(default = "default_queued_scan_lookback_hours")]
+    pub queued_scan_lookback_hours: u64,
+}
+
+impl Default for PollingConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_poll_interval_secs(),
+            required_labels: default_required_labels(),
+            label_mappings: Vec::new(),
+            queued_scan_lookback_hours: default_queued_scan_lookback_hours(),
+        }
+    }
+}
+
+/// Shortest allowed polling interval; lower values are raised to this.
+pub const MIN_POLL_INTERVAL_SECS: u64 = 10;
+
+impl PollingConfig {
+    /// The scan interval, clamped to [`MIN_POLL_INTERVAL_SECS`].
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.interval_secs.max(MIN_POLL_INTERVAL_SECS))
+    }
+}
+
+fn default_poll_interval_secs() -> u64 {
+    120
 }
 
 fn default_webhook_path() -> String {
@@ -725,6 +834,10 @@ enabled = false
 # - "webhook": Create runners on-demand via GitHub webhook events.
 #   Runners are created just-in-time when workflow jobs are queued.
 #   Use [provisioning.webhook] to configure the webhook listener.
+#
+# - "polling": Create runners on-demand by scanning the GitHub API for queued
+#   jobs. Like "webhook", but needs no inbound webhook delivery.
+#   Use [provisioning.polling] to tune it (optional; all fields have defaults).
 
 [provisioning]
 mode = "fixed_capacity"
@@ -766,6 +879,28 @@ mode = "fixed_capacity"
 # type = "repository"
 # owner = "my-org"
 # repo = "my-repo"
+
+# -----------------------------------------------------------------------------
+# Polling Mode Configuration (uncomment to use)
+# -----------------------------------------------------------------------------
+# Queued jobs are found by scanning the GitHub API; no webhook endpoint is needed.
+# Each scan lists workflow runs per recently pushed repo, so keep the interval
+# generous with many repos to stay within GitHub API rate limits.
+#
+# [provisioning]
+# mode = "polling"
+#
+# [provisioning.polling]
+# interval_secs = 120                 # seconds between scans (default 120, min 10)
+# required_labels = ["self-hosted"]   # same as webhook mode
+# queued_scan_lookback_hours = 168    # only scan repos pushed within this window (0 = all)
+#
+# [[provisioning.polling.label_mappings]]
+# labels = ["self-hosted", "Linux", "X64"]
+#
+# [provisioning.polling.label_mappings.runner_scope]
+# type = "organization"
+# name = "my-org"
 
 "#
     )
@@ -950,5 +1085,96 @@ secret = "test-secret"
         let webhook = config.provisioning.webhook.unwrap();
         assert_eq!(webhook.path, "/webhook"); // default path
         assert_eq!(webhook.required_labels, vec!["self-hosted"]); // default required labels
+    }
+
+    const POLLING_BASE: &str = r#"
+[github]
+app_id = 123456
+private_key_path = "/etc/ci-runner/github-app.pem"
+
+[tls]
+ca_cert = "/etc/ci-runner/ca.crt"
+ca_key = "/etc/ci-runner/ca.key"
+server_cert = "/etc/ci-runner/server.crt"
+server_key = "/etc/ci-runner/server.key"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
+
+[provisioning]
+mode = "polling"
+"#;
+
+    #[test]
+    fn test_polling_config_defaults_without_section() {
+        let config = parse_config(POLLING_BASE);
+        assert_eq!(config.provisioning.mode, ProvisioningMode::Polling);
+        assert!(config.provisioning.polling.is_none());
+
+        let polling = config.provisioning.polling_config();
+        assert_eq!(polling.interval_secs, 120);
+        assert_eq!(polling.required_labels, vec!["self-hosted"]);
+        assert!(polling.label_mappings.is_empty());
+
+        let filters = config.provisioning.on_demand_filters().unwrap();
+        assert_eq!(filters.required_labels, vec!["self-hosted"]);
+        assert_eq!(filters.queued_scan_lookback_hours, 168);
+    }
+
+    #[test]
+    fn test_polling_config_section() {
+        let config_str = format!(
+            "{POLLING_BASE}{}",
+            r#"
+[provisioning.polling]
+interval_secs = 45
+required_labels = []
+queued_scan_lookback_hours = 0
+
+[[provisioning.polling.label_mappings]]
+labels = ["self-hosted", "Linux"]
+
+[provisioning.polling.label_mappings.runner_scope]
+type = "repository"
+owner = "my-org"
+repo = "my-repo"
+"#
+        );
+        let config = parse_config(&config_str);
+        let polling = config.provisioning.polling_config();
+        assert_eq!(polling.interval_secs, 45);
+        assert!(polling.required_labels.is_empty());
+        assert_eq!(polling.queued_scan_lookback_hours, 0);
+        assert_eq!(polling.label_mappings.len(), 1);
+
+        let filters = config.provisioning.on_demand_filters().unwrap();
+        assert_eq!(
+            filters.label_mappings[0].labels,
+            vec!["self-hosted", "Linux"]
+        );
+        assert!(filters.required_labels.is_empty());
+    }
+
+    #[test]
+    fn test_polling_interval_is_clamped() {
+        let polling = PollingConfig {
+            interval_secs: 1,
+            ..PollingConfig::default()
+        };
+        assert_eq!(
+            polling.interval(),
+            std::time::Duration::from_secs(MIN_POLL_INTERVAL_SECS)
+        );
+    }
+
+    #[test]
+    fn test_on_demand_filters_by_mode() {
+        let mut provisioning = ProvisioningConfig::default();
+        assert!(provisioning.on_demand_filters().is_none());
+
+        // webhook mode without a section has no filters (and no endpoint)
+        provisioning.mode = ProvisioningMode::Webhook;
+        assert!(provisioning.on_demand_filters().is_none());
     }
 }

@@ -369,9 +369,8 @@ async fn serve(
         let private_key = config.github.private_key_content()?;
         let scan_lookback_hours = config
             .provisioning
-            .webhook
-            .as_ref()
-            .map(|w| w.queued_scan_lookback_hours)
+            .on_demand_filters()
+            .map(|f| f.queued_scan_lookback_hours)
             .unwrap_or(168);
         let github_client = github::GitHubClient::from_key(config.github.app_id, private_key)?
             .with_scan_lookback_hours(scan_lookback_hours);
@@ -419,6 +418,12 @@ async fn serve(
         }
         _ => None,
     };
+    if config.provisioning.mode == ProvisioningMode::Polling {
+        info!(
+            "Polling mode enabled - scanning GitHub for queued jobs every {}s",
+            config.provisioning.polling_config().interval().as_secs()
+        );
+    }
 
     // Run the gRPC server
     let server_config = ServerConfig {

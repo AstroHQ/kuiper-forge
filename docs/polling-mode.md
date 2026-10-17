@@ -1,6 +1,20 @@
 # Polling Provisioning Mode
 
-Status: **proposal**
+Status: **step 1 implemented** (GitHub polling); Forgejo steps proposed
+
+### Implementation notes (step 1)
+
+- `[provisioning.polling]` is its own section rather than a shared on-demand one;
+  `ProvisioningConfig::on_demand_filters()` returns the active mode's filters so the
+  scan reads the same fields either way. Webhook configs are unchanged.
+- Default `interval_secs` is 120 for GitHub (minimum 10, warning below 60).
+- `list_queued_jobs` skips repos whose API calls fail and repos outside the lookback
+  window, so a job missing from one scan isn't proof it's gone. Pending jobs the poll
+  didn't list are checked with `get_job_status` before they're dropped, rather than
+  removed outright.
+- Label mappings are applied to polled jobs through `webhook::resolve_runner_scope`,
+  shared with the webhook handler. The webhook-mode recovery scan still doesn't apply
+  mappings (unchanged behaviour).
 
 A third provisioning mode, alongside `fixed_capacity` and `webhook`, in which the
 coordinator discovers queued jobs by periodically asking the forge's API rather than
