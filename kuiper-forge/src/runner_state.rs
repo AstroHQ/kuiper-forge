@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::RunnerScope;
 use crate::db::DbPool;
+use crate::forge::JobKey;
 use crate::sql;
 
 /// Information about an active runner.
@@ -25,9 +26,9 @@ pub struct RunnerInfo {
     pub runner_scope: RunnerScope,
     /// When the runner was created
     pub created_at: DateTime<Utc>,
-    /// GitHub job ID (webhook mode only, for deduplication cleanup on failure)
+    /// Job key (on-demand modes only, for deduplication cleanup on failure)
     #[serde(default)]
-    pub job_id: Option<u64>,
+    pub job_id: Option<JobKey>,
     /// Job name from the workflow file
     #[serde(default)]
     pub job_name: Option<String>,
@@ -37,6 +38,10 @@ pub struct RunnerInfo {
     /// Workflow name
     #[serde(default)]
     pub workflow_name: Option<String>,
+    /// Configured name of the forge the runner is registered with. `None` for
+    /// runners stored before forges were recorded: they're on the default forge.
+    #[serde(default)]
+    pub forge: Option<String>,
 }
 
 /// Persistent store for active runner state.
@@ -83,7 +88,8 @@ impl RunnerStateStore {
         agent_id: String,
         vm_name: String,
         runner_scope: RunnerScope,
-        job_id: Option<u64>,
+        forge: &str,
+        job_id: Option<JobKey>,
         job_name: Option<String>,
         repository: Option<String>,
         workflow_name: Option<String>,
@@ -98,7 +104,7 @@ impl RunnerStateStore {
             }
         };
         let created_at_str = created_at.to_rfc3339();
-        let job_id_i64 = job_id.map(|id| id as i64);
+        let job_id_str = job_id.as_ref().map(JobKey::to_string);
 
         let result = sqlx::query(sql::INSERT_RUNNER)
             .bind(&runner_name)
@@ -106,19 +112,20 @@ impl RunnerStateStore {
             .bind(&vm_name)
             .bind(&scope_json)
             .bind(&created_at_str)
-            .bind(job_id_i64)
+            .bind(&job_id_str)
             .bind(&job_name)
             .bind(&repository)
             .bind(&workflow_name)
             .bind(&pool)
+            .bind(forge)
             .execute(&self.pool)
             .await;
 
         match result {
             Ok(_) => {
                 debug!(
-                    "Added runner {} to database (job_id={:?}, repo={:?})",
-                    runner_name, job_id, repository
+                    "Added runner {} to database (forge={}, job_id={:?}, repo={:?})",
+                    runner_name, forge, job_id_str, repository
                 );
             }
             Err(e) => {
@@ -250,9 +257,9 @@ impl RunnerStateStore {
     /// In normal operation this returns 0 or 1 rows. Multiple rows indicate
     /// a bug — two runner records pointing at the same job — and callers
     /// should log and treat that as an anomaly.
-    pub async fn runners_for_job(&self, job_id: u64) -> Vec<(String, String)> {
+    pub async fn runners_for_job(&self, job_id: &JobKey) -> Vec<(String, String)> {
         let result = sqlx::query(sql::SELECT_RUNNERS_BY_JOB_ID)
-            .bind(job_id as i64)
+            .bind(job_id.to_string())
             .fetch_all(&self.pool)
             .await;
 
@@ -342,7 +349,15 @@ impl RunnerStateStore {
         let vm_name: String = row.try_get("vm_name").ok()?;
         let scope_json: String = row.try_get("runner_scope").ok()?;
         let created_at_str: String = row.try_get("created_at").ok()?;
-        let job_id: Option<i64> = row.try_get("job_id").ok()?;
+        let job_id: Option<String> = row.try_get("job_id").ok()?;
+        let job_id: Option<JobKey> = match job_id.map(|k| k.parse::<JobKey>()).transpose() {
+            Ok(key) => key,
+            Err(e) => {
+                warn!("Invalid job key for runner {}: {}", runner_name, e);
+                None
+            }
+        };
+        let forge: Option<String> = row.try_get("forge").ok().flatten();
         let job_name: Option<String> = row.try_get("job_name").ok().flatten();
         let repository: Option<String> = row.try_get("repository").ok().flatten();
         let workflow_name: Option<String> = row.try_get("workflow_name").ok().flatten();
@@ -373,10 +388,11 @@ impl RunnerStateStore {
                 vm_name,
                 runner_scope,
                 created_at,
-                job_id: job_id.map(|id| id as u64),
+                job_id,
                 job_name,
                 repository,
                 workflow_name,
+                forge,
             },
         ))
     }
@@ -403,6 +419,7 @@ mod tests {
                 agent.into(),
                 name.into(),
                 scope.clone(),
+                "github",
                 None,
                 None,
                 None,

@@ -123,7 +123,7 @@
                     <td style="white-space: nowrap;"><span class="badge badge-offline">{{ failure.kind }}</span></td>
                     <td>
                         {% if let Some(name) = failure.runner_name %}{{ name }}{% else %}-{% endif %}
-                        {% if let Some(job_id) = failure.job_id %}<div class="muted">job #{{ job_id }}</div>{% endif %}
+                        {% if let Some(job_id) = failure.job_id %}<div class="muted">{{ job_id.forge() }} job #{{ job_id.id() }}</div>{% endif %}
                     </td>
                     <td><code class="failure-message">{% if failure.message.is_empty() %}(no error message){% else %}{{ failure.message }}{% endif %}</code></td>
                 </tr>

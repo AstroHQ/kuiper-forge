@@ -11,6 +11,7 @@ use crate::admin::templates::{
 use crate::admin::{agent_log_routes, api_token_routes, user_routes};
 use crate::agent_failures::FailureKind;
 use crate::agent_registry::AgentInfo;
+use crate::forge::JobKey;
 use askama::Template;
 use axum::{
     Form, Router,
@@ -186,9 +187,9 @@ async fn render_dashboard(
         .unwrap_or_default();
 
     // jobs stay pending until their runner finishes, so tell apart the ones still waiting for an agent
-    let job_agents: HashMap<u64, String> = runners
+    let job_agents: HashMap<JobKey, String> = runners
         .iter()
-        .filter_map(|(_, r)| Some((r.job_id?, r.agent_id.clone())))
+        .filter_map(|(_, r)| Some((r.job_id.clone()?, r.agent_id.clone())))
         .collect();
     let mut pending = state
         .pending_jobs
@@ -200,8 +201,8 @@ async fn render_dashboard(
     let mut pending_jobs = Vec::with_capacity(pending.len());
     for (job_id, job) in pending {
         pending_jobs.push(PendingJobSummary {
-            job_id,
             assigned_agent: job_agents.get(&job_id).cloned(),
+            job_id,
             waiting: format_age(now - job.created_at),
             matching_agents: state
                 .agent_registry

@@ -1,5 +1,6 @@
 //! Askama templates for the admin UI.
 
+use crate::forge::JobKey;
 use askama::Template;
 use chrono::{DateTime, Utc};
 
@@ -38,7 +39,7 @@ pub struct DashboardTemplate {
 
 /// Webhook job still waiting for a runner
 pub struct PendingJobSummary {
-    pub job_id: u64,
+    pub job_id: JobKey,
     /// Agent running a runner for this job. None while it's still waiting for one
     pub assigned_agent: Option<String>,
     pub repository: Option<String>,
@@ -165,7 +166,7 @@ pub struct FailureSummary {
     pub ago: String,
     pub kind: &'static str,
     pub runner_name: Option<String>,
-    pub job_id: Option<u64>,
+    pub job_id: Option<JobKey>,
     pub message: String,
 }
 
@@ -213,7 +214,7 @@ pub struct RunnerSummary {
     pub runner_name: String,
     pub vm_name: String,
     pub created_at: DateTime<Utc>,
-    pub job_id: Option<u64>,
+    pub job_id: Option<JobKey>,
     pub job_name: Option<String>,
     pub repository: Option<String>,
     pub workflow_name: Option<String>,

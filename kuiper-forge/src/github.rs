@@ -18,114 +18,71 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::config::RunnerScope;
-
-/// Information about a queued workflow job discovered from GitHub API.
-#[derive(Debug, Clone)]
-pub struct QueuedJob {
-    /// The workflow job ID
-    pub job_id: u64,
-    /// Labels requested by this job
-    pub labels: Vec<String>,
-    /// The scope (org or repo) where this job was queued
-    pub runner_scope: RunnerScope,
-    /// Repository full name (owner/repo)
-    pub repository: Option<String>,
-}
-
-/// Trait for obtaining runner registration tokens and managing runners.
-///
-/// This abstracts the token source so we can use either:
-/// - Real GitHub API (production)
-/// - Mock tokens (dry-run/testing)
-#[async_trait]
-pub trait RunnerTokenProvider: Send + Sync {
-    /// Get a registration token for the given runner scope.
-    async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String>;
-
-    /// Generate a JIT (Just-In-Time) runner configuration.
-    /// Returns an encoded config blob that can be passed to `run.sh --jitconfig`.
-    /// The runner is pre-assigned to a specific job and auto-deregisters.
-    async fn generate_jitconfig(
-        &self,
-        scope: &RunnerScope,
-        runner_name: &str,
-        labels: &[String],
-        runner_group_id: u64,
-    ) -> Result<String>;
-
-    /// Remove a runner from GitHub by name.
-    /// This is called when a runner VM is destroyed or agent disconnects.
-    async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()>;
-
-    /// List all queued workflow jobs across all installations.
-    /// This is used on startup to recover jobs that may have been missed.
-    async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>>;
-
-    /// Get the status of a specific workflow job.
-    /// Returns the job status ("queued", "in_progress", "completed", etc.)
-    /// or None if the job is not found (404).
-    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>>;
-}
-
-/// Mock token provider for dry-run/testing mode.
-///
-/// Returns fake tokens that won't work with GitHub but allow testing
-/// the full agent VM lifecycle.
-pub struct MockTokenProvider;
-
-#[async_trait]
-impl RunnerTokenProvider for MockTokenProvider {
-    async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
-        let fake_token = format!("dry-run-token-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        info!(
-            "DRY-RUN: Generated fake registration token for {:?}: {}",
-            scope, fake_token
-        );
-        Ok(fake_token)
-    }
-
-    async fn generate_jitconfig(
-        &self,
-        scope: &RunnerScope,
-        runner_name: &str,
-        labels: &[String],
-        _runner_group_id: u64,
-    ) -> Result<String> {
-        let fake_jit = format!(
-            "dry-run-jitconfig-{}",
-            &uuid::Uuid::new_v4().to_string()[..8]
-        );
-        info!(
-            "DRY-RUN: Generated fake JIT config for runner '{}' in {:?} with labels {:?}",
-            runner_name, scope, labels
-        );
-        Ok(fake_jit)
-    }
-
-    async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {
-        info!(
-            "DRY-RUN: Would remove runner '{}' from {:?}",
-            runner_name, scope
-        );
-        Ok(())
-    }
-
-    async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
-        info!("DRY-RUN: list_queued_jobs returns empty (no GitHub API access)");
-        Ok(Vec::new())
-    }
-
-    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>> {
-        info!(
-            "DRY-RUN: get_job_status for job {} in {} returns None",
-            job_id, repo
-        );
-        Ok(None)
-    }
-}
+use crate::forge::{Forge, QueuedJob};
 
 /// GitHub API base URL
 const GITHUB_API_URL: &str = "https://api.github.com";
+
+/// Items per page for paginated list requests (GitHub's maximum)
+const PAGE_SIZE: usize = 100;
+
+/// Most pages read from one list endpoint, a guard against a runaway loop. GitHub
+/// itself caps workflow run listings at 1,000 results (10 pages).
+const MAX_PAGES: u32 = 100;
+
+/// Collect every page of a GitHub list endpoint.
+///
+/// `fetch_page(n)` returns page `n` (1-based), requested with `per_page=PAGE_SIZE`.
+/// Reading stops after the first short page. A failed page fails the whole listing,
+/// so a partial list is never mistaken for the complete one.
+async fn collect_pages<T, F, Fut>(mut fetch_page: F) -> Result<Vec<T>>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<T>>>,
+{
+    let mut all = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let items = fetch_page(page)
+            .await
+            .with_context(|| format!("page {page}"))?;
+        let count = items.len();
+        all.extend(items);
+        if count < PAGE_SIZE {
+            return Ok(all);
+        }
+    }
+    warn!(
+        "Stopped after {} pages ({} items) - listing may be incomplete",
+        MAX_PAGES,
+        all.len()
+    );
+    Ok(all)
+}
+
+/// GET a GitHub API URL with a bearer token and parse the JSON body.
+async fn get_json<R: serde::de::DeserializeOwned>(
+    client: &Client,
+    token: &str,
+    url: &str,
+) -> Result<R> {
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .with_context(|| format!("request to {url} failed"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("GitHub API error ({status}) for {url}: {body}"));
+    }
+    response
+        .json()
+        .await
+        .with_context(|| format!("failed to parse response from {url}"))
+}
 
 /// Cached access token with expiration tracking
 #[derive(Debug, Clone)]
@@ -396,28 +353,15 @@ impl GitHubClient {
     async fn discover_installations(&self) -> Result<()> {
         let jwt = self.generate_jwt()?;
 
-        let url = format!("{GITHUB_API_URL}/app/installations");
-
-        let response = self
-            .http_client
-            .get(&url)
-            .header("Authorization", format!("Bearer {jwt}"))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .context("Failed to list GitHub App installations")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("GitHub API error ({status}): {body}"));
-        }
-
-        let installations: Vec<Installation> = response
-            .json()
-            .await
-            .context("Failed to parse installations response")?;
+        let installations: Vec<Installation> = collect_pages(|page| {
+            let url =
+                format!("{GITHUB_API_URL}/app/installations?per_page={PAGE_SIZE}&page={page}");
+            let client = &self.http_client;
+            let jwt = &jwt;
+            async move { get_json::<Vec<Installation>>(client, jwt, &url).await }
+        })
+        .await
+        .context("Failed to list GitHub App installations")?;
 
         let mut cache = self.installation_ids.write().await;
         for installation in installations {
@@ -936,29 +880,31 @@ impl GitHubClient {
     ) -> Vec<QueuedJob> {
         let mut jobs = Vec::new();
 
-        // Query runs with statuses that may have queued jobs
+        // Query runs with statuses that may have queued jobs. Every page of runs and of
+        // each run's jobs is read: in polling mode this scan is the only job source, so a
+        // queued job past the first page would never get a runner.
         for run_status in ["queued", "in_progress", "waiting"] {
-            let runs_url = format!(
-                "{GITHUB_API_URL}/repos/{}/actions/runs?status={}&per_page=100",
-                repo.full_name, run_status
-            );
-
-            let runs_response = client
-                .get(&runs_url)
-                .header("Authorization", format!("Bearer {token}"))
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await;
-
-            let runs: Vec<WorkflowRun> = match runs_response {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<WorkflowRunsResponse>().await {
-                        Ok(r) => r.workflow_runs,
-                        Err(_) => continue,
-                    }
+            let runs = collect_pages(|page| {
+                let url = format!(
+                    "{GITHUB_API_URL}/repos/{}/actions/runs?status={run_status}&per_page={PAGE_SIZE}&page={page}",
+                    repo.full_name
+                );
+                async move {
+                    get_json::<WorkflowRunsResponse>(client, token, &url)
+                        .await
+                        .map(|r| r.workflow_runs)
                 }
-                _ => continue,
+            })
+            .await;
+            let runs: Vec<WorkflowRun> = match runs {
+                Ok(runs) => runs,
+                Err(e) => {
+                    warn!(
+                        "Queued-job scan: failed to list {} runs in {}: {:#}",
+                        run_status, repo.full_name, e
+                    );
+                    continue;
+                }
             };
 
             if !runs.is_empty() {
@@ -972,27 +918,27 @@ impl GitHubClient {
 
             // For each run, get the jobs
             for run in runs {
-                let jobs_url = format!(
-                    "{GITHUB_API_URL}/repos/{}/actions/runs/{}/jobs",
-                    repo.full_name, run.id
-                );
-
-                let jobs_response = client
-                    .get(&jobs_url)
-                    .header("Authorization", format!("Bearer {token}"))
-                    .header("Accept", "application/vnd.github+json")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .send()
-                    .await;
-
-                let run_jobs: Vec<WorkflowJob> = match jobs_response {
-                    Ok(resp) if resp.status().is_success() => {
-                        match resp.json::<WorkflowJobsResponse>().await {
-                            Ok(r) => r.jobs,
-                            Err(_) => continue,
-                        }
+                let run_jobs = collect_pages(|page| {
+                    let url = format!(
+                        "{GITHUB_API_URL}/repos/{}/actions/runs/{}/jobs?per_page={PAGE_SIZE}&page={page}",
+                        repo.full_name, run.id
+                    );
+                    async move {
+                        get_json::<WorkflowJobsResponse>(client, token, &url)
+                            .await
+                            .map(|r| r.jobs)
                     }
-                    _ => continue,
+                })
+                .await;
+                let run_jobs: Vec<WorkflowJob> = match run_jobs {
+                    Ok(jobs) => jobs,
+                    Err(e) => {
+                        warn!(
+                            "Queued-job scan: failed to list jobs of run {} in {}: {:#}",
+                            run.id, repo.full_name, e
+                        );
+                        continue;
+                    }
                 };
 
                 // Filter for queued/pending jobs (jobs waiting for a runner)
@@ -1007,7 +953,7 @@ impl GitHubClient {
                             name: repo.owner.login.clone(),
                         };
                         jobs.push(QueuedJob {
-                            job_id: job.id,
+                            id: job.id.to_string(),
                             labels: job.labels,
                             runner_scope: scope,
                             repository: Some(repo.full_name.clone()),
@@ -1022,7 +968,11 @@ impl GitHubClient {
 }
 
 #[async_trait]
-impl RunnerTokenProvider for GitHubClient {
+impl Forge for GitHubClient {
+    fn scope_url(&self, scope: &RunnerScope) -> String {
+        scope.to_url()
+    }
+
     async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
         // Delegate to the inherent method
         GitHubClient::get_registration_token(self, scope).await
@@ -1048,8 +998,10 @@ impl RunnerTokenProvider for GitHubClient {
         GitHubClient::list_queued_jobs(self).await
     }
 
-    async fn get_job_status(&self, repo: &str, job_id: u64) -> Result<Option<String>> {
-        // Delegate to the inherent method
+    async fn get_job_status(&self, repo: &str, job_id: &str) -> Result<Option<String>> {
+        let job_id: u64 = job_id
+            .parse()
+            .map_err(|_| anyhow!("invalid GitHub job id '{job_id}'"))?;
         GitHubClient::get_job_status(self, repo, job_id).await
     }
 }
@@ -1057,6 +1009,83 @@ impl RunnerTokenProvider for GitHubClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pages of `sizes` items each, numbered consecutively, recording which pages were asked for.
+    fn fake_pages<'a>(
+        sizes: &'static [usize],
+        requested: &'a std::sync::Mutex<Vec<u32>>,
+    ) -> impl FnMut(u32) -> std::future::Ready<Result<Vec<usize>>> + 'a {
+        move |page| {
+            requested.lock().unwrap().push(page);
+            let index = page as usize - 1;
+            let start: usize = sizes[..index.min(sizes.len())].iter().sum();
+            let size = sizes.get(index).copied().unwrap_or(0);
+            std::future::ready(Ok((start..start + size).collect()))
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_pages_follows_full_pages() {
+        let requested = std::sync::Mutex::new(Vec::new());
+        // a 230-job matrix run: two full pages and a short one
+        let items = collect_pages(fake_pages(&[100, 100, 30], &requested))
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 230);
+        assert_eq!(items.last(), Some(&229));
+        assert_eq!(*requested.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn collect_pages_stops_on_short_or_empty_page() {
+        let requested = std::sync::Mutex::new(Vec::new());
+        assert_eq!(
+            collect_pages(fake_pages(&[7], &requested))
+                .await
+                .unwrap()
+                .len(),
+            7
+        );
+        assert_eq!(*requested.lock().unwrap(), vec![1]);
+
+        // exactly one full page needs a second, empty, request to know it's done
+        let requested = std::sync::Mutex::new(Vec::new());
+        assert_eq!(
+            collect_pages(fake_pages(&[100], &requested))
+                .await
+                .unwrap()
+                .len(),
+            100
+        );
+        assert_eq!(*requested.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn collect_pages_fails_if_any_page_fails() {
+        let result: Result<Vec<usize>> = collect_pages(|page| {
+            std::future::ready(if page == 2 {
+                Err(anyhow!("HTTP 502"))
+            } else {
+                Ok((0..PAGE_SIZE).collect())
+            })
+        })
+        .await;
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("page 2"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn collect_pages_is_capped() {
+        let mut calls = 0;
+        let items: Vec<usize> = collect_pages(|_| {
+            calls += 1;
+            std::future::ready(Ok((0..PAGE_SIZE).collect()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, MAX_PAGES);
+        assert_eq!(items.len(), MAX_PAGES as usize * PAGE_SIZE);
+    }
 
     #[test]
     fn test_registration_token_path() {

@@ -127,6 +127,7 @@ impl TestFixture {
                 required_labels: vec!["self-hosted".to_string()],
                 label_mappings: vec![],
                 queued_scan_lookback_hours: 168,
+                forge: None,
             };
             let pending_store =
                 Arc::new(kuiper_forge::pending_jobs::PendingJobStore::new(db.pool()));

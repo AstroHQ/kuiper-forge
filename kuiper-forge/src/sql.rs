@@ -127,14 +127,14 @@ pub const CHECK_AGENT_VALID: &str =
 
 #[cfg(feature = "sqlite")]
 pub const INSERT_RUNNER: &str = r#"
-    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, pool)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, pool, forge)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#;
 
 #[cfg(feature = "postgres")]
 pub const INSERT_RUNNER: &str = r#"
-    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, pool)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    INSERT INTO active_runners (runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, pool, forge)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 "#;
 
 #[cfg(feature = "sqlite")]
@@ -144,18 +144,18 @@ pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = 
 pub const DELETE_RUNNER: &str = "DELETE FROM active_runners WHERE runner_name = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE runner_name = ?";
+pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, forge FROM active_runners WHERE runner_name = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE runner_name = $1";
+pub const SELECT_RUNNER: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, forge FROM active_runners WHERE runner_name = $1";
 
 #[cfg(feature = "sqlite")]
-pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE agent_id = ?";
+pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, forge FROM active_runners WHERE agent_id = ?";
 
 #[cfg(feature = "postgres")]
-pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners WHERE agent_id = $1";
+pub const SELECT_RUNNERS_BY_AGENT: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, forge FROM active_runners WHERE agent_id = $1";
 
-pub const SELECT_ALL_RUNNERS: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name FROM active_runners";
+pub const SELECT_ALL_RUNNERS: &str = "SELECT runner_name, agent_id, vm_name, runner_scope, created_at, job_id, job_name, repository, workflow_name, forge FROM active_runners";
 
 #[cfg(feature = "sqlite")]
 pub const SELECT_RUNNERS_BY_JOB_ID: &str =

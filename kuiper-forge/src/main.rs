@@ -21,9 +21,10 @@ use kuiper_forge::agent_failures::AgentFailureStore;
 use kuiper_forge::agent_logs::AgentLogStore;
 use kuiper_forge::agent_registry::AgentRegistry;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
-use kuiper_forge::config::{self, Config, ProvisioningMode};
+use kuiper_forge::config::{self, Config, ForgeKindConfig, ProvisioningMode, WebhookConfig};
 use kuiper_forge::db::Database;
 use kuiper_forge::fleet;
+use kuiper_forge::forge::{self, Forge, ForgeRegistry};
 use kuiper_forge::github;
 use kuiper_forge::management::{self, ManagementClient};
 use kuiper_forge::pending_jobs;
@@ -350,49 +351,59 @@ async fn serve(
         }
     });
 
-    // Initialize token provider and fleet manager
-    // In dry-run mode, use mock tokens instead of GitHub API
-    let (token_provider, fleet_manager, fleet_notifier, webhook_notifier) = if dry_run {
-        warn!("DRY-RUN MODE: Using mock token provider (fake GitHub registration tokens)");
-        let token_provider: Arc<dyn github::RunnerTokenProvider> =
-            Arc::new(github::MockTokenProvider);
-        let (fm, notifier, wh_notifier) = fleet::FleetManager::new(
-            config.clone(),
-            token_provider.clone(),
-            agent_registry.clone(),
-            runner_state.clone(),
-            pending_job_store.clone(),
-            agent_failures.clone(),
-        );
-        (token_provider, Some(fm), Some(notifier), wh_notifier)
+    // Initialize forges and fleet manager
+    // In dry-run mode, every configured forge is a mock instead of its real API
+    let forges: Arc<ForgeRegistry> = if dry_run {
+        warn!("DRY-RUN MODE: Using mock forges (fake registration tokens)");
+        let names: Vec<String> = match config.resolved_forges() {
+            Ok(forges) => forges.into_iter().map(|f| f.name).collect(),
+            Err(_) => vec![forge::LEGACY_GITHUB_FORGE.to_string()],
+        };
+        let mocks = names
+            .into_iter()
+            .map(|name| (name, Arc::new(forge::MockForge) as Arc<dyn Forge>))
+            .collect();
+        Arc::new(ForgeRegistry::new(mocks)?)
     } else {
-        let private_key = config.github.private_key_content()?;
         let scan_lookback_hours = config
             .provisioning
-            .webhook
-            .as_ref()
-            .map(|w| w.queued_scan_lookback_hours)
+            .on_demand_filters()
+            .map(|f| f.queued_scan_lookback_hours)
             .unwrap_or(168);
-        let github_client = github::GitHubClient::from_key(config.github.app_id, private_key)?
-            .with_scan_lookback_hours(scan_lookback_hours);
+        let mut forges: Vec<(String, Arc<dyn Forge>)> = Vec::new();
+        for forge_config in config.resolved_forges()? {
+            let client: Arc<dyn Forge> = match &forge_config.kind {
+                ForgeKindConfig::Github(github_config) => {
+                    let private_key = github_config.private_key_content()?;
+                    let github_client =
+                        github::GitHubClient::from_key(github_config.app_id, private_key)?
+                            .with_scan_lookback_hours(scan_lookback_hours);
 
-        // Validate GitHub API access before starting
-        // This catches configuration issues early rather than failing later
-        github_client.validate().await.context(
-            "GitHub API validation failed. Fix the configuration or use --dry-run to skip GitHub integration."
-        )?;
+                    // Validate GitHub API access before starting
+                    // This catches configuration issues early rather than failing later
+                    github_client.validate().await.with_context(|| format!(
+                        "GitHub API validation failed for forge '{}'. Fix the configuration or use --dry-run to skip GitHub integration.",
+                        forge_config.name
+                    ))?;
+                    Arc::new(github_client)
+                }
+            };
+            info!("Forge '{}' ready", forge_config.name);
+            forges.push((forge_config.name, client));
+        }
+        Arc::new(ForgeRegistry::new(forges)?)
+    };
 
-        let token_provider: Arc<dyn github::RunnerTokenProvider> = Arc::new(github_client);
-
+    let (fleet_manager, fleet_notifier, webhook_notifier) = {
         let (fm, notifier, wh_notifier) = fleet::FleetManager::new(
             config.clone(),
-            token_provider.clone(),
+            forges.clone(),
             agent_registry.clone(),
             runner_state.clone(),
             pending_job_store.clone(),
             agent_failures.clone(),
         );
-        (token_provider, Some(fm), Some(notifier), wh_notifier)
+        (Some(fm), Some(notifier), wh_notifier)
     };
 
     info!("CI Runner Coordinator starting...");
@@ -411,14 +422,23 @@ async fn serve(
         webhook_notifier,
     ) {
         (ProvisioningMode::Webhook, Some(wh_config), Some(wh_notifier)) => {
+            let mut wh_config = wh_config.clone();
+            let forge_name = webhook_forge(&config, &wh_config, &forges)?;
             info!(
-                "Webhook mode enabled - webhook endpoint at {}",
-                wh_config.path
+                "Webhook mode enabled - webhook endpoint at {} for forge '{}'",
+                wh_config.path, forge_name
             );
-            Some((wh_config.clone(), wh_notifier))
+            wh_config.forge = Some(forge_name);
+            Some((wh_config, wh_notifier))
         }
         _ => None,
     };
+    if config.provisioning.mode == ProvisioningMode::Polling {
+        info!(
+            "Polling mode enabled - scanning GitHub for queued jobs every {}s",
+            config.provisioning.polling_config().interval().as_secs()
+        );
+    }
 
     // Run the gRPC server
     let server_config = ServerConfig {
@@ -471,7 +491,7 @@ async fn serve(
     // recovery path instead.
     let sweep_registry = agent_registry.clone();
     let sweep_runner_state = runner_state.clone();
-    let sweep_token_provider = token_provider.clone();
+    let sweep_forges = forges.clone();
     let sweep_fleet_notifier = fleet_notifier.clone();
     tokio::spawn(async move {
         let sweep_interval = std::time::Duration::from_secs(60);
@@ -552,7 +572,9 @@ async fn serve(
                     // No fleet manager - remove directly from state and GitHub
                     let runners = sweep_runner_state.remove_runners_for_agent(&agent_id).await;
                     for (runner_name, runner_info) in runners {
-                        let tp = sweep_token_provider.clone();
+                        let tp = sweep_forges
+                            .for_runner(runner_info.forge.as_deref())
+                            .unwrap_or_else(|_| sweep_forges.default_forge());
                         let scope = runner_info.runner_scope.clone();
                         tokio::spawn(async move {
                             if let Err(e) = tp.remove_runner(&scope, &runner_name).await {
@@ -1075,6 +1097,31 @@ fn parse_duration(s: &str) -> Result<Duration> {
         "d" => Ok(Duration::days(num)),
         _ => Err(anyhow!("Unknown duration unit: {unit}. Use s, m, h, or d")),
     }
+}
+
+/// The forge webhook deliveries belong to: the configured `forge`, or the first
+/// GitHub forge. Webhooks are GitHub-only for now.
+fn webhook_forge(
+    config: &Config,
+    webhook: &WebhookConfig,
+    forges: &ForgeRegistry,
+) -> Result<String> {
+    let name = match &webhook.forge {
+        Some(name) => name.clone(),
+        None => config
+            .resolved_forges()
+            .ok()
+            .and_then(|list| {
+                list.into_iter()
+                    .find(|f| matches!(f.kind, ForgeKindConfig::Github(_)))
+                    .map(|f| f.name)
+            })
+            .unwrap_or_else(|| forges.default_name().to_string()),
+    };
+    forges
+        .get(&name)
+        .with_context(|| "provisioning.webhook.forge must name a configured forge")?;
+    Ok(name)
 }
 
 #[cfg(test)]

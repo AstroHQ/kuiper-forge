@@ -21,13 +21,14 @@
 //! - `KUIPER_TLS__CA_CERT` → `tls.ca_cert`
 //! - `KUIPER_PROVISIONING__MODE` → `provisioning.mode`
 //! - `KUIPER_PROVISIONING__WEBHOOK__SECRET` → `provisioning.webhook.secret`
+//! - `KUIPER_PROVISIONING__POLLING__INTERVAL_SECS` → `provisioning.polling.interval_secs`
 //!
 //! **Note:** Complex arrays like `runners` and `label_mappings` should be configured
 //! via TOML file, not environment variables.
 //!
 //! # Provisioning Modes
 //!
-//! The coordinator supports two provisioning modes:
+//! The coordinator supports three provisioning modes:
 //!
 //! - **Fixed Capacity**: Maintains a fixed pool of runners per configuration.
 //!   The coordinator ensures the target count of runners is always available.
@@ -35,6 +36,9 @@
 //! - **Webhook (Dynamic)**: Runners are created on-demand in response to GitHub
 //!   webhook events. Labels from the workflow job determine which agent/VM base
 //!   to use.
+//!
+//! - **Polling (Dynamic)**: Like webhook mode, but queued jobs are discovered by
+//!   periodically scanning the GitHub API instead of receiving webhook events.
 
 use anyhow::{Context, Result};
 use figment::{
@@ -62,6 +66,13 @@ pub enum ProvisioningMode {
     /// The job's labels determine which agent/VM base to use. No runners are
     /// pre-provisioned; they are created just-in-time when jobs are queued.
     Webhook,
+
+    /// Polling dynamic mode: create runners on-demand from an API scan.
+    ///
+    /// Same on-demand behaviour as webhook mode, but queued jobs are found by
+    /// periodically listing them through the API rather than via webhook
+    /// delivery. Useful when the coordinator isn't reachable from the forge.
+    Polling,
 }
 
 /// Provisioning configuration.
@@ -74,6 +85,47 @@ pub struct ProvisioningConfig {
     /// Webhook configuration (only used when mode is `webhook`).
     #[serde(default)]
     pub webhook: Option<WebhookConfig>,
+
+    /// Polling configuration (only used when mode is `polling`). Optional:
+    /// every field has a default, so `mode = "polling"` alone is enough.
+    #[serde(default)]
+    pub polling: Option<PollingConfig>,
+}
+
+impl ProvisioningConfig {
+    /// Job filters for the active on-demand mode, or `None` in fixed-capacity mode
+    /// (and in webhook mode without a `[provisioning.webhook]` section).
+    pub fn on_demand_filters(&self) -> Option<OnDemandFilters> {
+        match self.mode {
+            ProvisioningMode::FixedCapacity => None,
+            ProvisioningMode::Webhook => self.webhook.as_ref().map(|w| OnDemandFilters {
+                required_labels: w.required_labels.clone(),
+                label_mappings: w.label_mappings.clone(),
+                queued_scan_lookback_hours: w.queued_scan_lookback_hours,
+            }),
+            ProvisioningMode::Polling => {
+                let p = self.polling_config();
+                Some(OnDemandFilters {
+                    required_labels: p.required_labels,
+                    label_mappings: p.label_mappings,
+                    queued_scan_lookback_hours: p.queued_scan_lookback_hours,
+                })
+            }
+        }
+    }
+
+    /// The polling configuration, falling back to defaults when the section is absent.
+    pub fn polling_config(&self) -> PollingConfig {
+        self.polling.clone().unwrap_or_default()
+    }
+}
+
+/// Job filters shared by the on-demand modes (webhook and polling).
+#[derive(Debug, Clone)]
+pub struct OnDemandFilters {
+    pub required_labels: Vec<String>,
+    pub label_mappings: Vec<LabelMapping>,
+    pub queued_scan_lookback_hours: u64,
 }
 
 impl Default for ProvisioningConfig {
@@ -81,6 +133,7 @@ impl Default for ProvisioningConfig {
         Self {
             mode: ProvisioningMode::FixedCapacity,
             webhook: None,
+            polling: None,
         }
     }
 }
@@ -140,6 +193,67 @@ pub struct WebhookConfig {
     /// would be missed by a narrow window — keep this generous, or `0`.
     #[serde(default = "default_queued_scan_lookback_hours")]
     pub queued_scan_lookback_hours: u64,
+
+    /// Configured name of the GitHub forge these webhooks come from (default:
+    /// the first GitHub forge). Webhook deliveries are GitHub-only for now.
+    #[serde(default)]
+    pub forge: Option<String>,
+}
+
+/// Polling configuration for dynamic runner provisioning.
+///
+/// Used when `provisioning.mode = "polling"`. The coordinator scans the GitHub
+/// API for queued jobs every `interval_secs` and creates runners on-demand,
+/// exactly as webhook mode does for delivered events. No webhook endpoint is served.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PollingConfig {
+    /// Seconds between scans (default: 120, minimum: 10).
+    ///
+    /// GitHub has no org-wide queued-jobs endpoint, so each scan lists workflow
+    /// runs for every recently pushed repo. Short intervals across many repos can
+    /// exhaust the GitHub App's API rate limit.
+    #[serde(default = "default_poll_interval_secs")]
+    pub interval_secs: u64,
+
+    /// Required labels that ALL jobs must have to be accepted (default: ["self-hosted"]).
+    /// Same meaning as in webhook mode.
+    #[serde(default = "default_required_labels")]
+    pub required_labels: Vec<String>,
+
+    /// Label mappings: maps workflow labels to runner scopes. Same meaning as in
+    /// webhook mode; if empty, jobs are accepted with the scope the scan found them in.
+    #[serde(default)]
+    pub label_mappings: Vec<LabelMapping>,
+
+    /// How far back (in hours) a repository's last push may be for it to be
+    /// scanned (default: 168 = 7 days, `0` = scan every repo). Same as webhook mode.
+    #[serde(default = "default_queued_scan_lookback_hours")]
+    pub queued_scan_lookback_hours: u64,
+}
+
+impl Default for PollingConfig {
+    fn default() -> Self {
+        Self {
+            interval_secs: default_poll_interval_secs(),
+            required_labels: default_required_labels(),
+            label_mappings: Vec::new(),
+            queued_scan_lookback_hours: default_queued_scan_lookback_hours(),
+        }
+    }
+}
+
+/// Shortest allowed polling interval; lower values are raised to this.
+pub const MIN_POLL_INTERVAL_SECS: u64 = 10;
+
+impl PollingConfig {
+    /// The scan interval, clamped to [`MIN_POLL_INTERVAL_SECS`].
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.interval_secs.max(MIN_POLL_INTERVAL_SECS))
+    }
+}
+
+fn default_poll_interval_secs() -> u64 {
+    120
 }
 
 fn default_webhook_path() -> String {
@@ -188,13 +302,29 @@ pub struct LabelMapping {
     /// Optional runner group for the created runner.
     #[serde(default)]
     pub runner_group: Option<String>,
+
+    /// Only match jobs from this forge (by configured name). If not specified,
+    /// the mapping matches jobs from any forge.
+    #[serde(default)]
+    pub forge: Option<String>,
 }
 
 /// Main configuration for the coordinator daemon.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    /// GitHub App configuration
-    pub github: GitHubConfig,
+    /// GitHub App configuration (legacy single-forge form).
+    ///
+    /// Equivalent to one `[[forges]]` entry named `github` with `type = "github"`.
+    /// Use either this or `[[forges]]`, not both.
+    #[serde(default)]
+    pub github: Option<GitHubConfig>,
+
+    /// Forges to serve (GitHub, later Forgejo), each under a unique name.
+    ///
+    /// The first forge is the default: fixed-capacity pools and the global
+    /// `runner_scope` register with it.
+    #[serde(default)]
+    pub forges: Vec<ForgeConfig>,
 
     /// gRPC server settings
     #[serde(default)]
@@ -219,7 +349,7 @@ pub struct Config {
     #[serde(default)]
     pub provisioning: ProvisioningConfig,
 
-    /// Global runner scope - where all runners are registered in GitHub.
+    /// Global runner scope - where all runners are registered on the default forge.
     ///
     /// In fixed capacity mode, agents report their labels and capacity,
     /// and all runners are registered to this scope.
@@ -231,6 +361,34 @@ pub struct Config {
     /// org uses custom runner groups.
     #[serde(default)]
     pub runner_group: Option<String>,
+}
+
+/// A forge the coordinator serves, under a unique name.
+///
+/// ```toml
+/// [[forges]]
+/// name = "github"
+/// type = "github"
+/// app_id = 123456
+/// private_key_path = "/etc/kuiper/github-app.pem"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForgeConfig {
+    /// Name jobs and runners refer to this forge by. Must be unique and must not
+    /// contain `:` (it prefixes job keys like `github:123`).
+    pub name: String,
+
+    /// Which forge this is, and its credentials.
+    #[serde(flatten)]
+    pub kind: ForgeKindConfig,
+}
+
+/// Forge type and its settings, tagged by `type`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ForgeKindConfig {
+    /// GitHub, authenticated as a GitHub App.
+    Github(GitHubConfig),
 }
 
 /// GitHub App authentication configuration.
@@ -256,6 +414,40 @@ pub struct GitHubConfig {
     /// Supports `\n` escape sequences for single-line env var values.
     #[serde(default)]
     pub private_key: Option<String>,
+}
+
+impl Config {
+    /// The configured forges, with a legacy `[github]` section turned into a
+    /// forge named [`LEGACY_GITHUB_FORGE`](crate::forge::LEGACY_GITHUB_FORGE).
+    ///
+    /// Errors if none are configured, both forms are used, or names are invalid.
+    pub fn resolved_forges(&self) -> Result<Vec<ForgeConfig>> {
+        let forges = match (&self.github, self.forges.is_empty()) {
+            (Some(_), false) => {
+                anyhow::bail!("Configure forges with either [github] or [[forges]], not both")
+            }
+            (Some(github), true) => vec![ForgeConfig {
+                name: crate::forge::LEGACY_GITHUB_FORGE.to_string(),
+                kind: ForgeKindConfig::Github(github.clone()),
+            }],
+            (None, false) => self.forges.clone(),
+            (None, true) => {
+                anyhow::bail!("No forge configured: add a [github] or [[forges]] section")
+            }
+        };
+        for (i, forge) in forges.iter().enumerate() {
+            if forge.name.is_empty() || forge.name.contains(':') {
+                anyhow::bail!(
+                    "Invalid forge name '{}': must be non-empty and must not contain ':'",
+                    forge.name
+                );
+            }
+            if forges[..i].iter().any(|f| f.name == forge.name) {
+                anyhow::bail!("Forge name '{}' is configured more than once", forge.name);
+            }
+        }
+        Ok(forges)
+    }
 }
 
 impl GitHubConfig {
@@ -585,11 +777,12 @@ impl Config {
         tracing::info!("Using default configuration for dry-run mode");
         tracing::info!("Using agent-driven pool discovery");
         Ok(Config {
-            github: GitHubConfig {
+            github: Some(GitHubConfig {
                 app_id: 0,
                 private_key_path: None,
                 private_key: None,
-            },
+            }),
+            forges: Vec::new(),
             grpc: GrpcConfig::default(),
             tls: TlsConfig::with_defaults(data_dir),
             database: DatabaseConfig::default(),
@@ -638,6 +831,22 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # private_key = "-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----"
 # Environment variable: KUIPER_GITHUB__PRIVATE_KEY
 # Note: installation_id is auto-discovered from your GitHub App installations
+
+# To serve several forges from one coordinator, replace [github] with a
+# [[forges]] list. Each forge has a unique name (jobs are tracked as
+# "<name>:<job id>"); the first one is the default, where fixed-capacity pools
+# and [runner_scope] register. A [github] section is the same as one forge
+# named "github".
+#
+# [[forges]]
+# name = "github"
+# type = "github"
+# app_id = 123456
+# private_key_path = "{data_dir_str}/github-app.pem"
+#
+# Label mappings (webhook/polling modes) can be limited to one forge with
+# `forge = "<name>"`, and [provisioning.webhook] takes `forge = "<name>"` to
+# say which GitHub forge its deliveries come from (default: the first).
 
 [grpc]
 listen_addr = "0.0.0.0:9443"
@@ -725,6 +934,10 @@ enabled = false
 # - "webhook": Create runners on-demand via GitHub webhook events.
 #   Runners are created just-in-time when workflow jobs are queued.
 #   Use [provisioning.webhook] to configure the webhook listener.
+#
+# - "polling": Create runners on-demand by scanning the GitHub API for queued
+#   jobs. Like "webhook", but needs no inbound webhook delivery.
+#   Use [provisioning.polling] to tune it (optional; all fields have defaults).
 
 [provisioning]
 mode = "fixed_capacity"
@@ -767,6 +980,28 @@ mode = "fixed_capacity"
 # owner = "my-org"
 # repo = "my-repo"
 
+# -----------------------------------------------------------------------------
+# Polling Mode Configuration (uncomment to use)
+# -----------------------------------------------------------------------------
+# Queued jobs are found by scanning the GitHub API; no webhook endpoint is needed.
+# Each scan lists workflow runs per recently pushed repo, so keep the interval
+# generous with many repos to stay within GitHub API rate limits.
+#
+# [provisioning]
+# mode = "polling"
+#
+# [provisioning.polling]
+# interval_secs = 120                 # seconds between scans (default 120, min 10)
+# required_labels = ["self-hosted"]   # same as webhook mode
+# queued_scan_lookback_hours = 168    # only scan repos pushed within this window (0 = all)
+#
+# [[provisioning.polling.label_mappings]]
+# labels = ["self-hosted", "Linux", "X64"]
+#
+# [provisioning.polling.label_mappings.runner_scope]
+# type = "organization"
+# name = "my-org"
+
 "#
     )
 }
@@ -806,7 +1041,7 @@ name = "my-org"
 "#;
 
         let config = parse_config(config_str);
-        assert_eq!(config.github.app_id, 123456);
+        assert_eq!(config.github.as_ref().unwrap().app_id, 123456);
         assert_eq!(config.grpc.listen_addr, "0.0.0.0:9443");
         assert_eq!(
             config.runner_scope,
@@ -950,5 +1185,165 @@ secret = "test-secret"
         let webhook = config.provisioning.webhook.unwrap();
         assert_eq!(webhook.path, "/webhook"); // default path
         assert_eq!(webhook.required_labels, vec!["self-hosted"]); // default required labels
+    }
+
+    const POLLING_BASE: &str = r#"
+[github]
+app_id = 123456
+private_key_path = "/etc/ci-runner/github-app.pem"
+
+[tls]
+ca_cert = "/etc/ci-runner/ca.crt"
+ca_key = "/etc/ci-runner/ca.key"
+server_cert = "/etc/ci-runner/server.crt"
+server_key = "/etc/ci-runner/server.key"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
+
+[provisioning]
+mode = "polling"
+"#;
+
+    #[test]
+    fn test_polling_config_defaults_without_section() {
+        let config = parse_config(POLLING_BASE);
+        assert_eq!(config.provisioning.mode, ProvisioningMode::Polling);
+        assert!(config.provisioning.polling.is_none());
+
+        let polling = config.provisioning.polling_config();
+        assert_eq!(polling.interval_secs, 120);
+        assert_eq!(polling.required_labels, vec!["self-hosted"]);
+        assert!(polling.label_mappings.is_empty());
+
+        let filters = config.provisioning.on_demand_filters().unwrap();
+        assert_eq!(filters.required_labels, vec!["self-hosted"]);
+        assert_eq!(filters.queued_scan_lookback_hours, 168);
+    }
+
+    #[test]
+    fn test_polling_config_section() {
+        let config_str = format!(
+            "{POLLING_BASE}{}",
+            r#"
+[provisioning.polling]
+interval_secs = 45
+required_labels = []
+queued_scan_lookback_hours = 0
+
+[[provisioning.polling.label_mappings]]
+labels = ["self-hosted", "Linux"]
+
+[provisioning.polling.label_mappings.runner_scope]
+type = "repository"
+owner = "my-org"
+repo = "my-repo"
+"#
+        );
+        let config = parse_config(&config_str);
+        let polling = config.provisioning.polling_config();
+        assert_eq!(polling.interval_secs, 45);
+        assert!(polling.required_labels.is_empty());
+        assert_eq!(polling.queued_scan_lookback_hours, 0);
+        assert_eq!(polling.label_mappings.len(), 1);
+
+        let filters = config.provisioning.on_demand_filters().unwrap();
+        assert_eq!(
+            filters.label_mappings[0].labels,
+            vec!["self-hosted", "Linux"]
+        );
+        assert!(filters.required_labels.is_empty());
+    }
+
+    #[test]
+    fn test_polling_interval_is_clamped() {
+        let polling = PollingConfig {
+            interval_secs: 1,
+            ..PollingConfig::default()
+        };
+        assert_eq!(
+            polling.interval(),
+            std::time::Duration::from_secs(MIN_POLL_INTERVAL_SECS)
+        );
+    }
+
+    const FORGE_BASE: &str = r#"
+[tls]
+ca_cert = "/etc/ci-runner/ca.crt"
+ca_key = "/etc/ci-runner/ca.key"
+server_cert = "/etc/ci-runner/server.crt"
+server_key = "/etc/ci-runner/server.key"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
+"#;
+
+    #[test]
+    fn test_legacy_github_section_is_a_forge() {
+        let config = parse_config(&format!(
+            "{FORGE_BASE}\n[github]\napp_id = 7\nprivate_key_path = \"/k.pem\"\n"
+        ));
+        let forges = config.resolved_forges().unwrap();
+        assert_eq!(forges.len(), 1);
+        assert_eq!(forges[0].name, "github");
+        let ForgeKindConfig::Github(github) = &forges[0].kind;
+        assert_eq!(github.app_id, 7);
+    }
+
+    #[test]
+    fn test_forges_list() {
+        let config = parse_config(&format!(
+            "{FORGE_BASE}{}",
+            r#"
+[[forges]]
+name = "gh-main"
+type = "github"
+app_id = 1
+private_key_path = "/a.pem"
+
+[[forges]]
+name = "gh-other"
+type = "github"
+app_id = 2
+private_key = "PEM"
+"#
+        ));
+        let forges = config.resolved_forges().unwrap();
+        let names: Vec<_> = forges.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["gh-main", "gh-other"]);
+        let ForgeKindConfig::Github(second) = &forges[1].kind;
+        assert_eq!(second.app_id, 2);
+        assert_eq!(second.private_key.as_deref(), Some("PEM"));
+    }
+
+    #[test]
+    fn test_forge_config_errors() {
+        // neither form
+        assert!(parse_config(FORGE_BASE).resolved_forges().is_err());
+
+        let entry = |name: &str| {
+            format!("\n[[forges]]\nname = \"{name}\"\ntype = \"github\"\napp_id = 1\n")
+        };
+        // both forms
+        let both = format!("{FORGE_BASE}\n[github]\napp_id = 1\n{}", entry("x"));
+        assert!(parse_config(&both).resolved_forges().is_err());
+        // duplicate names
+        let dup = format!("{FORGE_BASE}{}{}", entry("x"), entry("x"));
+        assert!(parse_config(&dup).resolved_forges().is_err());
+        // ':' in a name
+        let colon = format!("{FORGE_BASE}{}", entry("a:b"));
+        assert!(parse_config(&colon).resolved_forges().is_err());
+    }
+
+    #[test]
+    fn test_on_demand_filters_by_mode() {
+        let mut provisioning = ProvisioningConfig::default();
+        assert!(provisioning.on_demand_filters().is_none());
+
+        // webhook mode without a section has no filters (and no endpoint)
+        provisioning.mode = ProvisioningMode::Webhook;
+        assert!(provisioning.on_demand_filters().is_none());
     }
 }
