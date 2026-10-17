@@ -147,6 +147,8 @@ See `examples/` for sample configuration files.
 - **Webhook** - Creates runners on-demand via GitHub webhook events
 - **Polling** - Creates runners on-demand for queued jobs found by periodically scanning the GitHub API; no inbound webhooks needed
 
+One coordinator can serve several forges via `[[forges]]`. Forgejo support is in progress; see [docs/forge-support.md](docs/forge-support.md).
+
 ## Requirements
 
 - Rust 1.94+
