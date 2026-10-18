@@ -309,6 +309,7 @@ fn log_command_stderr(e: &Error) {
     }
 }
 
+use kuiper_agent_lib::forgejo_runner;
 use kuiper_agent_lib::github_runner::{self, Arch, Platform};
 use kuiper_agent_lib::shell::escape_posix;
 
@@ -464,6 +465,87 @@ pub async fn configure_runner(
 /// Wrapper script for running the GitHub Actions runner. It's plain bash, so linux runs the same script headless.
 const RUNNER_SCRIPT: &str = kuiper_agent_lib::github_runner::GUI_RUNNER_SCRIPT_MACOS;
 
+/// Which runner program a VM runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerProgram {
+    /// The GitHub Actions runner (`run.sh`)
+    GitHub,
+    /// `forgejo-runner one-job`, prepared by [`prepare_forgejo_runner`]
+    Forgejo,
+}
+
+/// Install forgejo-runner on the VM if needed and write its token file and `run-job.sh`
+/// for one Forgejo job attempt.
+pub async fn prepare_forgejo_runner(
+    ip: Ipv4Addr,
+    config: &SshConfig,
+    job: &forgejo_runner::OneJob<'_>,
+    version: &str,
+    url_template: &str,
+    os: GuestOs,
+) -> Result<()> {
+    match ssh_exec(ip, config, &forgejo_runner::check_installed_command()).await {
+        Ok(output) if output.trim() == "installed" => {
+            debug!("forgejo-runner already installed on {}", ip);
+        }
+        _ => {
+            let version = forgejo_runner::resolve_version(version);
+            let arch_output = ssh_exec(ip, config, "uname -m").await?;
+            let arch = Arch::from_uname(&arch_output).ok_or_else(|| {
+                Error::Ssh(format!(
+                    "Unsupported architecture: {}. Expected arm64 or x86_64.",
+                    arch_output.trim()
+                ))
+            })?;
+            let fr_os = match os {
+                GuestOs::MacOS => forgejo_runner::Os::MacOS,
+                GuestOs::Linux => forgejo_runner::Os::Linux,
+            };
+            let url = forgejo_runner::download_url(url_template, version, fr_os, arch);
+            info!(
+                "Installing forgejo-runner v{} for {}-{} on {} from {}",
+                version,
+                fr_os.as_str(),
+                arch.as_str(),
+                ip,
+                url
+            );
+            match ssh_exec(
+                ip,
+                config,
+                &forgejo_runner::install_command(&url, version, fr_os, arch),
+            )
+            .await
+            {
+                Ok(output) => {
+                    info!("forgejo-runner installed on {}", ip);
+                    debug!(
+                        local_only = tracing::field::Empty,
+                        "Install output: {}", output
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to install forgejo-runner on {}: {}", ip, e);
+                    log_command_stderr(&e);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    let prepare = forgejo_runner::prepare_command(job).map_err(Error::Ssh)?;
+    ssh_exec(ip, config, &prepare).await.map_err(|e| {
+        error!("Failed to write forgejo-runner job files on {}: {}", ip, e);
+        log_command_stderr(&e);
+        e
+    })?;
+    info!(
+        "forgejo-runner ready on {} for handle {} (labels {:?})",
+        ip, job.handle, job.labels
+    );
+    Ok(())
+}
+
 /// Start the GitHub Actions runner in the background and wait for it to complete.
 ///
 /// On macOS this launches the runner via `open -a Terminal`, which provides access to
@@ -480,9 +562,11 @@ pub async fn start_runner_and_wait(
     log_path: &Path,
     jit_config: &str,
     os: GuestOs,
+    program: RunnerProgram,
 ) -> Result<()> {
     info!(
-        "Starting runner ({:?}) on {} (logging to {})",
+        "Starting {:?} runner ({:?}) on {} (logging to {})",
+        program,
         os,
         ip,
         log_path.display()
@@ -490,8 +574,12 @@ pub async fn start_runner_and_wait(
 
     // Upload the runner wrapper script to the VM
     let script_path = "~/start-runner.sh";
+    let script = match program {
+        RunnerProgram::GitHub => RUNNER_SCRIPT,
+        RunnerProgram::Forgejo => forgejo_runner::JOB_WRAPPER_SCRIPT,
+    };
     let upload_cmd = format!(
-        "cat > {script_path} << 'RUNNER_SCRIPT_EOF'\n{RUNNER_SCRIPT}\nRUNNER_SCRIPT_EOF\nchmod +x {script_path}"
+        "cat > {script_path} << 'RUNNER_SCRIPT_EOF'\n{script}\nRUNNER_SCRIPT_EOF\nchmod +x {script_path}"
     );
     ssh_exec(ip, config, &upload_cmd)
         .await

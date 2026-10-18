@@ -983,8 +983,8 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # private_key_path = "{data_dir_str}/github-app.pem"
 #
 # A Forgejo (15+) forge is polled for queued jobs, so it needs
-# [provisioning] mode = "polling". Its runners are one-job runners on Linux
-# proxmox VMs. The token's user must own every scope: an org owner with
+# [provisioning] mode = "polling". Its runners are one-job runners, on agents
+# that support them (proxmox Linux/Windows VMs, tart VMs). The token's user must own every scope: an org owner with
 # write:organization, or the repo owner with write:repository.
 # required_labels applies to every forge: Forgejo doesn't add "self-hosted" the
 # way GitHub does, so put it in Forgejo workflows' runs-on too (or pick labels

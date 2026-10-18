@@ -103,6 +103,14 @@ pub struct TartConfig {
     /// See: https://github.com/actions/runner/releases
     #[serde(default = "default_runner_version")]
     pub runner_version: String,
+    /// forgejo-runner version to install for Forgejo jobs (e.g., "13.2.0", at least 13.1.0). "latest" means the
+    /// version this agent release pins, since builds come from kuiper-forge's releases
+    #[serde(default = "default_runner_version")]
+    pub forgejo_runner_version: String,
+    /// Where to download forgejo-runner from: a URL template with `{version}`, `{os}`, `{arch}` and `{ext}`, with a
+    /// `.sha256` next to each binary. Defaults to kuiper-forge's GitHub releases
+    #[serde(default = "default_forgejo_runner_url")]
+    pub forgejo_runner_url: String,
     /// Image mappings for label-based selection (first match wins)
     #[serde(default)]
     pub image_mappings: Vec<ImageMapping>,
@@ -125,6 +133,10 @@ impl TartConfig {
 
 fn default_runner_version() -> String {
     "latest".to_string()
+}
+
+fn default_forgejo_runner_url() -> String {
+    kuiper_agent_lib::forgejo_runner::DEFAULT_URL_TEMPLATE.to_string()
 }
 
 /// SSH authentication configuration.

@@ -826,7 +826,7 @@ impl ProxmoxAgent {
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             limits: Vec::new(),
-            // forgejo-runner one-job on Linux VMs
+            // forgejo-runner one-job on Linux and Windows VMs
             runner_kinds: vec!["forgejo".to_string()],
         }
     }

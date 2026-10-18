@@ -9,7 +9,7 @@
 //! upstream only publishes Linux builds. Every agent uses the same pinned version.
 
 use crate::github_runner::Arch;
-use crate::shell::{escape_posix, escape_posix_path};
+use crate::shell::{encode_powershell_command, escape_posix, escape_posix_path, escape_powershell};
 
 /// The forgejo-runner version agents install unless configured otherwise. Must have a
 /// `forgejo-runner-v{version}` release on kuiper-forge.
@@ -49,10 +49,18 @@ impl Os {
     }
 }
 
-/// Where the runner is installed on the VM.
+/// Where the runner is installed on Linux and macOS VMs.
 pub const RUNNER_DIR: &str = "~/forgejo-runner";
 
+/// Where the runner is installed on Windows VMs.
+pub const WINDOWS_RUNNER_DIR: &str = r"C:\forgejo-runner";
+
 const INSTALL_SCRIPT: &str = include_str!("../scripts/install_forgejo_runner.sh");
+
+/// Wrapper that runs `run-job.sh` with the tart agent's runner protocol (log to
+/// `~/runner.log`, exit code to `~/runner-exit-status`), for launching in Terminal.app
+/// on macOS like the GitHub runner.
+pub const JOB_WRAPPER_SCRIPT: &str = include_str!("../scripts/run_forgejo_job_wrapper.sh");
 
 /// What a VM needs to run one Forgejo job.
 pub struct OneJob<'a> {
@@ -128,6 +136,23 @@ pub fn install_command(url: &str, version: &str, os: Os, arch: Arch) -> String {
     )
 }
 
+/// Reject values that could end a generated script early, and missing ones.
+fn validate(job: &OneJob<'_>) -> Result<(), String> {
+    let values = [job.instance_url, job.uuid, job.token, job.handle];
+    if values
+        .iter()
+        .copied()
+        .chain(job.labels.iter().map(String::as_str))
+        .any(|v| v.contains('\n') || v.contains('\r'))
+    {
+        return Err("Forgejo runner values must not contain newlines".to_string());
+    }
+    if job.handle.is_empty() || job.uuid.is_empty() || job.token.is_empty() {
+        return Err("Forgejo runner needs a handle, uuid and token".to_string());
+    }
+    Ok(())
+}
+
 /// A runner label for `one-job --label`: plain labels run on the VM itself.
 fn host_label(label: &str) -> String {
     if label.contains(':') {
@@ -142,18 +167,7 @@ fn host_label(label: &str) -> String {
 ///
 /// Errors if a value contains a newline, which could end the script early.
 pub fn prepare_command(job: &OneJob<'_>) -> Result<String, String> {
-    let values = [job.instance_url, job.uuid, job.token, job.handle];
-    if values
-        .iter()
-        .copied()
-        .chain(job.labels.iter().map(String::as_str))
-        .any(|v| v.contains('\n') || v.contains('\r'))
-    {
-        return Err("Forgejo runner values must not contain newlines".to_string());
-    }
-    if job.handle.is_empty() || job.uuid.is_empty() || job.token.is_empty() {
-        return Err("Forgejo runner needs a handle, uuid and token".to_string());
-    }
+    validate(job)?;
 
     let dir = escape_posix_path(RUNNER_DIR);
     let labels: String = job
@@ -179,6 +193,126 @@ pub fn prepare_command(job: &OneJob<'_>) -> Result<String, String> {
 /// done. A login shell, so PATH has user-installed tools.
 pub fn run_command() -> String {
     format!("bash -l {}/run-job.sh", escape_posix_path(RUNNER_DIR))
+}
+
+/// Run a PowerShell script on Windows, from cmd.exe or PowerShell alike: base64
+/// UTF-16 (`-EncodedCommand`), so nothing in it is parsed by the outer shell.
+///
+/// Errors are caught and written to stderr as one plain line with exit code 1: with
+/// stderr redirected (as over SSH), PowerShell otherwise writes them as CLIXML.
+fn powershell(script: &str) -> String {
+    let wrapped = format!(
+        "try {{\n{script}\n}} catch {{\n    [Console]::Error.WriteLine(\"ERROR: $($_.Exception.Message)\")\n    exit 1\n}}"
+    );
+    format!(
+        "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}",
+        encode_powershell_command(&wrapped)
+    )
+}
+
+/// `file:` URL of the token file for `--token-url`: `file:///C:/forgejo-runner/.runner-token`.
+fn token_url(dir: &str) -> String {
+    let path = format!(
+        "{}/.runner-token",
+        dir.replace('\\', "/").trim_end_matches('/')
+    );
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+/// Windows: command that prints `installed` if forgejo-runner is in `dir`.
+pub fn windows_check_installed_command(dir: &str) -> String {
+    powershell(&format!(
+        "if (Test-Path -LiteralPath (Join-Path {} 'forgejo-runner.exe')) {{ 'installed' }}",
+        escape_powershell(dir)
+    ))
+}
+
+/// Windows: command that downloads forgejo-runner from `url` (see [`download_url`])
+/// into `dir`, checks it against `<url>.sha256` and installs it as `forgejo-runner.exe`.
+pub fn windows_install_command(url: &str, dir: &str) -> String {
+    powershell(&format!(
+        r#"$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$Dir = {dir}
+$Url = {url}
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+$Exe = Join-Path $Dir 'forgejo-runner.exe'
+$Tmp = "$Exe.download"
+Write-Output "Downloading forgejo-runner from $Url..."
+Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Tmp
+Invoke-WebRequest -UseBasicParsing -Uri "$Url.sha256" -OutFile "$Tmp.sha256"
+$Expected = ((Get-Content -Raw -LiteralPath "$Tmp.sha256").Trim() -split '\s+')[0].ToLower()
+$Actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Tmp).Hash.ToLower()
+Remove-Item -Force -LiteralPath "$Tmp.sha256"
+if ($Actual -ne $Expected) {{
+    Remove-Item -Force -LiteralPath $Tmp
+    throw "Checksum mismatch for ${{Url}}: expected $Expected, got $Actual"
+}}
+Write-Output "Checksum OK"
+Move-Item -Force -LiteralPath $Tmp -Destination $Exe
+$Version = & $Exe --version 2>&1
+if ($LASTEXITCODE -ne 0) {{
+    # don't leave a binary that a later job would take as installed
+    Remove-Item -Force -LiteralPath $Exe
+    throw "forgejo-runner --version failed (exit $LASTEXITCODE): $Version"
+}}
+Write-Output $Version
+Write-Output "forgejo-runner installed successfully"
+"#,
+        dir = escape_powershell(dir),
+        url = escape_powershell(url),
+    ))
+}
+
+/// Windows: command that writes the runner token (readable only by the current user)
+/// and a `run-job.ps1` that runs the job, so the token never appears on a command line.
+///
+/// Errors if a value contains a newline, which could end the script early.
+pub fn windows_prepare_command(job: &OneJob<'_>, dir: &str) -> Result<String, String> {
+    validate(job)?;
+    let labels: String = job
+        .labels
+        .iter()
+        .map(|l| format!(" --label {}", escape_powershell(&host_label(l))))
+        .collect();
+    // single-quoted here-string: nothing in it is expanded, and the escaped values
+    // have no newlines, so none can end it
+    Ok(powershell(&format!(
+        r#"$ErrorActionPreference = 'Stop'
+$Dir = {dir}
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+$TokenFile = Join-Path $Dir '.runner-token'
+Set-Content -LiteralPath $TokenFile -Value {token} -NoNewline -Encoding ascii
+if ($env:OS -eq 'Windows_NT') {{
+    icacls $TokenFile /inheritance:r /grant:r "$($env:USERNAME):F" | Out-Null
+}}
+$Script = @'
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath {dir}
+& (Join-Path {dir} 'forgejo-runner.exe') one-job --url {url} --uuid {uuid} --token-url {token_url} --handle {handle} --wait{labels}
+exit $LASTEXITCODE
+'@
+Set-Content -LiteralPath (Join-Path $Dir 'run-job.ps1') -Value $Script -Encoding utf8
+"#,
+        dir = escape_powershell(dir),
+        token = escape_powershell(job.token),
+        url = escape_powershell(job.instance_url),
+        uuid = escape_powershell(job.uuid),
+        token_url = escape_powershell(&token_url(dir)),
+        handle = escape_powershell(job.handle),
+    )))
+}
+
+/// Windows: command that runs the job written by [`windows_prepare_command`] and blocks
+/// until it's done, exiting with forgejo-runner's exit code.
+pub fn windows_run_command(dir: &str) -> String {
+    let script = format!("{}\\run-job.ps1", dir.trim_end_matches('\\'));
+    format!("powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{script}\"")
 }
 
 #[cfg(test)]
@@ -266,6 +400,63 @@ mod tests {
         let mut bad = job(&[]);
         bad.handle = "";
         assert!(prepare_command(&bad).is_err());
+    }
+
+    fn decode(cmd: &str) -> String {
+        use base64::Engine;
+        let b64 = cmd.rsplit(' ').next().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        let utf16: Vec<u16> = bytes
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&utf16).unwrap()
+    }
+
+    #[test]
+    fn windows_token_url() {
+        assert_eq!(
+            token_url(WINDOWS_RUNNER_DIR),
+            "file:///C:/forgejo-runner/.runner-token"
+        );
+        assert_eq!(token_url("/tmp/fr/"), "file:///tmp/fr/.runner-token");
+    }
+
+    #[test]
+    fn windows_commands() {
+        let url = download_url(DEFAULT_URL_TEMPLATE, "13.2.0", Os::Windows, Arch::X64);
+        let install = windows_install_command(&url, WINDOWS_RUNNER_DIR);
+        assert!(install.starts_with(
+            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+        ));
+        let script = decode(&install);
+        assert!(script.contains(r"$Dir = 'C:\forgejo-runner'"));
+        assert!(script.contains("forgejo-runner-13.2.0-windows-amd64.exe'"));
+        assert!(script.contains("Get-FileHash -Algorithm SHA256"));
+        assert!(script.contains("throw \"Checksum mismatch"));
+
+        let labels = vec!["windows".to_string(), "it's".to_string()];
+        let prepare = decode(&windows_prepare_command(&job(&labels), WINDOWS_RUNNER_DIR).unwrap());
+        assert!(prepare.contains("Set-Content -LiteralPath $TokenFile -Value 'abc123' -NoNewline"));
+        assert!(prepare.contains("--token-url 'file:///C:/forgejo-runner/.runner-token'"));
+        assert!(
+            prepare.contains("--handle 'h-1' --wait --label 'windows:host' --label 'it''s:host'")
+        );
+        // the token is only in the token file, not the job script
+        let job_script = prepare.split("@'").nth(1).unwrap();
+        assert!(!job_script.contains("abc123"));
+        assert!(windows_prepare_command(&job(&["a\n'@".to_string()]), WINDOWS_RUNNER_DIR).is_err());
+
+        assert_eq!(
+            windows_run_command(WINDOWS_RUNNER_DIR),
+            r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\forgejo-runner\run-job.ps1""#
+        );
+        assert!(
+            decode(&windows_check_installed_command(WINDOWS_RUNNER_DIR))
+                .contains("'forgejo-runner.exe'")
+        );
     }
 
     #[test]

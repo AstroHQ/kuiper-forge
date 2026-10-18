@@ -23,7 +23,7 @@ polling, whichever it supports.
 | 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Next (needs Forgejo 17) |
 | – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later |
 | – | forgejo-runner builds for every platform, published on kuiper-forge | **Done** (workflow; first release not cut yet) |
-| – | macOS (tart) / Windows Forgejo runners | Next |
+| – | macOS (tart) / Windows (proxmox) Forgejo runners | **Ready for testing on real hosts** |
 
 ### Done
 
@@ -241,9 +241,79 @@ and all agents use them, one pinned version everywhere.
   install script was tested against those files over HTTP, including a bad checksum and
   a `shasum`-only PATH. The workflow itself hasn't run on GitHub yet.
 
+## macOS and Windows runners
+
+Both agents now advertise `forgejo` and run Forgejo jobs; neither has run on a real Mac
+or Windows VM yet (see [Testing on real hosts](#testing-on-real-hosts)).
+
+**Tart (macOS, and tart Linux guests).**
+
+- Step 3 of a CreateRunner with `forgejo` set: install forgejo-runner into
+  `~/forgejo-runner` if missing (darwin or linux build by guest OS, arch from `uname -m`,
+  checksum via `shasum -a 256` on macOS), then write the token file and `run-job.sh`
+  (the same `prepare_command` as proxmox Linux).
+- Step 4 uploads `run_forgejo_job_wrapper.sh` as `~/start-runner.sh`, which follows the
+  GitHub runner wrapper's protocol (`~/runner.log`, `~/runner-exit-status`) and is
+  launched the same way: `open -a Terminal` on macOS, so jobs get the GUI session (code
+  signing, keychain) like GitHub jobs do; detached on Linux guests.
+- Config: `tart.forgejo_runner_version` and `tart.forgejo_runner_url`, as for proxmox.
+- Waiting for a runner now ends as soon as its VM is destroyed (a `DestroyRunner` from
+  the idle timeout, say) instead of polling the gone VM until the 6-hour job limit.
+  This applies to GitHub runners too.
+
+**Proxmox Windows VMs.**
+
+- After the clock sync Windows VMs already get, the agent runs PowerShell scripts sent as
+  `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand …`, so
+  they work whether the VM's SSH shell is cmd.exe or PowerShell:
+  - install: download `forgejo-runner-<v>-windows-amd64.exe` and its `.sha256` with
+    `Invoke-WebRequest` (TLS 1.2 enabled), compare with `Get-FileHash`, install as
+    `C:\forgejo-runner\forgejo-runner.exe`, run `--version`, and remove the binary again
+    if that fails;
+  - prepare: write `C:\forgejo-runner\.runner-token` (`icacls` limits it to the current
+    user) and `run-job.ps1`, which runs `one-job` with
+    `--token-url file:///C:/forgejo-runner/.runner-token` and `label:host` labels;
+  - run: `powershell … -File C:\forgejo-runner\run-job.ps1`, exiting with
+    forgejo-runner's exit code.
+- Each script catches its own errors and prints one `ERROR: …` line: with stderr
+  redirected, as over SSH, PowerShell otherwise prints errors as CLIXML.
+- x64 Windows only, like the GitHub runner path. Steps default to `pwsh`, falling back
+  to `powershell`; `bash` steps need Git Bash on the VM, and JavaScript actions need
+  `node`.
+
+**Tested here.**
+
+- Windows scripts, under PowerShell 7.6 for Linux: install from a release-shaped HTTP
+  server (checksum mismatch refused with a clean error, failed `--version` leaves
+  nothing installed), then prepare and run a real Forgejo 17 job end to end with the
+  token file and `file://` token URL; a bad token comes back as exit code 1. Not covered:
+  Windows PowerShell 5.1, cmd.exe as the SSH shell, `icacls`, and the install's success
+  path (Linux can't run the Windows binary).
+- Tart, with the real tart agent on Linux, a fake `tart` command and "VMs" that are
+  this machine over SSH (Linux guest OS): the agent installed forgejo-runner from the
+  published v13.2.0 release, ran a Forgejo 17 job through the wrapper and cleaned up.
+  Not covered: Terminal.app launch, macOS `shasum`, the darwin binary.
+
+### Testing on real hosts
+
+1. Coordinator: a `[[forges]]` entry with `type = "forgejo"`, `[provisioning] mode =
+   "polling"`, and `required_labels` that the test workflows carry.
+2. Agents built from this branch (the coordinator only sends Forgejo jobs to agents that
+   advertise `forgejo`).
+3. macOS: a workflow with `runs-on: [self-hosted, <tart agent labels>]` and a step like
+   `run: sw_vers && security list-keychains`; then one that signs something, to check
+   the GUI session.
+4. Windows: a proxmox Windows template whose VMs have outbound HTTPS to GitHub, and a
+   workflow targeting it with a `pwsh` step (`run: $PSVersionTable; whoami`), plus
+   `shell: bash` and `actions/checkout` if the image has Git Bash and node.
+5. For each: the job succeeds, the agent log shows the forgejo-runner install (first
+   run) and the job, the VM is destroyed, and no runner stays registered on Forgejo.
+6. Idle timeout: two runs in one `concurrency` group with a long first job; the second
+   run's VM is destroyed after `idle_runner_timeout_secs`, then retried.
+
 ## Open questions
 
-- macOS and Windows host mode is lightly tested upstream; it needs testing on a real tart
-  Mac and a Proxmox Windows VM.
+- macOS and Windows host mode is lightly tested upstream; see
+  [Testing on real hosts](#testing-on-real-hosts).
 - Poll per org/repo scope, or use the admin scope when a site-admin token is configured?
   (Org and repo scopes for now.)

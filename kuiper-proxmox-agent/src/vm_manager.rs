@@ -294,18 +294,6 @@ impl VmManager {
             }
         );
 
-        if let Some(forgejo) = forgejo {
-            if is_windows {
-                return Err(Error::runner(
-                    "Forgejo jobs need a Linux VM: forgejo-runner has no Windows release",
-                ));
-            }
-            self.run_forgejo_job(vmid, &mut session, forgejo, labels)
-                .await?;
-            session.close().await?;
-            return Ok((is_windows, shell_is_powershell));
-        }
-
         // Force time sync on Windows — cloned VMs often have stale clocks
         // which causes JIT token validation to fail ("token is not valid until ...")
         if is_windows {
@@ -331,6 +319,13 @@ impl VmManager {
                     warn!("Time sync command failed on VM {}: {}", vmid, e);
                 }
             }
+        }
+
+        if let Some(forgejo) = forgejo {
+            self.run_forgejo_job(vmid, &mut session, forgejo, labels, is_windows)
+                .await?;
+            session.close().await?;
+            return Ok((is_windows, shell_is_powershell));
         }
 
         // Build runner commands
@@ -612,31 +607,50 @@ impl VmManager {
     }
 
     /// Install forgejo-runner if needed, then run one Forgejo job attempt and wait for it.
+    ///
+    /// Linux VMs use `~/forgejo-runner` and bash; Windows VMs use `C:\forgejo-runner` and
+    /// PowerShell scripts sent with `-EncodedCommand`, which work from cmd.exe and
+    /// PowerShell SSH shells alike.
     async fn run_forgejo_job(
         &self,
         vmid: u32,
         session: &mut SshSession,
         forgejo: &ForgejoRunner,
         labels: &[String],
+        is_windows: bool,
     ) -> Result<()> {
-        let check = session
-            .execute(&forgejo_runner::check_installed_command())
-            .await?;
+        let win_dir = forgejo_runner::WINDOWS_RUNNER_DIR;
+        let check_cmd = if is_windows {
+            forgejo_runner::windows_check_installed_command(win_dir)
+        } else {
+            forgejo_runner::check_installed_command()
+        };
+        let check = session.execute(&check_cmd).await?;
         if check.stdout.trim() != "installed" {
             let version =
                 forgejo_runner::resolve_version(&self.vm_config.forgejo_runner_version).to_string();
-            let uname = session.execute("uname -m").await?;
-            let arch =
-                crate::ssh::github_runner::Arch::from_uname(&uname.stdout).ok_or_else(|| {
-                    Error::runner(format!(
-                        "forgejo-runner has no release for architecture '{}'",
-                        uname.stdout.trim()
-                    ))
-                })?;
+            let (os, arch) = if is_windows {
+                // like the GitHub runner path: x64 Windows only for now
+                (
+                    forgejo_runner::Os::Windows,
+                    crate::ssh::github_runner::Arch::X64,
+                )
+            } else {
+                let uname = session.execute("uname -m").await?;
+                let arch = crate::ssh::github_runner::Arch::from_uname(&uname.stdout).ok_or_else(
+                    || {
+                        Error::runner(format!(
+                            "forgejo-runner has no release for architecture '{}'",
+                            uname.stdout.trim()
+                        ))
+                    },
+                )?;
+                (forgejo_runner::Os::Linux, arch)
+            };
             let url = forgejo_runner::download_url(
                 &self.vm_config.forgejo_runner_url,
                 &version,
-                forgejo_runner::Os::Linux,
+                os,
                 arch,
             );
             info!(
@@ -646,14 +660,12 @@ impl VmManager {
                 arch.as_str(),
                 url
             );
-            let install = session
-                .execute(&forgejo_runner::install_command(
-                    &url,
-                    &version,
-                    forgejo_runner::Os::Linux,
-                    arch,
-                ))
-                .await?;
+            let install_cmd = if is_windows {
+                forgejo_runner::windows_install_command(&url, win_dir)
+            } else {
+                forgejo_runner::install_command(&url, &version, os, arch)
+            };
+            let install = session.execute(&install_cmd).await?;
             if install.exit_code != 0 {
                 error!(
                     local_only = tracing::field::Empty,
@@ -677,13 +689,18 @@ impl VmManager {
             debug!("forgejo-runner already installed on VM {}", vmid);
         }
 
-        let prepare = forgejo_runner::prepare_command(&forgejo_runner::OneJob {
+        let job = forgejo_runner::OneJob {
             instance_url: &forgejo.instance_url,
             uuid: &forgejo.uuid,
             token: &forgejo.token,
             handle: &forgejo.handle,
             labels,
-        })
+        };
+        let prepare = if is_windows {
+            forgejo_runner::windows_prepare_command(&job, win_dir)
+        } else {
+            forgejo_runner::prepare_command(&job)
+        }
         .map_err(Error::runner)?;
         let prepared = session.execute(&prepare).await?;
         if prepared.exit_code != 0 {
@@ -707,7 +724,12 @@ impl VmManager {
             vmid, forgejo.handle
         );
         let started = Instant::now();
-        let output = session.execute(&forgejo_runner::run_command()).await?;
+        let run_cmd = if is_windows {
+            forgejo_runner::windows_run_command(win_dir)
+        } else {
+            forgejo_runner::run_command()
+        };
+        let output = session.execute(&run_cmd).await?;
         let elapsed = started.elapsed();
         info!(
             "forgejo-runner on VM {} exited with code {} in {:.1}s",

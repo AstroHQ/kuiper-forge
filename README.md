@@ -147,7 +147,7 @@ See `examples/` for sample configuration files.
 - **Webhook** - Creates runners on-demand via GitHub webhook events
 - **Polling** - Creates runners on-demand for queued jobs found by periodically scanning the forges' APIs (GitHub, Forgejo); no inbound webhooks needed
 
-One coordinator can serve several forges via `[[forges]]`, including Forgejo 15+ in polling mode (one-job runners on Linux proxmox VMs). See [docs/forge-support.md](docs/forge-support.md).
+One coordinator can serve several forges via `[[forges]]`, including Forgejo 15+ in polling mode (one-job runners on proxmox Linux and Windows VMs and tart macOS VMs). See [docs/forge-support.md](docs/forge-support.md).
 
 ## Requirements
 

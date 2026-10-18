@@ -605,22 +605,6 @@ impl TartAgent {
         while let Some(command) = connection.commands.recv().await {
             match command {
                 runtime::RunnerCommand::Create(cmd) => {
-                    // not advertised in runner_kinds, so only a misbehaving coordinator sends these
-                    if cmd.forgejo.is_some() {
-                        warn!(
-                            "Rejecting CreateRunner for vm={}: Forgejo runners aren't supported on tart agents",
-                            cmd.vm_name
-                        );
-                        let _ = connection
-                            .events
-                            .command_ack(
-                                cmd.command_id,
-                                false,
-                                "Forgejo runners aren't supported on tart agents".to_string(),
-                            )
-                            .await;
-                        continue;
-                    }
                     let image = self.select_image(&cmd);
                     let os = self.vm_manager.image_os(&image).await;
                     if !self.has_capacity(os).await {
@@ -674,7 +658,7 @@ impl TartAgent {
         let vm_name = cmd.vm_name.clone();
 
         // Validate inputs early and warn about suspicious values
-        if cmd.registration_token.is_empty() && cmd.jit_config.is_empty() {
+        if cmd.registration_token.is_empty() && cmd.jit_config.is_empty() && cmd.forgejo.is_none() {
             warn!(
                 "CreateRunner called with empty registration token and no JIT config - \
                  runner configuration will fail. Is the coordinator in dry-run mode?"
@@ -722,25 +706,41 @@ impl TartAgent {
                 })?;
             info!("[{}] VM ready at IP {}", vm_name, ip);
 
-            // 3. Configure GitHub runner
-            info!("[{}] Step 3/5: Configuring GitHub runner...", vm_name);
-            self.vm_manager
-                .configure_runner(
-                    &vm_id,
-                    &cmd.registration_token,
-                    &cmd.labels,
-                    &cmd.runner_scope_url,
-                    &cmd.jit_config,
-                )
-                .await
-                .map_err(|e| {
-                    error!(
-                        "[{}] Runner configuration failed: {}. \
-                         This typically indicates an invalid GitHub registration token.",
-                        vm_name, e
-                    );
-                    e
-                })?;
+            // 3. Configure the runner
+            let program = if let Some(forgejo) = cmd.forgejo.as_deref() {
+                info!(
+                    "[{}] Step 3/5: Preparing forgejo-runner for handle {}...",
+                    vm_name, forgejo.handle
+                );
+                self.vm_manager
+                    .configure_forgejo_runner(&vm_id, forgejo, &cmd.labels)
+                    .await
+                    .map_err(|e| {
+                        error!("[{}] forgejo-runner setup failed: {}", vm_name, e);
+                        e
+                    })?;
+                ssh::RunnerProgram::Forgejo
+            } else {
+                info!("[{}] Step 3/5: Configuring GitHub runner...", vm_name);
+                self.vm_manager
+                    .configure_runner(
+                        &vm_id,
+                        &cmd.registration_token,
+                        &cmd.labels,
+                        &cmd.runner_scope_url,
+                        &cmd.jit_config,
+                    )
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            "[{}] Runner configuration failed: {}. \
+                             This typically indicates an invalid GitHub registration token.",
+                            vm_name, e
+                        );
+                        e
+                    })?;
+                ssh::RunnerProgram::GitHub
+            };
 
             let _ = events
                 .runner_event(
@@ -757,7 +757,7 @@ impl TartAgent {
                 vm_name
             );
             self.vm_manager
-                .wait_for_runner_exit(&vm_id, &cmd.jit_config)
+                .wait_for_runner_exit(&vm_id, &cmd.jit_config, program)
                 .await
                 .map_err(|e| {
                     error!("[{}] Runner execution failed: {}", vm_name, e);
@@ -865,8 +865,8 @@ impl TartAgent {
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             limits: self.vm_manager.limits().await,
-            // GitHub only: forgejo-runner has no macOS release
-            runner_kinds: Vec::new(),
+            // forgejo-runner one-job, from kuiper-forge's forgejo-runner releases
+            runner_kinds: vec!["forgejo".to_string()],
         }
     }
 }
