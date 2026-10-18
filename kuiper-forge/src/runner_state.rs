@@ -8,6 +8,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
 use crate::config::RunnerScope;
@@ -51,12 +52,33 @@ pub struct RunnerInfo {
 pub struct RunnerStateStore {
     /// Database pool
     pool: DbPool,
+    /// When each runner's VM was first missing from its agent's status, for the grace period in
+    /// [`reconcile_agent_vms`](Self::reconcile_agent_vms)
+    missing_since: std::sync::Mutex<HashMap<String, std::time::Instant>>,
+    /// How long a VM must stay missing before its runner counts as gone
+    missing_grace: std::time::Duration,
 }
+
+/// How long a runner's VM must be missing from its agent's status before the runner
+/// counts as gone. An agent drops a finished VM from its status at about the time it
+/// reports the runner's outcome, and the status is reconciled as soon as it arrives
+/// while the outcome event waits in the fleet manager's queue. Without a grace period
+/// every finished runner could look lost first.
+pub const MISSING_VM_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
 
 impl RunnerStateStore {
     /// Create a new runner state store using the provided database pool.
     pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+        Self::with_missing_grace(pool, MISSING_VM_GRACE)
+    }
+
+    /// Like [`new`](Self::new), with a different grace period for missing VMs.
+    pub fn with_missing_grace(pool: DbPool, missing_grace: std::time::Duration) -> Self {
+        Self {
+            pool,
+            missing_since: std::sync::Mutex::new(HashMap::new()),
+            missing_grace,
+        }
     }
 
     /// Load initial state and log what we found.
@@ -136,6 +158,7 @@ impl RunnerStateStore {
 
     /// Remove a runner from the state.
     pub async fn remove_runner(&self, runner_name: &str) {
+        self.missing_since.lock().unwrap().remove(runner_name);
         let result = sqlx::query(sql::DELETE_RUNNER)
             .bind(runner_name)
             .execute(&self.pool)
@@ -327,17 +350,35 @@ impl RunnerStateStore {
     ) -> Vec<(String, RunnerInfo)> {
         let runners_for_agent = self.get_runners_for_agent(agent_id).await;
         let mut missing = Vec::new();
+        let now = std::time::Instant::now();
+        let mut missing_since = self.missing_since.lock().unwrap();
 
         for (runner_name, runner_info) in runners_for_agent {
             // Check if the runner's VM is still in the agent's VM list
-            if !vm_names.contains(&runner_info.vm_name) {
-                info!(
-                    "Runner '{}' VM '{}' no longer on agent '{}' - marking for cleanup",
-                    runner_name, runner_info.vm_name, agent_id
-                );
-                missing.push((runner_name, runner_info));
+            if vm_names.contains(&runner_info.vm_name) {
+                missing_since.remove(&runner_name);
+                continue;
             }
+            // Give the runner's outcome event time to arrive before calling it lost
+            let since = *missing_since.entry(runner_name.clone()).or_insert(now);
+            if now.duration_since(since) < self.missing_grace {
+                debug!(
+                    "Runner '{}' VM '{}' not in agent '{}' status for {:.1}s - waiting for its outcome",
+                    runner_name,
+                    runner_info.vm_name,
+                    agent_id,
+                    now.duration_since(since).as_secs_f64()
+                );
+                continue;
+            }
+            missing_since.remove(&runner_name);
+            info!(
+                "Runner '{}' VM '{}' no longer on agent '{}' - marking for cleanup",
+                runner_name, runner_info.vm_name, agent_id
+            );
+            missing.push((runner_name, runner_info));
         }
+        drop(missing_since);
 
         missing
     }
@@ -441,5 +482,48 @@ mod tests {
             1
         );
         assert_eq!(state.count_runners_for_agent("a").await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_missing_vm_grace() {
+        let temp = TempDir::new().unwrap();
+        let db = Database::new(&DatabaseConfig::default(), temp.path())
+            .await
+            .unwrap();
+        let grace = std::time::Duration::from_millis(100);
+        let state = RunnerStateStore::with_missing_grace(db.pool(), grace);
+        let scope = RunnerScope::Organization { name: "org".into() };
+        for name in ["r1", "r2"] {
+            state
+                .add_runner(
+                    name.into(),
+                    "a".into(),
+                    name.into(),
+                    scope.clone(),
+                    "github",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        let only_r2 = vec!["r2".to_string()];
+
+        // r1's VM just went missing: not gone yet
+        assert!(state.reconcile_agent_vms("a", &only_r2).await.is_empty());
+        // back in the status: the clock resets
+        let both = vec!["r1".to_string(), "r2".to_string()];
+        assert!(state.reconcile_agent_vms("a", &both).await.is_empty());
+        assert!(state.reconcile_agent_vms("a", &only_r2).await.is_empty());
+
+        // missing for longer than the grace period: gone
+        tokio::time::sleep(grace + std::time::Duration::from_millis(20)).await;
+        let missing = state.reconcile_agent_vms("a", &only_r2).await;
+        assert_eq!(
+            missing.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["r1"]
+        );
     }
 }
