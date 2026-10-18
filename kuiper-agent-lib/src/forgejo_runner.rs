@@ -4,17 +4,50 @@
 //! with `forgejo-runner one-job --handle`, so it runs exactly that job. Jobs run
 //! directly on the VM (`label:host`), like GitHub's runner does.
 //!
-//! Only Linux (amd64, arm64) has release binaries.
+//! Binaries come from kuiper-forge's own `forgejo-runner-v*` releases (built by
+//! `.github/workflows/forgejo-runner.yml` from the unmodified upstream tag), since
+//! upstream only publishes Linux builds. Every agent uses the same pinned version.
 
 use crate::github_runner::Arch;
 use crate::shell::{escape_posix, escape_posix_path};
-use tracing::{debug, info};
 
-/// Fallback forgejo-runner version if the release API can't be reached.
-pub const FALLBACK_VERSION: &str = "13.2.0";
+/// The forgejo-runner version agents install unless configured otherwise. Must have a
+/// `forgejo-runner-v{version}` release on kuiper-forge.
+pub const DEFAULT_VERSION: &str = "13.2.0";
 
 /// Oldest forgejo-runner with `one-job --handle`.
 pub const MIN_VERSION: &str = "13.1.0";
+
+/// Where agents download forgejo-runner from. `{version}`, `{os}` (`linux`, `darwin`,
+/// `windows`), `{arch}` (`amd64`, `arm64`) and `{ext}` (`.exe` on Windows) are filled
+/// in; a `.sha256` next to the binary must hold its checksum.
+pub const DEFAULT_URL_TEMPLATE: &str = "https://github.com/AstroHQ/kuiper-forge/releases/download/forgejo-runner-v{version}/forgejo-runner-{version}-{os}-{arch}{ext}";
+
+/// The operating system a forgejo-runner binary is built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Linux,
+    MacOS,
+    Windows,
+}
+
+impl Os {
+    /// The name in release file names (Go's GOOS).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Os::Linux => "linux",
+            Os::MacOS => "darwin",
+            Os::Windows => "windows",
+        }
+    }
+
+    fn ext(&self) -> &'static str {
+        match self {
+            Os::Windows => ".exe",
+            Os::Linux | Os::MacOS => "",
+        }
+    }
+}
 
 /// Where the runner is installed on the VM.
 pub const RUNNER_DIR: &str = "~/forgejo-runner";
@@ -37,64 +70,43 @@ fn arch_str(arch: Arch) -> &'static str {
     }
 }
 
-/// Fetch the latest forgejo-runner version from code.forgejo.org.
-///
-/// Returns `None` if the fetch fails (caller should fall back to `FALLBACK_VERSION`).
-pub async fn fetch_latest_version() -> Option<String> {
-    let url = "https://code.forgejo.org/api/v1/repos/forgejo/runner/releases/latest";
-    debug!("Fetching latest forgejo-runner version");
-
-    let output = tokio::process::Command::new("curl")
-        .args(["-sfL", "--max-time", "15", url])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        debug!(
-            "Failed to fetch latest forgejo-runner version (curl exit {:?})",
-            output.status.code()
-        );
-        return None;
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Release {
-        tag_name: String,
-    }
-    match serde_json::from_slice::<Release>(&output.stdout) {
-        Ok(release) => {
-            let version = release.tag_name.trim_start_matches('v').to_string();
-            info!("Latest forgejo-runner version: v{}", version);
-            Some(version)
-        }
-        Err(e) => {
-            debug!("Could not parse forgejo-runner release: {}", e);
-            None
-        }
+/// The version to install for a configured value: empty or `latest` means
+/// [`DEFAULT_VERSION`] (there's no "latest" lookup, so agents stay on a version
+/// kuiper has published), anything else is used as given.
+pub fn resolve_version(configured: &str) -> &str {
+    match configured.trim() {
+        "" | "latest" => DEFAULT_VERSION,
+        v => v.trim_start_matches('v'),
     }
 }
 
 /// The release binary's file name.
-pub fn file_name(version: &str, arch: Arch) -> String {
-    format!("forgejo-runner-{version}-linux-{}", arch_str(arch))
+pub fn file_name(version: &str, os: Os, arch: Arch) -> String {
+    format!(
+        "forgejo-runner-{version}-{}-{}{}",
+        os.as_str(),
+        arch_str(arch),
+        os.ext()
+    )
 }
 
-/// The release binary's download URL.
+/// The release binary's download URL, from a URL template (see [`DEFAULT_URL_TEMPLATE`]).
 ///
 /// ```
-/// use kuiper_agent_lib::forgejo_runner::download_url;
+/// use kuiper_agent_lib::forgejo_runner::{DEFAULT_URL_TEMPLATE, Os, download_url};
 /// use kuiper_agent_lib::github_runner::Arch;
 ///
 /// assert_eq!(
-///     download_url("13.2.0", Arch::X64),
-///     "https://code.forgejo.org/forgejo/runner/releases/download/v13.2.0/forgejo-runner-13.2.0-linux-amd64"
+///     download_url(DEFAULT_URL_TEMPLATE, "13.2.0", Os::Linux, Arch::X64),
+///     "https://github.com/AstroHQ/kuiper-forge/releases/download/forgejo-runner-v13.2.0/forgejo-runner-13.2.0-linux-amd64"
 /// );
 /// ```
-pub fn download_url(version: &str, arch: Arch) -> String {
-    format!(
-        "https://code.forgejo.org/forgejo/runner/releases/download/v{version}/{}",
-        file_name(version, arch)
-    )
+pub fn download_url(template: &str, version: &str, os: Os, arch: Arch) -> String {
+    template
+        .replace("{version}", version)
+        .replace("{os}", os.as_str())
+        .replace("{arch}", arch_str(arch))
+        .replace("{ext}", os.ext())
 }
 
 /// Command that prints `installed` if forgejo-runner is installed.
@@ -105,13 +117,14 @@ pub fn check_installed_command() -> String {
     )
 }
 
-/// Command that downloads, checksums and installs forgejo-runner.
-pub fn install_command(version: &str, arch: Arch) -> String {
+/// Command that downloads, checksums and installs forgejo-runner on a Linux or
+/// macOS VM, from `url` (see [`download_url`]) and its `.sha256`.
+pub fn install_command(url: &str, version: &str, os: Os, arch: Arch) -> String {
     format!(
         "bash -s -- {} {} {} << 'INSTALL_FORGEJO_RUNNER_EOF'\n{INSTALL_SCRIPT}\nINSTALL_FORGEJO_RUNNER_EOF",
         escape_posix_path(RUNNER_DIR),
-        escape_posix(&download_url(version, arch)),
-        escape_posix(&file_name(version, arch)),
+        escape_posix(url),
+        escape_posix(&file_name(version, os, arch)),
     )
 }
 
@@ -183,16 +196,46 @@ mod tests {
     }
 
     #[test]
-    fn download_url_arm64() {
+    fn download_urls_per_platform() {
+        let url = |os, arch| download_url(DEFAULT_URL_TEMPLATE, "13.2.0", os, arch);
+        let base =
+            "https://github.com/AstroHQ/kuiper-forge/releases/download/forgejo-runner-v13.2.0";
         assert_eq!(
-            download_url("13.2.0", Arch::Arm64),
-            "https://code.forgejo.org/forgejo/runner/releases/download/v13.2.0/forgejo-runner-13.2.0-linux-arm64"
+            url(Os::Linux, Arch::Arm64),
+            format!("{base}/forgejo-runner-13.2.0-linux-arm64")
+        );
+        assert_eq!(
+            url(Os::MacOS, Arch::Arm64),
+            format!("{base}/forgejo-runner-13.2.0-darwin-arm64")
+        );
+        assert_eq!(
+            url(Os::Windows, Arch::X64),
+            format!("{base}/forgejo-runner-13.2.0-windows-amd64.exe")
+        );
+        // a mirror can use any layout
+        assert_eq!(
+            download_url(
+                "https://mirror.example/fr/{os}/{arch}/v{version}{ext}",
+                "13.1.0",
+                Os::Windows,
+                Arch::Arm64
+            ),
+            "https://mirror.example/fr/windows/arm64/v13.1.0.exe"
         );
     }
 
     #[test]
+    fn latest_means_the_pinned_version() {
+        assert_eq!(resolve_version(""), DEFAULT_VERSION);
+        assert_eq!(resolve_version("latest"), DEFAULT_VERSION);
+        assert_eq!(resolve_version("v13.1.0"), "13.1.0");
+        assert_eq!(resolve_version("13.3.0"), "13.3.0");
+    }
+
+    #[test]
     fn install_command_checks_the_checksum() {
-        let cmd = install_command("13.2.0", Arch::X64);
+        let url = download_url(DEFAULT_URL_TEMPLATE, "13.2.0", Os::Linux, Arch::X64);
+        let cmd = install_command(&url, "13.2.0", Os::Linux, Arch::X64);
         assert!(cmd.starts_with("bash -s -- ~/'forgejo-runner' "));
         assert!(cmd.contains("'forgejo-runner-13.2.0-linux-amd64'"));
         assert!(cmd.contains("sha256sum -c"));

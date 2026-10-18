@@ -22,7 +22,8 @@ polling, whichever it supports.
 | 5 | End-to-end tests against Forgejo 16 and 17 in Docker | **Done** |
 | 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Next (needs Forgejo 17) |
 | – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later |
-| – | macOS (tart) / Windows Forgejo runners | Blocked on runner binaries (see open questions) |
+| – | forgejo-runner builds for every platform, published on kuiper-forge | **Done** (workflow; first release not cut yet) |
+| – | macOS (tart) / Windows Forgejo runners | Next |
 
 ### Done
 
@@ -89,9 +90,8 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
   older agents never get one. The proxmox agent lists it; the tart agent doesn't (no
   macOS forgejo-runner release) and rejects Forgejo commands.
 - Proxmox agent (`kuiper-agent-lib/src/forgejo_runner.rs`): on a Linux VM it installs
-  forgejo-runner into `~/forgejo-runner` if missing (`vm.forgejo_runner_version`,
-  default `latest`, falling back to 13.2.0; at least 13.1.0 for `--handle`), checks the
-  release's sha256, writes the token to a mode-600 file and a `run-job.sh`, then runs
+  forgejo-runner into `~/forgejo-runner` if missing (see [Runner binaries](#runner-binaries)),
+  checks its sha256, writes the token to a mode-600 file and a `run-job.sh`, then runs
   `forgejo-runner one-job --url … --uuid … --token-url file:… --handle … --wait` with
   each label as `label:host`, so steps run on the VM itself. Windows VMs fail with a
   clear error.
@@ -210,9 +210,40 @@ Verified against Forgejo source (v16.0.5, v17.0.0) and a live 17.0.0 instance.
   Creating webhooks needs a full (not repo-limited) `write:repository` token, or
   `write:organization` for org hooks. There is no GitHub App equivalent.
 
+## Runner binaries
+
+Upstream only releases forgejo-runner for Linux (amd64, arm64) and only supports Linux,
+though its CI compiles macOS and Windows builds and its job runner (act) handles both in
+host mode (`pwsh` default shell and case-insensitive environment on Windows, `runner.os`
+of `macOS`/`Windows`). The only community build found, for Windows, is still on v12,
+which lacks `one-job --handle`. So kuiper publishes its own builds for every platform
+and all agents use them, one pinned version everywhere.
+
+- `.github/workflows/forgejo-runner.yml`, on a `forgejo-runner-v<version>` tag (or run by
+  hand with a version): downloads the upstream source archive for that tag, builds it
+  unmodified with `CGO_ENABLED=0`, tags `netgo osusergo` and upstream's version stamp,
+  for linux amd64/arm64, darwin arm64/amd64 and windows amd64, writes a `.sha256` per
+  binary, and publishes a release marked not-latest (the install script and agent
+  updater already pick kuiper's releases by tag prefix). Assets are named like
+  upstream's: `forgejo-runner-<version>-<os>-<arch>[.exe]`.
+- forgejo-runner is GPLv3, so each release carries the upstream source archive it was
+  built from and `LICENSE-forgejo-runner`.
+- Agents (`kuiper-agent-lib/src/forgejo_runner.rs`) install `DEFAULT_VERSION` (13.2.0)
+  from `DEFAULT_URL_TEMPLATE`, the kuiper-forge release. Proxmox:
+  `vm.forgejo_runner_version` (`latest`, the default, means the pinned version; there's
+  no "latest" lookup) and `vm.forgejo_runner_url`, a template with `{version}`, `{os}`,
+  `{arch}`, `{ext}` for a mirror. The install script checks the `.sha256` with
+  `sha256sum`, or `shasum -a 256` on macOS, and refuses a mismatch.
+- To move agents to a new runner version: cut its `forgejo-runner-v*` release, then
+  bump `DEFAULT_VERSION` in an agent release.
+- The workflow's build and checksum steps were run locally for v13.2.0 (all five build;
+  the Linux binary reports `forgejo-runner version v13.2.0`, matching upstream), and the
+  install script was tested against those files over HTTP, including a bad checksum and
+  a `shasum`-only PATH. The workflow itself hasn't run on GitHub yet.
+
 ## Open questions
 
-- forgejo-runner release binaries for macOS and Windows: not published (Linux amd64 and
-  arm64 only, as of v13.2.0). Tart and Windows runners would need source builds.
+- macOS and Windows host mode is lightly tested upstream; it needs testing on a real tart
+  Mac and a Proxmox Windows VM.
 - Poll per org/repo scope, or use the admin scope when a site-admin token is configured?
   (Org and repo scopes for now.)

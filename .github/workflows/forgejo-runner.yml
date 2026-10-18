@@ -1,0 +1,114 @@
+# Publishes forgejo-runner builds for kuiper's agents. Upstream only releases Linux
+# binaries; this cross-compiles the unmodified upstream tag for every platform the
+# agents run Forgejo jobs on, so all of them download one pinned version from here.
+#
+# Release: push a tag like forgejo-runner-v13.2.0, or run the workflow by hand with
+# the version. forgejo-runner is GPLv3, so each release also carries the upstream
+# source archive it was built from and the license.
+name: forgejo-runner
+
+on:
+  push:
+    tags:
+      - "forgejo-runner-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "forgejo-runner version to build (e.g. 13.2.0, at least 13.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#forgejo-runner-v}"
+          fi
+          VERSION="${VERSION#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$VERSION'"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=forgejo-runner-v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch upstream source
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          SRC="forgejo-runner-${VERSION}-source.tar.gz"
+          curl -fsSL --retry 3 -o "$SRC" "https://code.forgejo.org/forgejo/runner/archive/v${VERSION}.tar.gz"
+          mkdir src
+          tar xzf "$SRC" -C src --strip-components=1
+          cp src/LICENSE LICENSE-forgejo-runner
+          head -1 src/go.mod
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache: false
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: src
+        run: |
+          set -euo pipefail
+          MODULE="$(awk '/^module /{print $2}' go.mod)"
+          mkdir -p ../dist
+          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64 windows/amd64; do
+            os="${target%/*}"; arch="${target#*/}"
+            ext=""; [ "$os" = windows ] && ext=".exe"
+            out="../dist/forgejo-runner-${VERSION}-${os}-${arch}${ext}"
+            echo "Building $out"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -tags 'netgo osusergo' \
+              -ldflags "-s -w -X ${MODULE}/internal/pkg/ver.version=v${VERSION}" -o "$out" .
+          done
+          ../dist/forgejo-runner-${VERSION}-linux-amd64 --version
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for f in forgejo-runner-*; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          cat ./*.sha256
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<NOTES
+          forgejo-runner v${VERSION} for kuiper agents, built from the unmodified upstream tag
+          [v${VERSION}](https://code.forgejo.org/forgejo/runner/src/tag/v${VERSION}) with Go
+          $(go env GOVERSION), \`CGO_ENABLED=0\`, tags \`netgo osusergo\`.
+
+          Upstream only publishes Linux binaries and supports Linux; the macOS and Windows
+          builds here run Forgejo jobs on kuiper's tart and proxmox Windows agents.
+
+          forgejo-runner is licensed under the GPLv3 (\`LICENSE-forgejo-runner\`); its source is
+          attached as \`forgejo-runner-${VERSION}-source.tar.gz\`.
+          NOTES
+          files=(dist/* "forgejo-runner-${VERSION}-source.tar.gz" LICENSE-forgejo-runner)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --latest=false \
+              --title "forgejo-runner v${VERSION}" --notes-file notes.md "${files[@]}"
+          fi

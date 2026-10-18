@@ -623,21 +623,8 @@ impl VmManager {
             .execute(&forgejo_runner::check_installed_command())
             .await?;
         if check.stdout.trim() != "installed" {
-            let configured = &self.vm_config.forgejo_runner_version;
-            let version = if configured.is_empty() || configured == "latest" {
-                match forgejo_runner::fetch_latest_version().await {
-                    Some(v) => v,
-                    None => {
-                        info!(
-                            "Could not fetch latest forgejo-runner version, using fallback v{}",
-                            forgejo_runner::FALLBACK_VERSION
-                        );
-                        forgejo_runner::FALLBACK_VERSION.to_string()
-                    }
-                }
-            } else {
-                configured.clone()
-            };
+            let version =
+                forgejo_runner::resolve_version(&self.vm_config.forgejo_runner_version).to_string();
             let uname = session.execute("uname -m").await?;
             let arch =
                 crate::ssh::github_runner::Arch::from_uname(&uname.stdout).ok_or_else(|| {
@@ -646,14 +633,26 @@ impl VmManager {
                         uname.stdout.trim()
                     ))
                 })?;
+            let url = forgejo_runner::download_url(
+                &self.vm_config.forgejo_runner_url,
+                &version,
+                forgejo_runner::Os::Linux,
+                arch,
+            );
             info!(
-                "forgejo-runner not installed on VM {}, installing v{} ({})...",
+                "forgejo-runner not installed on VM {}, installing v{} ({}) from {}...",
                 vmid,
                 version,
-                arch.as_str()
+                arch.as_str(),
+                url
             );
             let install = session
-                .execute(&forgejo_runner::install_command(&version, arch))
+                .execute(&forgejo_runner::install_command(
+                    &url,
+                    &version,
+                    forgejo_runner::Os::Linux,
+                    arch,
+                ))
                 .await?;
             if install.exit_code != 0 {
                 error!(
