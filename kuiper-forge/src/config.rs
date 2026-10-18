@@ -90,9 +90,35 @@ pub struct ProvisioningConfig {
     /// every field has a default, so `mode = "polling"` alone is enough.
     #[serde(default)]
     pub polling: Option<PollingConfig>,
+
+    /// Seconds a job-bound runner may wait for its job to start before its VM is
+    /// destroyed (default: 600, `0` disables). Applies to Forgejo one-job runners,
+    /// whose job can stay "waiting" behind a concurrency group; the job is retried
+    /// later with a growing delay. GitHub JIT runners aren't bound to one job, so
+    /// they're left alone.
+    #[serde(default = "default_idle_runner_timeout_secs")]
+    pub idle_runner_timeout_secs: u64,
 }
 
+fn default_idle_runner_timeout_secs() -> u64 {
+    600
+}
+
+/// Shortest idle runner timeout: below this a VM may not have booted yet.
+pub const MIN_IDLE_RUNNER_TIMEOUT_SECS: u64 = 120;
+
 impl ProvisioningConfig {
+    /// The idle runner timeout, or `None` when disabled. Values below
+    /// [`MIN_IDLE_RUNNER_TIMEOUT_SECS`] are raised to it.
+    pub fn idle_runner_timeout(&self) -> Option<std::time::Duration> {
+        match self.idle_runner_timeout_secs {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(
+                secs.max(MIN_IDLE_RUNNER_TIMEOUT_SECS),
+            )),
+        }
+    }
+
     /// Job filters for the active on-demand mode, or `None` in fixed-capacity mode
     /// (and in webhook mode without a `[provisioning.webhook]` section).
     pub fn on_demand_filters(&self) -> Option<OnDemandFilters> {
@@ -134,6 +160,7 @@ impl Default for ProvisioningConfig {
             mode: ProvisioningMode::FixedCapacity,
             webhook: None,
             polling: None,
+            idle_runner_timeout_secs: default_idle_runner_timeout_secs(),
         }
     }
 }
@@ -966,6 +993,10 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # token_env = "KUIPER_FORGEJO_TOKEN"   # or token_path / token
 # scopes = ["my-org", "someone/some-repo"]
 #
+# Forgejo runners whose job hasn't started after [provisioning]
+# idle_runner_timeout_secs (default 600, 0 disables) are destroyed, and the job
+# retried later; a job held back by a concurrency group stays "waiting" meanwhile.
+#
 # Label mappings (webhook/polling modes) can be limited to one forge with
 # `forge = "<name>"`, and [provisioning.webhook] takes `forge = "<name>"` to
 # say which GitHub forge its deliveries come from (default: the first).
@@ -1530,6 +1561,22 @@ scopes = ["lodge", "jfro/kuiper-forge"]
             panic!("expected a Forgejo forge");
         };
         assert!(forgejo.token_content().is_err());
+    }
+
+    #[test]
+    fn test_idle_runner_timeout() {
+        let mut provisioning = ProvisioningConfig::default();
+        assert_eq!(
+            provisioning.idle_runner_timeout(),
+            Some(std::time::Duration::from_secs(600))
+        );
+        provisioning.idle_runner_timeout_secs = 0;
+        assert_eq!(provisioning.idle_runner_timeout(), None);
+        provisioning.idle_runner_timeout_secs = 5;
+        assert_eq!(
+            provisioning.idle_runner_timeout(),
+            Some(std::time::Duration::from_secs(MIN_IDLE_RUNNER_TIMEOUT_SECS))
+        );
     }
 
     #[test]

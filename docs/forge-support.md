@@ -18,8 +18,8 @@ polling, whichever it supports.
 | – | Webhook-mode recovery scan applies `label_mappings` | **Done** (fix) |
 | 2 | Multi-forge groundwork: `Forge` trait, job keys, `[[forges]]` config, DB migration | **Done** |
 | 3 | Forgejo backend + `forgejo-runner one-job --handle` on proxmox Linux VMs | **Done** |
-| 4 | Idle runner timeout (job listed as waiting but never starts) | Next |
-| 5 | End-to-end tests against Forgejo 16 and 17 in Docker | Planned |
+| 4 | Idle runner timeout (job listed as waiting but never starts) | **Done** |
+| 5 | End-to-end tests against Forgejo 16 and 17 in Docker | Next |
 | 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Planned |
 | – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later |
 | – | macOS (tart) / Windows Forgejo runners | Blocked on runner binaries (see open questions) |
@@ -101,6 +101,36 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
   `recover_queued_jobs`, `verify_pending_jobs_with_github` → `verify_pending_jobs`, and
   forge-neutral log messages.
 
+**Idle runner timeout.** Forgejo keeps a job held back by a concurrency group
+(`concurrency:` with `cancel-in-progress: false`) as `waiting` in the jobs API; the
+concurrency check only happens when a runner asks for work
+(`models/actions/task.go`, `getConcurrencyCondition`). So a one-job runner made for it
+sits idle until the earlier run finishes, and one made for a job that's then cancelled
+waits forever.
+
+- `[provisioning] idle_runner_timeout_secs` (default 600, minimum 120, `0` disables).
+  On each 30s tick the fleet manager checks job-bound runners older than the timeout:
+  if the job is running the runner is marked started and not checked again; if it's
+  still waiting, or gone, the coordinator sends the agent `DestroyRunner` for the VM.
+- The job stays pending but gets no new runner until a backoff passes: the timeout the
+  first time, doubling after each idle teardown, at most an hour. Idle teardowns don't
+  count against the job's retries, and the agent's events for the destroyed VM aren't
+  recorded as failures.
+- Only Forgejo runners are checked. A GitHub JIT runner can take any queued job with
+  matching labels, so "its job is still queued" doesn't mean it's idle, and destroying
+  it could kill a job it picked up.
+- The bookkeeping (started runners, teardowns, backoffs) is in memory; after a restart
+  a held-back job may get one extra runner before the timeout catches it again.
+- Proxmox agent: `DestroyRunner.vm_id` may now be the VM name as well as the VMID, and
+  the `Destroyed` event names the runner, so the coordinator can match it. The
+  coordinator only sends `DestroyRunner` for Forgejo runners, which only agents from
+  this release run.
+- Tested end to end against the local Forgejo 17 with the throwaway agent (now running
+  jobs in parallel and killing a job on `DestroyRunner`): two runs in one concurrency
+  group with a 200s job. The second run's runner was destroyed after 134s with its job
+  still waiting, the job backed off 120s, then got a new runner after the first run
+  finished and succeeded.
+
 **Tested.** Unit tests cover the client against a fake Forgejo API, the config, agent
 selection by runner kind, and the generated VM commands. End to end against a local
 Forgejo 17.0.0 in Docker: the coordinator in polling mode with a Forgejo forge and a
@@ -159,8 +189,5 @@ Verified against Forgejo source (v16.0.5, v17.0.0) and a live 17.0.0 instance.
   arm64 only, as of v13.2.0). Tart and Windows runners would need source builds.
 - Poll per org/repo scope, or use the admin scope when a site-admin token is configured?
   (Org and repo scopes for now.)
-- Idle timeout default, and whether it applies to GitHub runners too (step 4). Until
-  then, a runner whose job never starts waits in `one-job --wait` until its VM is
-  destroyed.
 - `required_labels` per forge, so a GitHub + Forgejo setup can keep `self-hosted` for
   GitHub only.

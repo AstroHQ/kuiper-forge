@@ -6,7 +6,7 @@
 //! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
 //! - Recovering runners when agents reconnect after coordinator restart
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -14,20 +14,81 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use kuiper_agent_proto::{
-    AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand, ForgejoRunner,
-    RunnerEvent, RunnerEventType,
+    AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand,
+    DestroyRunnerCommand, ForgejoRunner, RunnerEvent, RunnerEventType,
 };
 
 use crate::agent_failures::{AgentFailureStore, FailureKind};
 use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
-use crate::forge::{Forge, ForgeRegistry, JobKey, RunnerLaunch};
+use crate::forge::{Forge, ForgeRegistry, JobKey, RunnerKind, RunnerLaunch};
 use crate::pending_jobs::{PendingJobInfo, PendingJobStore};
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{WebhookEvent, WebhookNotifier};
 
 /// How often webhook mode scans forges for queued jobs it missed.
 pub const RECOVERY_SCAN_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Longest wait before a job whose runner sat idle gets another one.
+const MAX_IDLE_BACKOFF: Duration = Duration::from_secs(3600);
+
+/// How long a destroy command for an idle runner may go unanswered before it's sent again.
+const IDLE_DESTROY_RETRY: Duration = Duration::from_secs(120);
+
+/// How long late events for a torn-down idle runner are ignored.
+const TORN_DOWN_MEMORY: Duration = Duration::from_secs(600);
+
+/// What to do with a job-bound runner past the idle timeout, from its job's status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleAction {
+    /// The job is running: the runner isn't idle, stop checking it.
+    Started,
+    /// The job is still waiting (or gone, e.g. cancelled): the runner can't do anything, destroy it.
+    TearDown,
+    /// Couldn't tell, or the job is finishing: leave it and check next time.
+    Wait,
+}
+
+fn idle_action(status: &anyhow::Result<Option<String>>) -> IdleAction {
+    match status {
+        Ok(Some(s)) if s == "in_progress" => IdleAction::Started,
+        Ok(Some(s)) if s == "queued" => IdleAction::TearDown,
+        Ok(None) => IdleAction::TearDown,
+        Ok(Some(_)) | Err(_) => IdleAction::Wait,
+    }
+}
+
+/// The delay before a job gets another runner after an idle teardown: the idle
+/// timeout the first time, doubling each time after, at most [`MAX_IDLE_BACKOFF`].
+fn next_idle_backoff(previous: Option<Duration>, timeout: Duration) -> Duration {
+    match previous {
+        None => timeout,
+        Some(delay) => delay * 2,
+    }
+    .min(MAX_IDLE_BACKOFF)
+}
+
+/// In-memory bookkeeping for idle job-bound runners. Lost on restart, which at worst
+/// means one more runner for a job that's being held back.
+#[derive(Default)]
+struct IdleRunners {
+    /// Runners whose job was seen running: not idle, not checked again
+    started: HashSet<String>,
+    /// Runners being destroyed for idling, and when the destroy was sent. Their
+    /// events aren't failures
+    tearing_down: HashMap<String, std::time::Instant>,
+    /// Runners recently torn down for idling, so their late events (the agent sends
+    /// one for the killed job and one for the destroy) aren't recorded as failures
+    torn_down: HashMap<String, std::time::Instant>,
+    /// Jobs whose runner idled: not given a new runner before `until`
+    backoff: HashMap<JobKey, IdleBackoff>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IdleBackoff {
+    until: std::time::Instant,
+    delay: Duration,
+}
 
 /// Information about an agent's VMs for recovery.
 #[derive(Debug, Clone)]
@@ -185,6 +246,8 @@ pub struct FleetManager {
     /// Agents already warned about label sets that fixed-capacity provisioning
     /// can't pre-create. Warn once per agent to avoid log spam on each reconcile.
     warned_capability_agents: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Idle job-bound runners being watched or torn down, and jobs backing off
+    idle: std::sync::Mutex<IdleRunners>,
 }
 
 impl FleetManager {
@@ -246,6 +309,7 @@ impl FleetManager {
             webhook_rx,
             notify_tx: notify_tx.clone(),
             warned_capability_agents: std::sync::Mutex::new(std::collections::HashSet::new()),
+            idle: std::sync::Mutex::new(IdleRunners::default()),
         };
 
         let notifier = FleetNotifier {
@@ -430,6 +494,9 @@ impl FleetManager {
                     // Periodic check for pending jobs (in case notifications were lost)
                     self.process_pending_jobs().await;
 
+                    // Destroy job-bound runners whose job never started
+                    self.check_idle_runners().await;
+
                     // Piggyback the forge scan on the ticker to avoid select!
                     // starvation (guaranteed to run within one tick of being due)
                     if last_forge_scan.elapsed() >= forge_scan_interval {
@@ -462,6 +529,180 @@ impl FleetManager {
                 }
             }
         }
+    }
+
+    /// Destroy job-bound runners whose job hasn't started within the idle timeout.
+    ///
+    /// Only runners bound to one job (Forgejo one-job runners) are checked: such a
+    /// runner can only ever run its own job, so if that job is still waiting (held
+    /// back by a concurrency group, say) or gone (cancelled), the runner and its VM
+    /// are idle. The job stays pending and gets a new runner after a growing delay.
+    /// GitHub JIT runners can take any queued job with matching labels, so "its job
+    /// is still queued" doesn't mean they're idle; they're left alone.
+    async fn check_idle_runners(&self) {
+        let Some(timeout) = self.config.provisioning.idle_runner_timeout() else {
+            return;
+        };
+        let runners = match self.runner_state.get_all_runners().await {
+            Ok(runners) => runners,
+            Err(e) => {
+                warn!("Idle runner check: failed to list runners: {}", e);
+                return;
+            }
+        };
+        let now = chrono::Utc::now();
+
+        // forget runners that no longer exist
+        {
+            let names: HashSet<&str> = runners.iter().map(|(n, _)| n.as_str()).collect();
+            let mut idle = self.idle.lock().unwrap();
+            idle.started.retain(|n| names.contains(n.as_str()));
+            idle.tearing_down.retain(|n, _| names.contains(n.as_str()));
+            idle.torn_down
+                .retain(|_, at| at.elapsed() < TORN_DOWN_MEMORY);
+        }
+
+        for (runner_name, info) in runners {
+            let Some(job_id) = info.job_id.clone() else {
+                continue;
+            };
+            let Ok(forge) = self.forges.for_job(&job_id) else {
+                continue;
+            };
+            if forge.runner_kind() != RunnerKind::Forgejo {
+                continue;
+            }
+            let age = (now - info.created_at).to_std().unwrap_or_default();
+            if age < timeout {
+                continue;
+            }
+            {
+                let idle = self.idle.lock().unwrap();
+                if idle.started.contains(&runner_name)
+                    || idle
+                        .tearing_down
+                        .get(&runner_name)
+                        .is_some_and(|sent| sent.elapsed() < IDLE_DESTROY_RETRY)
+                {
+                    continue;
+                }
+            }
+            let Some(repo) = info.repository.as_deref() else {
+                continue;
+            };
+
+            let status = forge.get_job_status(repo, job_id.id()).await;
+            match idle_action(&status) {
+                IdleAction::Started => {
+                    debug!(runner_name = %runner_name, job_id = %job_id, "Runner's job is running");
+                    self.idle.lock().unwrap().started.insert(runner_name);
+                }
+                IdleAction::Wait => {
+                    if let Err(e) = status {
+                        debug!(
+                            runner_name = %runner_name,
+                            job_id = %job_id,
+                            "Idle runner check: couldn't get job status: {e:#}"
+                        );
+                    }
+                }
+                IdleAction::TearDown => {
+                    let job_state = match &status {
+                        Ok(Some(_)) => "still waiting",
+                        _ => "gone (finished or cancelled)",
+                    };
+                    let delay = {
+                        let mut idle = self.idle.lock().unwrap();
+                        idle.tearing_down
+                            .insert(runner_name.clone(), std::time::Instant::now());
+                        let delay =
+                            next_idle_backoff(idle.backoff.get(&job_id).map(|b| b.delay), timeout);
+                        idle.backoff.insert(
+                            job_id.clone(),
+                            IdleBackoff {
+                                until: std::time::Instant::now() + delay,
+                                delay,
+                            },
+                        );
+                        delay
+                    };
+                    warn!(
+                        agent_id = %info.agent_id,
+                        runner_name = %runner_name,
+                        job_id = %job_id,
+                        idle_secs = age.as_secs(),
+                        retry_in_secs = delay.as_secs(),
+                        "Runner's job is {job_state} after the idle timeout - destroying its VM"
+                    );
+                    self.send_destroy(&info.agent_id, &runner_name).await;
+                }
+            }
+        }
+
+        // drop backoff for jobs that left the queue
+        if let Ok(pending) = self.pending_job_store.get_all_pending_jobs().await {
+            let keys: HashSet<&JobKey> = pending.iter().map(|(k, _)| k).collect();
+            self.idle
+                .lock()
+                .unwrap()
+                .backoff
+                .retain(|k, _| keys.contains(k));
+        }
+    }
+
+    /// Ask an agent to destroy a runner's VM. If it doesn't happen, the idle check
+    /// sends it again after [`IDLE_DESTROY_RETRY`].
+    async fn send_destroy(&self, agent_id: &str, runner_name: &str) {
+        let command_id = Uuid::new_v4().to_string();
+        let msg = CoordinatorMessage {
+            payload: Some(CoordinatorPayload::DestroyRunner(DestroyRunnerCommand {
+                command_id: command_id.clone(),
+                vm_id: runner_name.to_string(),
+            })),
+        };
+        match self
+            .agent_registry
+            .send_command(agent_id, msg, &command_id, Duration::from_secs(30))
+            .await
+        {
+            Ok(response) => match response.payload {
+                Some(AgentPayload::Ack(ack)) if ack.accepted => {
+                    info!(agent_id = %agent_id, runner_name = %runner_name, "DestroyRunner accepted");
+                }
+                Some(AgentPayload::Ack(ack)) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        runner_name = %runner_name,
+                        "DestroyRunner rejected: {}",
+                        ack.error
+                    );
+                }
+                other => {
+                    warn!(
+                        agent_id = %agent_id,
+                        runner_name = %runner_name,
+                        "Unexpected response to DestroyRunner: {other:?}"
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    agent_id = %agent_id,
+                    runner_name = %runner_name,
+                    "DestroyRunner failed: {e:#}"
+                );
+            }
+        }
+    }
+
+    /// Whether a pending job is still waiting out its delay after an idle runner.
+    fn job_backing_off(&self, job_id: &JobKey) -> bool {
+        self.idle
+            .lock()
+            .unwrap()
+            .backoff
+            .get(job_id)
+            .is_some_and(|b| b.until > std::time::Instant::now())
     }
 
     /// Handle a webhook event (new job notification or job completion).
@@ -791,6 +1032,15 @@ impl FleetManager {
                     job_id, MAX_RETRIES
                 );
                 self.pending_job_store.remove_job(&job_id).await;
+                continue;
+            }
+
+            // Skip jobs whose last runner idled until their delay is up
+            if self.job_backing_off(&job_id) {
+                debug!(
+                    "Pending job {} is backing off after an idle runner - skipping",
+                    job_id
+                );
                 continue;
             }
 
@@ -1370,6 +1620,53 @@ impl FleetManager {
             }
             RunnerEventType::Completed | RunnerEventType::Failed | RunnerEventType::Destroyed => {
                 let runner_info = self.runner_state.get_runner(&runner_name).await;
+
+                // We destroyed this one for idling: not a failure, and its job keeps its backoff
+                let (idled, late) = {
+                    let mut idle = self.idle.lock().unwrap();
+                    idle.started.remove(&runner_name);
+                    let idled = idle.tearing_down.remove(&runner_name).is_some();
+                    if idled {
+                        idle.torn_down
+                            .insert(runner_name.clone(), std::time::Instant::now());
+                    }
+                    (idled, !idled && idle.torn_down.contains_key(&runner_name))
+                };
+                if late {
+                    debug!(
+                        agent_id = %event.agent_id,
+                        runner_name = %runner_name,
+                        "Late event for a torn-down idle runner - ignoring"
+                    );
+                    return;
+                }
+                if idled {
+                    if let Some(runner_info) = runner_info {
+                        self.agent_registry
+                            .release_slot(&event.agent_id, &runner_name)
+                            .await;
+                        self.runner_state.remove_runner(&runner_name).await;
+                        info!(
+                            agent_id = %event.agent_id,
+                            runner_name = %runner_name,
+                            job_id = ?runner_info.job_id,
+                            "Idle runner torn down"
+                        );
+                        let forge = self.runner_forge(runner_info.forge.as_deref());
+                        let scope = runner_info.runner_scope.clone();
+                        let name = runner_name.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = forge.remove_runner(&scope, &name).await {
+                                warn!(
+                                    "Could not remove idle runner '{}' from its forge: {}",
+                                    name, e
+                                );
+                            }
+                        });
+                    }
+                    self.process_pending_jobs().await;
+                    return;
+                }
 
                 // record before the early return below, a failed destroy arrives after the runner is untracked
                 if event_type == RunnerEventType::Failed {
@@ -2132,10 +2429,48 @@ fn dropped_pending_jobs(
 
 #[cfg(test)]
 mod tests {
+    use super::{IdleAction, MAX_IDLE_BACKOFF, idle_action, next_idle_backoff};
     use super::{QueueScan, dropped_pending_jobs, runner_name_for_host};
     use crate::config::RunnerScope;
     use crate::forge::JobKey;
     use crate::pending_jobs::PendingJobInfo;
+    use std::time::Duration;
+
+    #[test]
+    fn idle_action_from_job_status() {
+        assert_eq!(
+            idle_action(&Ok(Some("in_progress".into()))),
+            IdleAction::Started
+        );
+        assert_eq!(
+            idle_action(&Ok(Some("queued".into()))),
+            IdleAction::TearDown
+        );
+        assert_eq!(idle_action(&Ok(None)), IdleAction::TearDown);
+        assert_eq!(idle_action(&Ok(Some("completed".into()))), IdleAction::Wait);
+        assert_eq!(idle_action(&Err(anyhow::anyhow!("boom"))), IdleAction::Wait);
+    }
+
+    #[test]
+    fn idle_backoff_doubles_up_to_the_cap() {
+        let timeout = Duration::from_secs(600);
+        let first = next_idle_backoff(None, timeout);
+        assert_eq!(first, timeout);
+        let second = next_idle_backoff(Some(first), timeout);
+        assert_eq!(second, Duration::from_secs(1200));
+        assert_eq!(
+            next_idle_backoff(Some(second), timeout),
+            Duration::from_secs(2400)
+        );
+        assert_eq!(
+            next_idle_backoff(Some(Duration::from_secs(2400)), timeout),
+            MAX_IDLE_BACKOFF
+        );
+        assert_eq!(
+            next_idle_backoff(None, Duration::from_secs(7200)),
+            MAX_IDLE_BACKOFF
+        );
+    }
 
     fn pending_job() -> PendingJobInfo {
         PendingJobInfo {

@@ -799,12 +799,27 @@ impl VmManager {
     }
 
     /// Force destroy a VM by ID string.
+    ///
+    /// `vm_id` is the Proxmox VMID or the VM's name (what the coordinator calls the runner).
     pub async fn force_destroy(&self, vm_id: &str) -> Result<()> {
-        let vmid: u32 = vm_id
-            .parse()
-            .map_err(|_| Error::vm(format!("Invalid VM ID: {vm_id}")))?;
+        let vmid = match vm_id.parse::<u32>() {
+            Ok(vmid) => vmid,
+            Err(_) => self.vmid_by_name(vm_id).await.ok_or_else(|| {
+                Error::vm(format!("No VM with ID or name '{vm_id}' on this agent"))
+            })?,
+        };
 
         self.destroy_vm(vmid).await
+    }
+
+    /// The VMID of one of this agent's VMs by name.
+    pub async fn vmid_by_name(&self, name: &str) -> Option<u32> {
+        self.active_vms
+            .read()
+            .await
+            .iter()
+            .find(|(_, vm)| vm.name == name)
+            .map(|(vmid, _)| *vmid)
     }
 
     /// Cleanup stale VMs that have exceeded the maximum age.
