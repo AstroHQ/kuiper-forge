@@ -158,9 +158,13 @@ impl ForgejoClient {
         anyhow!("Forgejo API error {what} ({status}){hint}: {}", body.trim())
     }
 
-    /// Check the token can list jobs in every configured scope.
+    /// Check the token can list jobs and manage runners in every configured scope.
     ///
-    /// Only the scopes are checked, so the token needs no `read:user` scope.
+    /// Forgejo picks the scope level by HTTP method (GET needs `read:`, POST and
+    /// DELETE need `write:`), so listing alone passes with a read-only token. The
+    /// write check deletes runner id 0, which can't exist: a token that may manage
+    /// runners gets 404, one that may not gets 403. Only the scopes are checked, so
+    /// the token needs no `read:user` scope.
     pub async fn validate(&self) -> Result<()> {
         for scope in &self.scopes {
             let jobs = self
@@ -168,6 +172,23 @@ impl ForgejoClient {
                 .await
                 .with_context(|| format!("Token can't list jobs in {scope:?}"))?;
             debug!("Forgejo scope {:?} lists {} job(s)", scope, jobs.len());
+
+            let path = format!("{}/actions/runners/0", Self::scope_path(scope));
+            let response = self
+                .send(
+                    "checking runner access",
+                    &path,
+                    self.request(Method::DELETE, &path),
+                )
+                .await?;
+            match response.status() {
+                StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST => {}
+                status if status.is_success() => {}
+                _ => {
+                    return Err(Self::error_for("checking runner access", &path, response).await)
+                        .with_context(|| format!("Token can't manage runners in {scope:?}"));
+                }
+            }
         }
         info!(
             "Forgejo {} access validated for {} scope(s)",
@@ -507,8 +528,19 @@ mod tests {
             )
         }
         async fn remove(State(fake): State<Arc<Fake>>, Path(id): Path<i64>) -> StatusCode {
+            if id == 0 {
+                return StatusCode::NOT_FOUND;
+            }
             fake.deleted.lock().unwrap().push(id);
             StatusCode::NO_CONTENT
+        }
+        async fn read_only_remove() -> (StatusCode, Json<Value>) {
+            (
+                StatusCode::FORBIDDEN,
+                Json(
+                    json!({"message": "token does not have at least one of required scope(s): [write:organization]"}),
+                ),
+            )
         }
         async fn null_jobs() -> Json<Value> {
             Json(Value::Null)
@@ -527,6 +559,11 @@ mod tests {
                 get(runners).post(register),
             )
             .route("/api/v1/orgs/lodge/actions/runners/{id}", delete(remove))
+            .route("/api/v1/orgs/ro/actions/runners/jobs", get(null_jobs))
+            .route(
+                "/api/v1/orgs/ro/actions/runners/{id}",
+                delete(read_only_remove),
+            )
             .with_state(fake);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -564,6 +601,17 @@ mod tests {
         // the repo name is cached
         forge.list_queued_jobs().await.unwrap();
         assert_eq!(*fake.repo_lookups.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn validate_needs_runner_write_access() {
+        let fake = Arc::new(Fake::default());
+        let url = serve(fake.clone()).await;
+        client(&url, &["lodge"]).validate().await.unwrap();
+        assert!(fake.deleted.lock().unwrap().is_empty());
+        // a read-only token lists jobs fine but can't manage runners
+        let err = client(&url, &["ro"]).validate().await.unwrap_err();
+        assert!(format!("{err:#}").contains("must own the scope"), "{err:#}");
     }
 
     #[tokio::test]

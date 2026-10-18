@@ -19,8 +19,8 @@ polling, whichever it supports.
 | 2 | Multi-forge groundwork: `Forge` trait, job keys, `[[forges]]` config, DB migration | **Done** |
 | 3 | Forgejo backend + `forgejo-runner one-job --handle` on proxmox Linux VMs | **Done** |
 | 4 | Idle runner timeout (job listed as waiting but never starts) | **Done** |
-| 5 | End-to-end tests against Forgejo 16 and 17 in Docker | Next |
-| 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Planned |
+| 5 | End-to-end tests against Forgejo 16 and 17 in Docker | **Done** |
+| 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Next (needs Forgejo 17) |
 | – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later |
 | – | macOS (tart) / Windows Forgejo runners | Blocked on runner binaries (see open questions) |
 
@@ -59,8 +59,11 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
 - Config: `[[forges]]` entries with `type = "forgejo"`, `url`, a token (`token_env`,
   `token_path` or `token`, in that order) and `scopes`: the orgs (`org`) and repos
   (`owner/repo`) to poll and register runners in. Forgejo tokens can't list what they
-  can reach, so scopes must be named. Startup lists jobs in every scope to check the
-  token (no `read:user` scope needed).
+  can reach, so scopes must be named. Startup checks the token in every scope: it lists
+  jobs, then deletes runner id 0 (which can't exist). Forgejo picks the scope level by
+  HTTP method, so a read-only token can list jobs; the delete needs `write:` and
+  ownership, answering 404 when the token may manage runners and 403 when it may not.
+  No `read:user` scope is needed.
 - Polling mode only: Forgejo can't be the first forge in fixed-capacity mode (pools
   register long-lived runners there), and `[provisioning.webhook].forge` must be a
   GitHub forge. In webhook mode a Forgejo forge is only picked up by the 5-minute
@@ -135,6 +138,26 @@ waits forever.
   still waiting, the job backed off 120s, then got a new runner after the first run
   finished and succeeded.
 
+**End-to-end tests (step 5).** Run against Forgejo 16.0.5 and 17.0.0 in Docker with
+the coordinator in polling mode, two Forgejo forges on one instance (an org scope with an
+org-owner token, a repo scope with a repo-limited token), `required_labels =
+["self-hosted"]`, a 120s idle timeout, and the throwaway agent running jobs in a local
+shell. Results: 17 passed 13/13, 16 passed 12/12 (16 has no rerun API).
+
+- A read-only token stops startup with the ownership hint. This failed at first: the
+  check only listed jobs, which `read:` scopes allow, so the token would only have
+  failed when registering runners. Fixed with the write check above.
+- A `needs:` chain at org scope: both jobs succeed, one runner each.
+- At repo scope: a failing job is reported as failed, with one runner and no retries;
+  a job without `self-hosted` isn't taken.
+- Three runs in one concurrency group: the first succeeds; the second is torn down
+  while waiting, backs off, gets a new runner and succeeds; the third is cancelled
+  while held and its runner torn down as gone.
+- On 17, a job rerun gets a new attempt handle and its own runner.
+- Across all of it: one runner per job attempt (two for the retried run), no lost
+  runners, abandoned jobs or errors in the coordinator log, and no runners left
+  registered on Forgejo.
+
 **Tested.** Unit tests cover the client against a fake Forgejo API, the config, agent
 selection by runner kind, and the generated VM commands. End to end against a local
 Forgejo 17.0.0 in Docker: the coordinator in polling mode with a Forgejo forge and a
@@ -142,8 +165,8 @@ throwaway agent speaking the real agent protocol that ran the agent library's
 install/prepare/run commands in a local shell instead of a VM. A one-job workflow and a
 two-job (`needs:`) workflow each got exactly one runner per job, every job succeeded,
 and the pending and runner records were cleared afterwards. The proxmox agent's own
-wiring (`run_forgejo_job`) is only compile- and unit-tested; it hasn't run on a real
-Proxmox VM yet. Forgejo 16 wasn't tested (step 5).
+wiring (`run_forgejo_job`, destroy by name) is only compile- and unit-tested; it hasn't
+run on a real Proxmox VM yet.
 
 ### Migration notes
 
