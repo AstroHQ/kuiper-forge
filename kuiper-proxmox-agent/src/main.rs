@@ -680,6 +680,7 @@ impl ProxmoxAgent {
             runner_scope_url: &cmd.runner_scope_url,
             runner_name: &cmd.vm_name,
             jit_config: &cmd.jit_config,
+            forgejo: cmd.forgejo.as_deref(),
         };
         let result = if self.debug_keep_vms {
             self.vm_manager
@@ -809,6 +810,8 @@ impl ProxmoxAgent {
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             limits: Vec::new(),
+            // forgejo-runner one-job on Linux VMs
+            runner_kinds: vec!["forgejo".to_string()],
         }
     }
 }

@@ -25,6 +25,7 @@ use kuiper_forge::config::{self, Config, ForgeKindConfig, ProvisioningMode, Webh
 use kuiper_forge::db::Database;
 use kuiper_forge::fleet;
 use kuiper_forge::forge::{self, Forge, ForgeRegistry};
+use kuiper_forge::forgejo;
 use kuiper_forge::github;
 use kuiper_forge::management::{self, ManagementClient};
 use kuiper_forge::pending_jobs;
@@ -387,6 +388,24 @@ async fn serve(
                     ))?;
                     Arc::new(github_client)
                 }
+                ForgeKindConfig::Forgejo(forgejo_config) => {
+                    let client =
+                        forgejo::ForgejoClient::new(forgejo_config).with_context(|| {
+                            format!("Invalid Forgejo forge '{}'", forge_config.name)
+                        })?;
+                    client.validate().await.with_context(|| format!(
+                        "Forgejo API validation failed for forge '{}'. Fix the configuration or use --dry-run to skip forge integration.",
+                        forge_config.name
+                    ))?;
+                    if config.provisioning.mode != ProvisioningMode::Polling {
+                        warn!(
+                            "Forge '{}' is Forgejo but provisioning mode isn't \"polling\": its jobs are only found by the {}-minute recovery scan",
+                            forge_config.name,
+                            fleet::RECOVERY_SCAN_INTERVAL.as_secs() / 60
+                        );
+                    }
+                    Arc::new(client)
+                }
             };
             info!("Forge '{}' ready", forge_config.name);
             forges.push((forge_config.name, client));
@@ -435,7 +454,7 @@ async fn serve(
     };
     if config.provisioning.mode == ProvisioningMode::Polling {
         info!(
-            "Polling mode enabled - scanning GitHub for queued jobs every {}s",
+            "Polling mode enabled - scanning forges for queued jobs every {}s",
             config.provisioning.polling_config().interval().as_secs()
         );
     }
@@ -579,7 +598,7 @@ async fn serve(
                         tokio::spawn(async move {
                             if let Err(e) = tp.remove_runner(&scope, &runner_name).await {
                                 warn!(
-                                    "Failed to remove orphaned runner '{}' from GitHub: {}",
+                                    "Failed to remove orphaned runner '{}' from its forge: {}",
                                     runner_name, e
                                 );
                             }
@@ -1121,6 +1140,15 @@ fn webhook_forge(
     forges
         .get(&name)
         .with_context(|| "provisioning.webhook.forge must name a configured forge")?;
+    let is_github = config.resolved_forges().is_ok_and(|list| {
+        list.iter()
+            .any(|f| f.name == name && matches!(f.kind, ForgeKindConfig::Github(_)))
+    });
+    if !is_github {
+        anyhow::bail!(
+            "provisioning.webhook.forge '{name}' must be a GitHub forge; Forgejo forges use polling"
+        );
+    }
     Ok(name)
 }
 

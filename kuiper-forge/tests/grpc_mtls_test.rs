@@ -312,6 +312,7 @@ async fn test_agent_service_requires_mtls_grpc_only_mode() {
             label_sets: vec![],
             agent_version: String::new(),
             limits: vec![],
+            runner_kinds: vec![],
         })),
     })
     .await
@@ -395,6 +396,7 @@ async fn test_agent_service_requires_mtls_webhook_mode() {
             label_sets: vec![],
             agent_version: String::new(),
             limits: vec![],
+            runner_kinds: vec![],
         })),
     })
     .await
@@ -764,6 +766,7 @@ async fn connect_with_version(
             label_sets: vec![],
             agent_version: version.to_string(),
             limits: vec![],
+            runner_kinds: vec![],
         })),
     })
     .await

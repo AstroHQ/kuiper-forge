@@ -389,6 +389,89 @@ pub struct ForgeConfig {
 pub enum ForgeKindConfig {
     /// GitHub, authenticated as a GitHub App.
     Github(GitHubConfig),
+    /// Forgejo (15 or newer), authenticated with an access token. Polling mode only.
+    Forgejo(ForgejoConfig),
+}
+
+/// A Forgejo instance, polled for queued jobs.
+///
+/// ```toml
+/// [[forges]]
+/// name = "knope"
+/// type = "forgejo"
+/// url = "https://git.knope.dev"
+/// token_env = "KUIPER_KNOPE_TOKEN"
+/// scopes = ["lodge", "jfro/kuiper-forge"]
+/// ```
+///
+/// The token's user must own every scope: an org owner with `write:organization`
+/// for org scopes, the repo owner with `write:repository` for repo scopes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForgejoConfig {
+    /// Base URL of the Forgejo instance, like `https://git.example.com`
+    pub url: String,
+
+    /// Access token, inline. Prefer `token_env` or `token_path`.
+    #[serde(default)]
+    pub token: Option<String>,
+
+    /// Path to a file holding the access token.
+    #[serde(default)]
+    pub token_path: Option<PathBuf>,
+
+    /// Name of an environment variable holding the access token.
+    #[serde(default)]
+    pub token_env: Option<String>,
+
+    /// Orgs (`org`) and repositories (`owner/repo`) to poll for queued jobs and
+    /// register runners in. Forgejo tokens can't list what they can reach, so
+    /// these must be named.
+    pub scopes: Vec<String>,
+}
+
+impl ForgejoConfig {
+    /// Resolve the access token from `token_env`, `token_path` or `token`, in that order.
+    pub fn token_content(&self) -> Result<String> {
+        let token = if let Some(ref var) = self.token_env {
+            std::env::var(var).with_context(|| format!("Forgejo token_env '{var}' is not set"))?
+        } else if let Some(ref path) = self.token_path {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read Forgejo token: {}", path.display()))?
+        } else if let Some(ref token) = self.token {
+            token.clone()
+        } else {
+            anyhow::bail!("One of token_env, token_path or token must be set for a Forgejo forge")
+        };
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            anyhow::bail!("Forgejo token is empty");
+        }
+        Ok(token)
+    }
+
+    /// The configured scopes as runner scopes.
+    pub fn runner_scopes(&self) -> Result<Vec<RunnerScope>> {
+        if self.scopes.is_empty() {
+            anyhow::bail!("A Forgejo forge needs at least one entry in scopes");
+        }
+        self.scopes
+            .iter()
+            .map(|scope| match scope.split('/').collect::<Vec<_>>()[..] {
+                [org] if !org.is_empty() => Ok(RunnerScope::Organization {
+                    name: org.to_string(),
+                }),
+                [owner, repo] if !owner.is_empty() && !repo.is_empty() => {
+                    Ok(RunnerScope::Repository {
+                        owner: owner.to_string(),
+                        repo: repo.to_string(),
+                    })
+                }
+                _ => Err(anyhow::anyhow!(
+                    "Invalid Forgejo scope '{scope}': use 'org' or 'owner/repo'"
+                )),
+            })
+            .collect()
+    }
 }
 
 /// GitHub App authentication configuration.
@@ -445,6 +528,32 @@ impl Config {
             if forges[..i].iter().any(|f| f.name == forge.name) {
                 anyhow::bail!("Forge name '{}' is configured more than once", forge.name);
             }
+            if let ForgeKindConfig::Forgejo(forgejo) = &forge.kind {
+                let url = reqwest::Url::parse(&forgejo.url).with_context(|| {
+                    format!("Invalid url '{}' for forge '{}'", forgejo.url, forge.name)
+                })?;
+                if !matches!(url.scheme(), "http" | "https") {
+                    anyhow::bail!(
+                        "Invalid url '{}' for forge '{}': must be http or https",
+                        forgejo.url,
+                        forge.name
+                    );
+                }
+                forgejo
+                    .runner_scopes()
+                    .with_context(|| format!("Invalid scopes for forge '{}'", forge.name))?;
+            }
+        }
+        // Fixed-capacity pools register long-lived runners with the default forge,
+        // which Forgejo's one-job runners can't be
+        if self.provisioning.mode == ProvisioningMode::FixedCapacity
+            && matches!(forges[0].kind, ForgeKindConfig::Forgejo(_))
+        {
+            anyhow::bail!(
+                "Forge '{}' is Forgejo, which needs provisioning mode \"polling\"; \
+                 fixed-capacity pools register with the first forge",
+                forges[0].name
+            );
         }
         Ok(forges)
     }
@@ -843,6 +952,19 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # type = "github"
 # app_id = 123456
 # private_key_path = "{data_dir_str}/github-app.pem"
+#
+# A Forgejo (15+) forge is polled for queued jobs, so it needs
+# [provisioning] mode = "polling". Its runners are one-job runners on Linux
+# proxmox VMs. The token's user must own every scope: an org owner with
+# write:organization, or the repo owner with write:repository. Forgejo jobs
+# don't carry GitHub's "self-hosted" label, so set required_labels to match.
+#
+# [[forges]]
+# name = "forgejo"
+# type = "forgejo"
+# url = "https://git.example.com"
+# token_env = "KUIPER_FORGEJO_TOKEN"   # or token_path / token
+# scopes = ["my-org", "someone/some-repo"]
 #
 # Label mappings (webhook/polling modes) can be limited to one forge with
 # `forge = "<name>"`, and [provisioning.webhook] takes `forge = "<name>"` to
@@ -1288,7 +1410,9 @@ name = "test-org"
         let forges = config.resolved_forges().unwrap();
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0].name, "github");
-        let ForgeKindConfig::Github(github) = &forges[0].kind;
+        let ForgeKindConfig::Github(github) = &forges[0].kind else {
+            panic!("expected a GitHub forge");
+        };
         assert_eq!(github.app_id, 7);
     }
 
@@ -1313,7 +1437,9 @@ private_key = "PEM"
         let forges = config.resolved_forges().unwrap();
         let names: Vec<_> = forges.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["gh-main", "gh-other"]);
-        let ForgeKindConfig::Github(second) = &forges[1].kind;
+        let ForgeKindConfig::Github(second) = &forges[1].kind else {
+            panic!("expected a GitHub forge");
+        };
         assert_eq!(second.app_id, 2);
         assert_eq!(second.private_key.as_deref(), Some("PEM"));
     }
@@ -1335,6 +1461,75 @@ private_key = "PEM"
         // ':' in a name
         let colon = format!("{FORGE_BASE}{}", entry("a:b"));
         assert!(parse_config(&colon).resolved_forges().is_err());
+    }
+
+    const FORGEJO_ENTRY: &str = r#"
+[[forges]]
+name = "knope"
+type = "forgejo"
+url = "https://git.knope.dev"
+token = "abc"
+scopes = ["lodge", "jfro/kuiper-forge"]
+"#;
+
+    #[test]
+    fn test_forgejo_forge() {
+        let config = parse_config(&format!(
+            "{FORGE_BASE}\n[provisioning]\nmode = \"polling\"\n{FORGEJO_ENTRY}"
+        ));
+        let forges = config.resolved_forges().unwrap();
+        let ForgeKindConfig::Forgejo(forgejo) = &forges[0].kind else {
+            panic!("expected a Forgejo forge");
+        };
+        assert_eq!(forgejo.token_content().unwrap(), "abc");
+        assert_eq!(
+            forgejo.runner_scopes().unwrap(),
+            vec![
+                RunnerScope::Organization {
+                    name: "lodge".into()
+                },
+                RunnerScope::Repository {
+                    owner: "jfro".into(),
+                    repo: "kuiper-forge".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_forgejo_forge_errors() {
+        let polling = format!("{FORGE_BASE}\n[provisioning]\nmode = \"polling\"\n");
+        // bad scopes
+        for bad in ["[]", "[\"a/b/c\"]", "[\"/repo\"]", "[\"\"]"] {
+            let entry = FORGEJO_ENTRY.replace(r#"["lodge", "jfro/kuiper-forge"]"#, bad);
+            assert!(
+                parse_config(&format!("{polling}{entry}"))
+                    .resolved_forges()
+                    .is_err(),
+                "scopes {bad} should be rejected"
+            );
+        }
+        // bad url
+        let entry = FORGEJO_ENTRY.replace("https://git.knope.dev", "git.knope.dev");
+        assert!(
+            parse_config(&format!("{polling}{entry}"))
+                .resolved_forges()
+                .is_err()
+        );
+        // fixed-capacity with Forgejo as the default forge
+        assert!(
+            parse_config(&format!("{FORGE_BASE}{FORGEJO_ENTRY}"))
+                .resolved_forges()
+                .is_err()
+        );
+        // missing token
+        let entry = FORGEJO_ENTRY.replace("token = \"abc\"\n", "");
+        let config = parse_config(&format!("{polling}{entry}"));
+        let forges = config.resolved_forges().unwrap();
+        let ForgeKindConfig::Forgejo(forgejo) = &forges[0].kind else {
+            panic!("expected a Forgejo forge");
+        };
+        assert!(forgejo.token_content().is_err());
     }
 
     #[test]

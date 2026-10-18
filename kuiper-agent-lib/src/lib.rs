@@ -16,6 +16,7 @@ pub mod bundle;
 mod certs;
 mod connector;
 mod error;
+pub mod forgejo_runner;
 pub mod github_runner;
 pub mod labels;
 pub mod log_upload;

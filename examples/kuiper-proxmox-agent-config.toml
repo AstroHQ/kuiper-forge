@@ -97,6 +97,11 @@ clone_timeout_secs = 300
 #   - Specific version: "2.321.0" (see https://github.com/actions/runner/releases)
 runner_version = "latest"
 
+# forgejo-runner version for Forgejo jobs on Linux VMs (default: "latest")
+#   - "latest": Auto-fetch the latest release from code.forgejo.org
+#   - Specific version: "13.2.0" (at least 13.1.0, for one-job --handle)
+# forgejo_runner_version = "latest"
+
 # Template mappings for label-based VM template selection
 # When a job requests runners with specific labels, the first matching mapping
 # determines which Proxmox template to use. A mapping matches if ALL its labels

@@ -118,6 +118,9 @@ pub struct VmConfig {
     /// GitHub Actions runner version to install (e.g., "2.321.0")
     #[serde(default = "default_runner_version")]
     pub runner_version: String,
+    /// forgejo-runner version to install on Linux VMs for Forgejo jobs (e.g., "13.2.0", at least 13.1.0)
+    #[serde(default = "default_runner_version")]
+    pub forgejo_runner_version: String,
 }
 
 fn default_linked_clone() -> bool {
@@ -403,6 +406,7 @@ impl Config {
                 clone_timeout_secs: default_clone_timeout(),
                 template_mappings: vec![],
                 runner_version: default_runner_version(),
+                forgejo_runner_version: default_runner_version(),
             },
             ssh: SshConfig {
                 private_key_path: None, // User must set

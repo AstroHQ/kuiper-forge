@@ -10,6 +10,8 @@
 use crate::config::{SshConfig, VmConfig};
 use crate::error::{Error, Result};
 use crate::ssh::{RunnerConfigBuilder, SshClient, SshSession};
+use kuiper_agent_lib::forgejo_runner;
+use kuiper_agent_proto::ForgejoRunner;
 use kuiper_proxmox_api::ProxmoxVEAPI;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +26,8 @@ pub struct RunnerParams<'a> {
     pub runner_scope_url: &'a str,
     pub runner_name: &'a str,
     pub jit_config: &'a str,
+    /// Set for Forgejo jobs: run `forgejo-runner one-job` instead of the GitHub runner
+    pub forgejo: Option<&'a ForgejoRunner>,
 }
 
 /// Information about a running VM.
@@ -260,6 +264,7 @@ impl VmManager {
             runner_scope_url,
             runner_name,
             jit_config,
+            forgejo,
         } = params;
         // Update state
         if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
@@ -288,6 +293,18 @@ impl VmManager {
                 "bash/sh"
             }
         );
+
+        if let Some(forgejo) = forgejo {
+            if is_windows {
+                return Err(Error::runner(
+                    "Forgejo jobs need a Linux VM: forgejo-runner has no Windows release",
+                ));
+            }
+            self.run_forgejo_job(vmid, &mut session, forgejo, labels)
+                .await?;
+            session.close().await?;
+            return Ok((is_windows, shell_is_powershell));
+        }
 
         // Force time sync on Windows — cloned VMs often have stale clocks
         // which causes JIT token validation to fail ("token is not valid until ...")
@@ -592,6 +609,148 @@ impl VmManager {
 
         session.close().await?;
         Ok((is_windows, shell_is_powershell))
+    }
+
+    /// Install forgejo-runner if needed, then run one Forgejo job attempt and wait for it.
+    async fn run_forgejo_job(
+        &self,
+        vmid: u32,
+        session: &mut SshSession,
+        forgejo: &ForgejoRunner,
+        labels: &[String],
+    ) -> Result<()> {
+        let check = session
+            .execute(&forgejo_runner::check_installed_command())
+            .await?;
+        if check.stdout.trim() != "installed" {
+            let configured = &self.vm_config.forgejo_runner_version;
+            let version = if configured.is_empty() || configured == "latest" {
+                match forgejo_runner::fetch_latest_version().await {
+                    Some(v) => v,
+                    None => {
+                        info!(
+                            "Could not fetch latest forgejo-runner version, using fallback v{}",
+                            forgejo_runner::FALLBACK_VERSION
+                        );
+                        forgejo_runner::FALLBACK_VERSION.to_string()
+                    }
+                }
+            } else {
+                configured.clone()
+            };
+            let uname = session.execute("uname -m").await?;
+            let arch =
+                crate::ssh::github_runner::Arch::from_uname(&uname.stdout).ok_or_else(|| {
+                    Error::runner(format!(
+                        "forgejo-runner has no release for architecture '{}'",
+                        uname.stdout.trim()
+                    ))
+                })?;
+            info!(
+                "forgejo-runner not installed on VM {}, installing v{} ({})...",
+                vmid,
+                version,
+                arch.as_str()
+            );
+            let install = session
+                .execute(&forgejo_runner::install_command(&version, arch))
+                .await?;
+            if install.exit_code != 0 {
+                error!(
+                    local_only = tracing::field::Empty,
+                    "forgejo-runner installation failed on VM {}: stdout={}, stderr={}",
+                    vmid,
+                    install.stdout,
+                    install.stderr
+                );
+                return Err(Error::runner(format!(
+                    "Failed to install forgejo-runner v{version} (exit code {})",
+                    install.exit_code
+                )));
+            }
+            info!(
+                local_only = tracing::field::Empty,
+                "forgejo-runner installed on VM {}: {}",
+                vmid,
+                install.stdout.trim()
+            );
+        } else {
+            debug!("forgejo-runner already installed on VM {}", vmid);
+        }
+
+        let prepare = forgejo_runner::prepare_command(&forgejo_runner::OneJob {
+            instance_url: &forgejo.instance_url,
+            uuid: &forgejo.uuid,
+            token: &forgejo.token,
+            handle: &forgejo.handle,
+            labels,
+        })
+        .map_err(Error::runner)?;
+        let prepared = session.execute(&prepare).await?;
+        if prepared.exit_code != 0 {
+            error!(
+                local_only = tracing::field::Empty,
+                "Writing forgejo-runner job files failed on VM {}: {}",
+                vmid,
+                prepared.stderr.trim()
+            );
+            return Err(Error::runner(format!(
+                "Failed to write forgejo-runner job files (exit code {})",
+                prepared.exit_code
+            )));
+        }
+
+        if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
+            vm.state = VmState::RunnerActive;
+        }
+        info!(
+            "Running forgejo-runner one-job on VM {} for handle {} (will block until the job completes)",
+            vmid, forgejo.handle
+        );
+        let started = Instant::now();
+        let output = session.execute(&forgejo_runner::run_command()).await?;
+        let elapsed = started.elapsed();
+        info!(
+            "forgejo-runner on VM {} exited with code {} in {:.1}s",
+            vmid,
+            output.exit_code,
+            elapsed.as_secs_f64()
+        );
+        // forgejo-runner logs to stderr; keep the tail of both for diagnosis
+        let tail = |s: &str| {
+            let skip = s.chars().count().saturating_sub(4000);
+            s.chars().skip(skip).collect::<String>()
+        };
+        if !output.stdout.is_empty() {
+            info!(
+                local_only = tracing::field::Empty,
+                "forgejo-runner stdout (VM {}): {}",
+                vmid,
+                tail(output.stdout.trim())
+            );
+        }
+        if !output.stderr.is_empty() {
+            info!(
+                local_only = tracing::field::Empty,
+                "forgejo-runner stderr (VM {}): {}",
+                vmid,
+                tail(output.stderr.trim())
+            );
+        }
+        if output.exit_code != 0 {
+            warn!(
+                "forgejo-runner on VM {} failed after {:.1}s (exit {}) for handle {}",
+                vmid,
+                elapsed.as_secs_f64(),
+                output.exit_code,
+                forgejo.handle
+            );
+            return Err(Error::runner(format!(
+                "forgejo-runner exited with code {}",
+                output.exit_code
+            )));
+        }
+        Ok(())
     }
 
     /// Destroy a VM.

@@ -17,8 +17,8 @@ polling, whichever it supports.
 | 1 | Polling provisioning mode (GitHub) | **Done** |
 | – | Webhook-mode recovery scan applies `label_mappings` | **Done** (fix) |
 | 2 | Multi-forge groundwork: `Forge` trait, job keys, `[[forges]]` config, DB migration | **Done** |
-| 3 | Forgejo backend + `forgejo-runner one-job --handle` on proxmox Linux VMs | Next |
-| 4 | Idle runner timeout (job listed as waiting but never starts) | Planned |
+| 3 | Forgejo backend + `forgejo-runner one-job --handle` on proxmox Linux VMs | **Done** |
+| 4 | Idle runner timeout (job listed as waiting but never starts) | Next |
 | 5 | End-to-end tests against Forgejo 16 and 17 in Docker | Planned |
 | 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Planned |
 | – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later |
@@ -53,6 +53,63 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
   first GitHub forge). Webhooks are GitHub-only for now.
 - Scans list every forge; a forge that fails to list drops none of its pending jobs.
 - Admin UI shows each job's forge.
+
+**Forgejo backend.**
+
+- Config: `[[forges]]` entries with `type = "forgejo"`, `url`, a token (`token_env`,
+  `token_path` or `token`, in that order) and `scopes`: the orgs (`org`) and repos
+  (`owner/repo`) to poll and register runners in. Forgejo tokens can't list what they
+  can reach, so scopes must be named. Startup lists jobs in every scope to check the
+  token (no `read:user` scope needed).
+- Polling mode only: Forgejo can't be the first forge in fixed-capacity mode (pools
+  register long-lived runners there), and `[provisioning.webhook].forge` must be a
+  GitHub forge. In webhook mode a Forgejo forge is only picked up by the 5-minute
+  recovery scan (a warning says so).
+- `forgejo.rs`: `ForgejoClient` implements `Forge`. It lists
+  `…/actions/runners/jobs` per scope and keeps `status == "waiting"`; a job's key is its
+  `handle`. Repo names come from `/repositories/{id}`, cached. Forgejo answers `null`
+  for an empty list, which counts as empty. A scope that fails is skipped (the others
+  still count); if every scope fails the listing fails.
+- Job status: the job's handle in its scope's list. `waiting` is reported as `queued`
+  and `running` as `in_progress` (the fleet manager speaks GitHub's terms); a handle
+  that's gone means the attempt finished or was cancelled. A repo under a configured
+  org is asked at org scope, so an org-owner token works.
+- Runners: `POST …/actions/runners {"name", "ephemeral": true}` per job; the coordinator
+  sends the agent `CreateRunnerCommand.forgejo` (`ForgejoRunner`: instance URL, uuid,
+  token, handle). Removal lists runners (paged) and deletes by name; Forgejo usually
+  removes ephemeral runners itself first.
+- `Forge::create_job_runner` replaces `generate_jitconfig` and returns a
+  `RunnerLaunch` (GitHub JIT config or Forgejo runner). `Forge::runner_kind` says which
+  runner program a forge needs.
+- Agent protocol: agents list the runner programs they can start besides GitHub's in
+  `AgentStatus.runner_kinds`. A Forgejo job only goes to an agent listing `forgejo`, so
+  older agents never get one. The proxmox agent lists it; the tart agent doesn't (no
+  macOS forgejo-runner release) and rejects Forgejo commands.
+- Proxmox agent (`kuiper-agent-lib/src/forgejo_runner.rs`): on a Linux VM it installs
+  forgejo-runner into `~/forgejo-runner` if missing (`vm.forgejo_runner_version`,
+  default `latest`, falling back to 13.2.0; at least 13.1.0 for `--handle`), checks the
+  release's sha256, writes the token to a mode-600 file and a `run-job.sh`, then runs
+  `forgejo-runner one-job --url … --uuid … --token-url file:… --handle … --wait` with
+  each label as `label:host`, so steps run on the VM itself. Windows VMs fail with a
+  clear error.
+- VM templates need `curl`, `sha256sum` and `bash`, plus whatever the workflows use.
+  Jobs run on the host, so Docker-based steps (`container:`, `services:`) aren't
+  supported, and JavaScript actions such as `actions/checkout` need `node` on the VM.
+- `required_labels` is global and defaults to `["self-hosted"]`, which Forgejo jobs
+  usually don't have: set it (for example to `[]`) when polling Forgejo.
+- Renamed: `scan_github` → `scan_forges`, `recover_queued_jobs_from_github` →
+  `recover_queued_jobs`, `verify_pending_jobs_with_github` → `verify_pending_jobs`, and
+  forge-neutral log messages.
+
+**Tested.** Unit tests cover the client against a fake Forgejo API, the config, agent
+selection by runner kind, and the generated VM commands. End to end against a local
+Forgejo 17.0.0 in Docker: the coordinator in polling mode with a Forgejo forge and a
+throwaway agent speaking the real agent protocol that ran the agent library's
+install/prepare/run commands in a local shell instead of a VM. A one-job workflow and a
+two-job (`needs:`) workflow each got exactly one runner per job, every job succeeded,
+and the pending and runner records were cleared afterwards. The proxmox agent's own
+wiring (`run_forgejo_job`) is only compile- and unit-tested; it hasn't run on a real
+Proxmox VM yet. Forgejo 16 wasn't tested (step 5).
 
 ### Migration notes
 
@@ -98,12 +155,12 @@ Verified against Forgejo source (v16.0.5, v17.0.0) and a live 17.0.0 instance.
 
 ## Open questions
 
-- forgejo-runner release binaries for macOS and Windows: needed for tart agents and
-  Windows VMs. If not published, build from source or limit Forgejo to Linux at first.
-- Agent protocol: `CreateRunnerCommand` is GitHub-shaped (`registration_token`,
-  `jit_config`). Step 3 adds a Forgejo launch variant; agents must advertise support so
-  older agents never receive Forgejo jobs.
+- forgejo-runner release binaries for macOS and Windows: not published (Linux amd64 and
+  arm64 only, as of v13.2.0). Tart and Windows runners would need source builds.
 - Poll per org/repo scope, or use the admin scope when a site-admin token is configured?
-- Idle timeout default, and whether it applies to GitHub runners too.
-- Internal names and log messages still say "GitHub" in places (`scan_github`,
-  `recover_queued_jobs_from_github`); rename as Forgejo lands.
+  (Org and repo scopes for now.)
+- Idle timeout default, and whether it applies to GitHub runners too (step 4). Until
+  then, a runner whose job never starts waits in `one-job --wait` until its VM is
+  destroyed.
+- `required_labels` per forge, so a GitHub + Forgejo setup can keep `self-hosted` for
+  GitHub only.

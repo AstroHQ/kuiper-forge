@@ -98,6 +98,9 @@ message AgentStatus {
     // Extra host-wide limits on top of max_vms. Which VMs count against which limit comes from LabelSet.limits. Empty
     // from agents that only have max_vms
     repeated CapacityLimit limits = 11;
+    // Runner programs this agent can start besides the GitHub Actions runner, e.g. ["forgejo"]. Jobs from a forge
+    // only go to agents that list its kind. Empty from older agents: GitHub only
+    repeated string runner_kinds = 12;
 }
 
 // A host-wide VM limit, e.g. tart's macOS guest limit
@@ -191,6 +194,18 @@ message CreateRunnerCommand {
     string runner_scope_url = 5;    // GitHub org/repo URL for runner registration
     string jit_config = 6;          // JIT config blob (webhook mode): if set, skip config.sh and use run.sh --jitconfig
     string label_set_id = 7;        // LabelSet.id to create from (fixed-capacity pools). Empty: pick by labels
+    // Set for Forgejo jobs: run `forgejo-runner one-job` for this job attempt instead of the GitHub runner.
+    // registration_token, runner_scope_url and jit_config are unused then. Only sent to agents listing "forgejo"
+    // in AgentStatus.runner_kinds
+    ForgejoRunner forgejo = 8;
+}
+
+// An ephemeral Forgejo runner registered for one job attempt
+message ForgejoRunner {
+    string instance_url = 1;  // Forgejo URL the runner connects to (one-job --url)
+    string uuid = 2;          // runner UUID from registration (--uuid)
+    string token = 3;         // runner token from registration, read from a file (--token-url)
+    string handle = 4;        // the job attempt to run (--handle), needs forgejo-runner 13.1+
 }
 
 message DestroyRunnerCommand {

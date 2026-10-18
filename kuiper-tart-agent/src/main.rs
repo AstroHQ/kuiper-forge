@@ -605,6 +605,22 @@ impl TartAgent {
         while let Some(command) = connection.commands.recv().await {
             match command {
                 runtime::RunnerCommand::Create(cmd) => {
+                    // not advertised in runner_kinds, so only a misbehaving coordinator sends these
+                    if cmd.forgejo.is_some() {
+                        warn!(
+                            "Rejecting CreateRunner for vm={}: Forgejo runners aren't supported on tart agents",
+                            cmd.vm_name
+                        );
+                        let _ = connection
+                            .events
+                            .command_ack(
+                                cmd.command_id,
+                                false,
+                                "Forgejo runners aren't supported on tart agents".to_string(),
+                            )
+                            .await;
+                        continue;
+                    }
                     let image = self.select_image(&cmd);
                     let os = self.vm_manager.image_os(&image).await;
                     if !self.has_capacity(os).await {
@@ -849,6 +865,8 @@ impl TartAgent {
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             limits: self.vm_manager.limits().await,
+            // GitHub only: forgejo-runner has no macOS release
+            runner_kinds: Vec::new(),
         }
     }
 }

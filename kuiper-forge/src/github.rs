@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::config::RunnerScope;
-use crate::forge::{Forge, QueuedJob};
+use crate::forge::{Forge, QueuedJob, RunnerLaunch};
 
 /// GitHub API base URL
 const GITHUB_API_URL: &str = "https://api.github.com";
@@ -978,14 +978,17 @@ impl Forge for GitHubClient {
         GitHubClient::get_registration_token(self, scope).await
     }
 
-    async fn generate_jitconfig(
+    async fn create_job_runner(
         &self,
         scope: &RunnerScope,
         runner_name: &str,
         labels: &[String],
         runner_group_id: u64,
-    ) -> Result<String> {
-        GitHubClient::generate_jitconfig(self, scope, runner_name, labels, runner_group_id).await
+        _job_id: &str,
+    ) -> Result<RunnerLaunch> {
+        GitHubClient::generate_jitconfig(self, scope, runner_name, labels, runner_group_id)
+            .await
+            .map(RunnerLaunch::GitHubJit)
     }
 
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {

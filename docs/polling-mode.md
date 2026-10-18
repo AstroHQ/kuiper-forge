@@ -1,6 +1,6 @@
 # Polling Provisioning Mode
 
-Status: **steps 1–2 implemented** (GitHub polling, multi-forge groundwork); Forgejo steps proposed
+Status: **steps 1–3 implemented** (GitHub polling, multi-forge groundwork, Forgejo backend); see [forge-support.md](forge-support.md) for where things stand
 
 ### Implementation notes (step 1)
 
