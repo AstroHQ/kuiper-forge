@@ -192,7 +192,8 @@ pub struct WebhookConfig {
     ///
     /// This is a pre-filter before checking `label_mappings`. Jobs that don't have
     /// ALL of these labels are ignored. This prevents accepting GitHub-hosted runner
-    /// jobs by mistake.
+    /// jobs by mistake. It applies to jobs from every forge, so workflows on all of
+    /// them must carry these labels (Forgejo doesn't add "self-hosted" by itself).
     ///
     /// Set to empty `[]` to disable the filter (not recommended).
     #[serde(default = "default_required_labels")]
@@ -243,7 +244,8 @@ pub struct PollingConfig {
     pub interval_secs: u64,
 
     /// Required labels that ALL jobs must have to be accepted (default: ["self-hosted"]).
-    /// Same meaning as in webhook mode.
+    /// Same meaning as in webhook mode. Applies to jobs from every forge, so GitHub
+    /// and Forgejo workflows must both carry these labels.
     #[serde(default = "default_required_labels")]
     pub required_labels: Vec<String>,
 
@@ -983,8 +985,10 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # A Forgejo (15+) forge is polled for queued jobs, so it needs
 # [provisioning] mode = "polling". Its runners are one-job runners on Linux
 # proxmox VMs. The token's user must own every scope: an org owner with
-# write:organization, or the repo owner with write:repository. Forgejo jobs
-# don't carry GitHub's "self-hosted" label, so set required_labels to match.
+# write:organization, or the repo owner with write:repository.
+# required_labels applies to every forge: Forgejo doesn't add "self-hosted" the
+# way GitHub does, so put it in Forgejo workflows' runs-on too (or pick labels
+# both forges' workflows use), or every Forgejo job is skipped.
 #
 # [[forges]]
 # name = "forgejo"
@@ -1145,7 +1149,7 @@ mode = "fixed_capacity"
 #
 # [provisioning.polling]
 # interval_secs = 120                 # seconds between scans (default 120, min 10)
-# required_labels = ["self-hosted"]   # same as webhook mode
+# required_labels = ["self-hosted"]   # same as webhook mode; applies to every forge
 # queued_scan_lookback_hours = 168    # only scan repos pushed within this window (0 = all)
 #
 # [[provisioning.polling.label_mappings]]

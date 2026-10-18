@@ -95,8 +95,12 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
 - VM templates need `curl`, `sha256sum` and `bash`, plus whatever the workflows use.
   Jobs run on the host, so Docker-based steps (`container:`, `services:`) aren't
   supported, and JavaScript actions such as `actions/checkout` need `node` on the VM.
-- `required_labels` is global and defaults to `["self-hosted"]`, which Forgejo jobs
-  usually don't have: set it (for example to `[]`) when polling Forgejo.
+- `required_labels` (default `["self-hosted"]`) applies to every forge. GitHub gives
+  self-hosted runners that label automatically; Forgejo has no such convention, so a
+  job only has it if its workflow says so. Either write it in Forgejo workflows too
+  (`runs-on: [self-hosted, linux]`) or choose required labels both forges' workflows
+  use. Otherwise every Forgejo job is skipped. It's also what keeps kuiper from taking
+  jobs meant for other runners on a shared Forgejo instance.
 - Renamed: `scan_github` → `scan_forges`, `recover_queued_jobs_from_github` →
   `recover_queued_jobs`, `verify_pending_jobs_with_github` → `verify_pending_jobs`, and
   forge-neutral log messages.
@@ -189,5 +193,3 @@ Verified against Forgejo source (v16.0.5, v17.0.0) and a live 17.0.0 instance.
   arm64 only, as of v13.2.0). Tart and Windows runners would need source builds.
 - Poll per org/repo scope, or use the admin scope when a site-admin token is configured?
   (Org and repo scopes for now.)
-- `required_labels` per forge, so a GitHub + Forgejo setup can keep `self-hosted` for
-  GitHub only.
