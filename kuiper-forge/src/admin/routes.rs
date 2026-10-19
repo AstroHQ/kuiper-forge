@@ -571,10 +571,8 @@ async fn agent_availability(
         "Agent availability set from admin UI"
     );
 
-    // pick up queued jobs and pool top-ups right away instead of on the next tick
-    if form.available
-        && let Some(notifier) = &state.fleet_notifier
-    {
+    // right away instead of on the next tick: queued jobs and pool top-ups, or draining idle pool runners
+    if let Some(notifier) = &state.fleet_notifier {
         notifier.notify().await;
     }
 

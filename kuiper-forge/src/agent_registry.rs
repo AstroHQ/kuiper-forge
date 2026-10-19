@@ -748,6 +748,19 @@ impl AgentRegistry {
         }
     }
 
+    /// Send a command that has no reply, e.g. DestroyRunner: the agent answers with a runner event instead.
+    pub async fn send_no_reply(&self, agent_id: &str, command: CoordinatorMessage) -> Result<()> {
+        let agent = self
+            .get(agent_id)
+            .await
+            .ok_or_else(|| anyhow!("Agent not found: {agent_id}"))?;
+        let command_tx = agent.read().await.command_tx.clone();
+        command_tx
+            .send(command)
+            .await
+            .map_err(|_| anyhow!("Failed to send command to agent"))
+    }
+
     /// Handle a response from an agent
     pub async fn handle_response(&self, agent_id: &str, command_id: &str, response: AgentMessage) {
         if let Some(agent) = self.get(agent_id).await {
