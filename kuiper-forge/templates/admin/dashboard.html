@@ -72,9 +72,12 @@
                         <div class="muted">on <a href="/admin/agents/{{ agent_id }}">{{ agent_id }}</a></div>
                         {% else if job.matching_agents == 0 %}
                         <span class="badge badge-offline">No matching agent</span>
+                        {% else if job.unavailable_agents == job.matching_agents %}
+                        <span class="badge badge-offline">Agents unavailable</span>
+                        <div class="muted">{{ job.matching_agents }} matching, all marked unavailable</div>
                         {% else if job.free_capacity == 0 %}
                         <span class="badge badge-revoked">Agents busy</span>
-                        <div class="muted">{{ job.matching_agents }} matching, all full</div>
+                        <div class="muted">{{ job.matching_agents }} matching, all full{% if job.unavailable_agents > 0 %} or unavailable{% endif %}</div>
                         {% else %}
                         <span class="badge badge-label">Waiting</span>
                         <div class="muted">{{ job.matching_agents }} matching, {{ job.free_capacity }} free</div>
@@ -125,6 +128,9 @@
                         {% else %}
                         <span class="badge badge-offline">Offline</span>
                         {% endif %}
+                        {% if !agent.revoked && agent.unavailable_at.is_some() %}
+                        <span class="badge badge-revoked" title="no new runners, running ones finish">Unavailable</span>
+                        {% endif %}
                     </td>
                     <td>
                         {{ agent.active_vms }}/{{ agent.max_vms }}
@@ -136,7 +142,12 @@
                         {% call m::labels(agent) %}{% endcall %}
                     </td>
                     <td>
-                        <a href="/admin/agents/{{ agent.agent_id }}" class="btn btn-secondary btn-sm">View</a>
+                        <div class="btn-group">
+                            <a href="/admin/agents/{{ agent.agent_id }}" class="btn btn-secondary btn-sm">View</a>
+                            {% if !agent.revoked %}
+                            {% call m::availability_toggle(agent.agent_id, agent.unavailable_at, "dashboard", "btn-sm") %}{% endcall %}
+                            {% endif %}
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}

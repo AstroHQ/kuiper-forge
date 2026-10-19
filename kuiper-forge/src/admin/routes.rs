@@ -25,7 +25,7 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, info, warn};
 
 /// Build the admin router.
 pub fn admin_router(state: Arc<AdminState>) -> Router {
@@ -38,6 +38,7 @@ pub fn admin_router(state: Arc<AdminState>) -> Router {
         .route("/tokens/{token}/delete", post(token_delete))
         .route("/agents/{agent_id}", get(agent_detail))
         .route("/agents/{agent_id}/revoke", post(agent_revoke))
+        .route("/agents/{agent_id}/availability", post(agent_availability))
         .route("/agents/{agent_id}/logs", get(agent_log_routes::agent_logs))
         .route("/users", get(user_routes::users_page))
         .route("/users/create", post(user_routes::user_create))
@@ -200,15 +201,22 @@ async fn render_dashboard(
     let now = Utc::now();
     let mut pending_jobs = Vec::with_capacity(pending.len());
     for (job_id, job) in pending {
+        let matching = state
+            .agent_registry
+            .find_agents_by_labels(&job.agent_labels)
+            .await;
+        let mut unavailable_agents = 0;
+        for agent_id in &matching {
+            if state.agent_registry.is_unavailable(agent_id).await {
+                unavailable_agents += 1;
+            }
+        }
         pending_jobs.push(PendingJobSummary {
             assigned_agent: job_agents.get(&job_id).cloned(),
             job_id,
             waiting: format_age(now - job.created_at),
-            matching_agents: state
-                .agent_registry
-                .find_agents_by_labels(&job.agent_labels)
-                .await
-                .len(),
+            matching_agents: matching.len(),
+            unavailable_agents,
             free_capacity: state
                 .agent_registry
                 .available_capacity(&job.agent_labels)
@@ -252,6 +260,7 @@ async fn render_dashboard(
                 active_vms,
                 created_at: a.created_at,
                 revoked: a.revoked,
+                unavailable_at: a.unavailable_at,
                 version: a.agent_version,
             }
         })
@@ -437,6 +446,7 @@ async fn agent_detail(
         active_vms: runners.len(),
         created_at: agent.created_at,
         revoked: agent.revoked,
+        unavailable_at: agent.unavailable_at,
         version: agent.agent_version,
     };
 
@@ -493,6 +503,85 @@ async fn agent_revoke(
             error!("Failed to revoke agent {}: {}", agent_id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to revoke agent").into_response()
         }
+    }
+}
+
+/// Availability toggle form data.
+#[derive(Deserialize)]
+pub struct AvailabilityForm {
+    /// `true` to take work again, `false` for maintenance
+    available: bool,
+    /// Page to go back to: `dashboard`, else the agent's page
+    #[serde(default)]
+    from: String,
+}
+
+/// Mark an agent unavailable (no new runners, running ones finish) or available again.
+async fn agent_availability(
+    State(state): State<Arc<AdminState>>,
+    jar: CookieJar,
+    Path(agent_id): Path<String>,
+    Form(form): Form<AvailabilityForm>,
+) -> Response {
+    let session = match check_auth(&state, &jar).await {
+        Some(s) => s,
+        None => return Redirect::to("/admin/login").into_response(),
+    };
+
+    // DB first: if that fails, scheduling keeps doing what the UI shows
+    match state
+        .auth_manager
+        .set_agent_unavailable(&agent_id, !form.available)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "Agent not found").into_response(),
+        Err(e) => {
+            error!(
+                agent_id = %agent_id,
+                available = form.available,
+                "Failed to update agent availability: {:#}", e
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update agent availability",
+            )
+                .into_response();
+        }
+    }
+    state
+        .agent_registry
+        .set_unavailable(&agent_id, !form.available)
+        .await;
+
+    let active_runners = state
+        .runner_state
+        .get_all_runners()
+        .await
+        .map(|r| r.iter().filter(|(_, r)| r.agent_id == agent_id).count())
+        .unwrap_or_else(|e| {
+            warn!(agent_id = %agent_id, "Failed to count runners: {}", e);
+            0
+        });
+    info!(
+        agent_id = %agent_id,
+        available = form.available,
+        active_runners = active_runners,
+        by = %session.username,
+        "Agent availability set from admin UI"
+    );
+
+    // pick up queued jobs and pool top-ups right away instead of on the next tick
+    if form.available
+        && let Some(notifier) = &state.fleet_notifier
+    {
+        notifier.notify().await;
+    }
+
+    if form.from == "dashboard" {
+        Redirect::to("/admin/dashboard").into_response()
+    } else {
+        Redirect::to(&format!("/admin/agents/{agent_id}")).into_response()
     }
 }
 

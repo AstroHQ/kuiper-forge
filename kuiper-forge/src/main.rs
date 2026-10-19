@@ -307,6 +307,14 @@ async fn serve(
     // Initialize agent registry
     let agent_registry = Arc::new(AgentRegistry::new());
 
+    // agents marked unavailable stay that way across coordinator restarts
+    for agent in auth_manager.list_agents().await {
+        if agent.unavailable_at.is_some() {
+            info!(agent_id = %agent.agent_id, "Agent is marked unavailable, it gets no new runners");
+            agent_registry.set_unavailable(&agent.agent_id, true).await;
+        }
+    }
+
     // Initialize persistent runner state for crash recovery (using shared database)
     let runner_state = Arc::new(runner_state::RunnerStateStore::new(db.pool()));
     let agent_failures = Arc::new(AgentFailureStore::new(db.pool()));
@@ -316,27 +324,6 @@ async fn serve(
     // Initialize persistent pending job store for webhook mode (using shared database)
     let pending_job_store = Arc::new(pending_jobs::PendingJobStore::new(db.pool()));
     pending_job_store.load_and_log().await;
-
-    // Initialize admin UI state if enabled
-    let admin_state = if config.admin.enabled {
-        info!("Admin UI enabled at /admin, API at /api/v1");
-        let admin_auth_store = AdminAuthStore::new(db.pool());
-        Some(Arc::new(AdminState {
-            auth_store: admin_auth_store,
-            api_tokens: ApiTokenStore::new(db.pool()),
-            session_timeout_secs: config.admin.session_timeout_secs,
-            auth_manager: auth_manager.clone(),
-            agent_registry: agent_registry.clone(),
-            runner_state: runner_state.clone(),
-            pending_jobs: pending_job_store.clone(),
-            agent_failures: agent_failures.clone(),
-            agent_logs: agent_logs.clone(),
-            server_trust: server_trust.clone(),
-            coordinator_url: config.admin.coordinator_url.clone(),
-        }))
-    } else {
-        None
-    };
 
     // Start management socket server for CLI communication
     let mgmt_socket_path = management::default_socket_path(data_dir);
@@ -404,6 +391,28 @@ async fn serve(
             agent_failures.clone(),
         );
         (Some(fm), Some(notifier), wh_notifier)
+    };
+
+    // Initialize admin UI state if enabled
+    let admin_state = if config.admin.enabled {
+        info!("Admin UI enabled at /admin, API at /api/v1");
+        let admin_auth_store = AdminAuthStore::new(db.pool());
+        Some(Arc::new(AdminState {
+            auth_store: admin_auth_store,
+            api_tokens: ApiTokenStore::new(db.pool()),
+            session_timeout_secs: config.admin.session_timeout_secs,
+            auth_manager: auth_manager.clone(),
+            agent_registry: agent_registry.clone(),
+            runner_state: runner_state.clone(),
+            pending_jobs: pending_job_store.clone(),
+            agent_failures: agent_failures.clone(),
+            agent_logs: agent_logs.clone(),
+            server_trust: server_trust.clone(),
+            coordinator_url: config.admin.coordinator_url.clone(),
+            fleet_notifier: fleet_notifier.clone(),
+        }))
+    } else {
+        None
     };
 
     info!("CI Runner Coordinator starting...");

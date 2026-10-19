@@ -71,6 +71,8 @@ struct StatusResponse {
     registered_agents: usize,
     connected_agents: usize,
     revoked_agents: usize,
+    /// Marked unavailable by an admin: they get no new runners
+    unavailable_agents: usize,
     /// Sum of `max_vms` across connected agents
     total_capacity: usize,
     active_runners: usize,
@@ -99,6 +101,10 @@ async fn status(State(state): State<Arc<AdminState>>) -> Response {
         registered_agents: registered.len(),
         connected_agents: connected.len(),
         revoked_agents: registered.iter().filter(|a| a.revoked).count(),
+        unavailable_agents: registered
+            .iter()
+            .filter(|a| !a.revoked && a.unavailable_at.is_some())
+            .count(),
         total_capacity: connected.iter().map(|a| a.max_vms).sum(),
         active_runners: runners.len(),
         pending_jobs: pending_jobs.len(),
@@ -120,6 +126,10 @@ struct AgentResponse {
     hostname: String,
     agent_type: String,
     status: AgentStatus,
+    /// Marked unavailable by an admin (maintenance): gets no new runners, running ones finish
+    unavailable: bool,
+    /// When it was marked unavailable. Null while it takes work
+    unavailable_since: Option<DateTime<Utc>>,
     labels: Vec<String>,
     /// Only known while the agent is connected
     label_sets: Vec<Vec<String>>,
@@ -194,6 +204,8 @@ async fn agents(State(state): State<Arc<AdminState>>) -> Response {
                     .unwrap_or_default(),
                 last_seen_secs: live.map(|c| c.last_seen_secs),
                 status,
+                unavailable: a.unavailable_at.is_some(),
+                unavailable_since: a.unavailable_at,
                 agent_id: a.agent_id,
                 hostname: a.hostname,
                 agent_type: a.agent_type,

@@ -52,6 +52,8 @@ pub struct PendingJobSummary {
     pub failed_agents: usize,
     /// Connected agents whose labels match, regardless of free capacity
     pub matching_agents: usize,
+    /// Of `matching_agents`, the ones marked unavailable
+    pub unavailable_agents: usize,
     pub free_capacity: usize,
 }
 
@@ -71,6 +73,8 @@ pub struct AgentSummary {
     pub active_vms: usize,
     pub created_at: DateTime<Utc>,
     pub revoked: bool,
+    /// When an admin marked it unavailable (no new runners). None while it takes work
+    pub unavailable_at: Option<DateTime<Utc>>,
     /// None for agents that predate version reporting
     pub version: Option<String>,
 }
@@ -132,6 +136,7 @@ pub struct AgentDetailTemplate {
 pub struct AgentHeader {
     pub agent_id: String,
     pub revoked: bool,
+    pub unavailable_at: Option<DateTime<Utc>>,
 }
 
 /// Agent logs tab
@@ -242,6 +247,7 @@ mod tests {
             limits: vec![],
             explicit_pools: false,
             last_seen_secs: 0,
+            unavailable: false,
         }
     }
 

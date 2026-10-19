@@ -6,6 +6,7 @@ use crate::agent_failures::AgentFailureStore;
 use crate::agent_logs::AgentLogStore;
 use crate::agent_registry::AgentRegistry;
 use crate::auth::AuthManager;
+use crate::fleet::FleetNotifier;
 use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
 use crate::tls::ServerTrust;
@@ -38,4 +39,6 @@ pub struct AdminState {
     pub server_trust: ServerTrust,
     /// Coordinator URL for registration bundles
     pub coordinator_url: String,
+    /// Wakes the fleet manager, e.g. when an agent takes work again
+    pub fleet_notifier: Option<FleetNotifier>,
 }

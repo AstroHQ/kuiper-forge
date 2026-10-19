@@ -33,6 +33,12 @@
                 {% else %}
                 <span class="badge badge-offline">Offline</span>
                 {% endif %}
+                {% if !agent.revoked %}
+                {% if let Some(since) = agent.unavailable_at %}
+                <span class="badge badge-revoked">Unavailable</span>
+                <div class="muted">since {% call m::ts(since) %}{% endcall %}: gets no new runners, running ones finish</div>
+                {% endif %}
+                {% endif %}
             </div>
 
             <div class="detail-label">Capacity</div>

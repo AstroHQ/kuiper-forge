@@ -1700,7 +1700,10 @@ impl FleetManager {
         let mut total = 0u32;
         for agent in &agents {
             // same members as legacy_pool_capacity and select_legacy_pool_agent
-            if !agent.explicit_pools && normalize_labels(&agent.labels) == pool_def.labels {
+            if !agent.explicit_pools
+                && !agent.unavailable
+                && normalize_labels(&agent.labels) == pool_def.labels
+            {
                 total += self
                     .runner_state
                     .count_runners_for_agent(&agent.agent_id)

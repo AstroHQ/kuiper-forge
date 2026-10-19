@@ -3,6 +3,7 @@
     <div class="btn-group">
         <a href="/admin/dashboard" class="btn btn-secondary">Back to Dashboard</a>
         {% if !agent.revoked %}
+        {% call m::availability_toggle(agent.agent_id, agent.unavailable_at, "agent", "") %}{% endcall %}
         <form method="post" action="/admin/agents/{{ agent.agent_id }}/revoke"
             onsubmit="return confirm('Are you sure you want to revoke this agent? This will disconnect the agent and require re-registration.');">
             <button type="submit" class="btn btn-danger">Revoke Certificate</button>

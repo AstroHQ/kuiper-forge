@@ -59,6 +59,19 @@ pub struct RegisteredAgent {
     /// Last version the agent reported. None for agents that don't report one
     #[serde(default)]
     pub agent_version: Option<String>,
+    /// When an admin marked the agent unavailable, so it gets no new runners. None while it takes work
+    #[serde(default)]
+    pub unavailable_at: Option<DateTime<Utc>>,
+}
+
+/// `unavailable_at` of an agent row. None when unset or unparseable.
+fn parse_unavailable_at(row: &crate::db::DbRow) -> Option<DateTime<Utc>> {
+    let stamp: Option<String> = row.try_get("unavailable_at").ok()?;
+    Some(
+        DateTime::parse_from_rfc3339(&stamp?)
+            .ok()?
+            .with_timezone(&Utc),
+    )
 }
 
 /// Database-backed storage for tokens and agents.
@@ -255,6 +268,7 @@ impl AuthStore {
                 .with_timezone(&Utc),
             revoked: row.get::<i32, _>("revoked") != 0,
             agent_version: row.get("agent_version"),
+            unavailable_at: parse_unavailable_at(&row),
         })
     }
 
@@ -282,9 +296,22 @@ impl AuthStore {
                         .with_timezone(&Utc),
                     revoked: row.get::<i32, _>("revoked") != 0,
                     agent_version: row.get("agent_version"),
+                    unavailable_at: parse_unavailable_at(&row),
                 })
             })
             .collect()
+    }
+
+    /// Mark an agent unavailable (no new runners) or available again. Returns false if the agent isn't registered.
+    pub async fn set_agent_unavailable(&self, agent_id: &str, unavailable: bool) -> Result<bool> {
+        let stamp = unavailable.then(|| Utc::now().to_rfc3339());
+        let result = sqlx::query(sql::SET_AGENT_UNAVAILABLE)
+            .bind(stamp)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Mark an agent as revoked, stamping the revocation time so it can be purged
@@ -489,6 +516,7 @@ impl AuthManager {
             expires_at,
             revoked: false,
             agent_version: None,
+            unavailable_at: None,
         };
         self.store.store_agent(registered).await?;
 
@@ -515,6 +543,13 @@ impl AuthManager {
     /// List all registered agents
     pub async fn list_agents(&self) -> Vec<RegisteredAgent> {
         self.store.list_agents().await
+    }
+
+    /// Mark an agent unavailable (no new runners) or available again. Returns false if the agent isn't registered.
+    pub async fn set_agent_unavailable(&self, agent_id: &str, unavailable: bool) -> Result<bool> {
+        self.store
+            .set_agent_unavailable(agent_id, unavailable)
+            .await
     }
 
     /// Revoke an agent's certificate
@@ -854,5 +889,68 @@ mod tests {
         // Token should be gone now
         let gone = store.consume_token("reg_test123").await.unwrap();
         assert!(gone.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_agent_unavailable_round_trips() {
+        let temp = TempDir::new().unwrap();
+        let db = Database::new(&DatabaseConfig::default(), temp.path())
+            .await
+            .unwrap();
+        let store = AuthStore::new(db.pool());
+
+        store
+            .store_agent(RegisteredAgent {
+                agent_id: "agent_1".to_string(),
+                hostname: "mac-mini".to_string(),
+                agent_type: "tart".to_string(),
+                labels: vec!["macos".to_string()],
+                max_vms: 2,
+                serial_number: "1".to_string(),
+                created_at: Utc::now(),
+                expires_at: Utc::now() + Duration::days(30),
+                revoked: false,
+                agent_version: None,
+                unavailable_at: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_agent("agent_1").await.unwrap().unavailable_at,
+            None
+        );
+
+        assert!(store.set_agent_unavailable("agent_1", true).await.unwrap());
+        assert!(
+            store
+                .get_agent("agent_1")
+                .await
+                .unwrap()
+                .unavailable_at
+                .is_some()
+        );
+        assert!(store.list_agents().await[0].unavailable_at.is_some());
+
+        // status syncs and re-registration upserts must not clear it
+        store
+            .update_agent_metadata("agent_1", &["macos".to_string()], 3, Some("1.0"))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get_agent("agent_1")
+                .await
+                .unwrap()
+                .unavailable_at
+                .is_some()
+        );
+
+        assert!(store.set_agent_unavailable("agent_1", false).await.unwrap());
+        assert_eq!(
+            store.get_agent("agent_1").await.unwrap().unavailable_at,
+            None
+        );
+
+        assert!(!store.set_agent_unavailable("nope", true).await.unwrap());
     }
 }

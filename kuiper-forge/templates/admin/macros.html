@@ -25,3 +25,19 @@
     {% endfor %}
 </div>
 {% endmacro %}
+
+{# button that marks an agent unavailable for maintenance, or available again; `from` is the page to come back to #}
+{% macro availability_toggle(agent_id, unavailable_at, from, size) %}
+<form method="post" action="/admin/agents/{{ agent_id }}/availability">
+    <input type="hidden" name="from" value="{{ from }}">
+    {% if unavailable_at.is_some() %}
+    <input type="hidden" name="available" value="true">
+    <button type="submit" class="btn btn-primary {{ size }}">Mark Available</button>
+    {% else %}
+    <input type="hidden" name="available" value="false">
+    <button type="submit" class="btn btn-secondary {{ size }}"
+        title="Stop sending new runners to this agent, e.g. to update VM images. Running jobs finish."
+        onclick="return confirm('Mark this agent unavailable? It gets no new runners until marked available again. Running jobs finish.');">Mark Unavailable</button>
+    {% endif %}
+</form>
+{% endmacro %}
