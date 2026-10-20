@@ -58,13 +58,13 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
 **Forgejo backend.**
 
 - Config: `[[forges]]` entries with `type = "forgejo"`, `url`, a token (`token_env`,
-  `token_path` or `token`, in that order) and `scopes`: the orgs (`org`) and repos
-  (`owner/repo`) to poll and register runners in. Forgejo tokens can't list what they
-  can reach, so scopes must be named. Startup checks the token in every scope: it lists
-  jobs, then deletes runner id 0 (which can't exist). Forgejo picks the scope level by
-  HTTP method, so a read-only token can list jobs; the delete needs `write:` and
-  ownership, answering 404 when the token may manage runners and 403 when it may not.
-  No `read:user` scope is needed.
+  `token_path` or `token`, in that order) and `scopes`, where to poll and register
+  runners (see [Scopes and tokens](#scopes-and-tokens)). Forgejo tokens can't list what
+  they can reach, so scopes must be named. Startup checks the token in every scope: it
+  lists jobs, then deletes runner id 0 (which can't exist). Forgejo picks the scope
+  level by HTTP method, so a read-only token can list jobs; the delete needs `write:`
+  and ownership, answering 404 when the token may manage runners and 403 when it may
+  not.
 - Polling mode only: Forgejo can't be the first forge in fixed-capacity mode (pools
   register long-lived runners there), and `[provisioning.webhook].forge` must be a
   GitHub forge. In webhook mode a Forgejo forge is only picked up by the 5-minute
@@ -205,10 +205,45 @@ Verified against Forgejo source (v16.0.5, v17.0.0) and a live 17.0.0 instance.
   |------------|-------------|--------------|
   | Repository | `write:repository` (repo-limited tokens work) | repo owner (admin collaborators get 403) |
   | Organization | `write:organization` | org owner |
+  | User | `write:user` | the token's own user |
   | Instance | `write:admin` | site admin |
+
+  Looking up repositories by id (to name a job's repository) also needs
+  `read:repository`, for every one of these but repository scope.
 
   Creating webhooks needs a full (not repo-limited) `write:repository` token, or
   `write:organization` for org hooks. There is no GitHub App equivalent.
+
+## Scopes and tokens
+
+A Forgejo runner belongs to exactly one owner, and a job is only listed at its own
+repository's owner: a user scope covers the repositories the user owns, not those of
+orgs the user belongs to or owns. kuiper registers each job's runner in the scope it
+found the job in, so one forge entry can mix scopes.
+
+| `scopes` entry | Covers | Token's user must be | Token scopes |
+|----------------|--------|----------------------|--------------|
+| `"owner/repo"` | that repository | its owner | `write:repository` |
+| `"org"` | the org's repositories | an org owner | `write:organization` + `read:repository` |
+| `"@user"` | repositories the user owns | that user (the token's own) | `write:user` + `read:repository` |
+| `"*"` | every repository on the instance | a site admin | `write:admin` + `read:repository` |
+
+- Two common setups: your own repos and your org's, with one token from your user:
+  `scopes = ["@jfro", "lodge"]` and `write:user` + `write:organization` +
+  `read:repository`; or everything, with a site admin's token: `scopes = ["*"]` and
+  `write:admin` + `read:repository`.
+- `read:repository` is how kuiper names the repository a job came from (the jobs list
+  only has `repo_id`); without it org, user and instance scopes can't check job status.
+  Startup checks it by looking up repository id 0 (404 allowed, 403 not).
+- Startup checks a `@user` scope belongs to the token's user (`GET /user`).
+- Job status is asked at the scope that owns the repository: a configured org or user,
+  else the instance if `*` is configured, else the repository itself.
+- Overlapping scopes (`*` plus an org, say) list a job once.
+- The `user` and `instance` runner scopes are stored like the others
+  (`{"type":"user","name":…}`, `{"type":"instance"}`); GitHub forges refuse them.
+- Tested end to end on Forgejo 16.0.5 and 17.0.0 with both setups: jobs in an org repo
+  and a user repo, idle teardown in the user repo, and a token missing
+  `read:repository` stopping startup.
 
 ## Runner binaries
 
@@ -315,5 +350,3 @@ or Windows VM yet (see [Testing on real hosts](#testing-on-real-hosts)).
 
 - macOS and Windows host mode is lightly tested upstream; see
   [Testing on real hosts](#testing-on-real-hosts).
-- Poll per org/repo scope, or use the admin scope when a site-admin token is configured?
-  (Org and repo scopes for now.)

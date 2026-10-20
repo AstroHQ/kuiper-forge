@@ -61,6 +61,11 @@ struct ApiRunner {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApiUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ApiRepository {
     full_name: String,
 }
@@ -101,11 +106,14 @@ impl ForgejoClient {
         })
     }
 
-    /// The API path prefix for a runner scope: `orgs/{org}` or `repos/{owner}/{repo}`.
+    /// The API path prefix for a runner scope: `orgs/{org}`, `repos/{owner}/{repo}`,
+    /// `user` (the token's own user) or `admin` (the instance).
     fn scope_path(scope: &RunnerScope) -> String {
         match scope {
             RunnerScope::Organization { name } => format!("orgs/{name}"),
             RunnerScope::Repository { owner, repo } => format!("repos/{owner}/{repo}"),
+            RunnerScope::User { .. } => "user".to_string(),
+            RunnerScope::Instance => "admin".to_string(),
         }
     }
 
@@ -166,6 +174,55 @@ impl ForgejoClient {
     /// runners gets 404, one that may not gets 403. Only the scopes are checked, so
     /// the token needs no `read:user` scope.
     pub async fn validate(&self) -> Result<()> {
+        // a user scope is the token's own user: Forgejo's /user endpoints act as it
+        if let Some(name) = self.scopes.iter().find_map(|s| match s {
+            RunnerScope::User { name } => Some(name),
+            _ => None,
+        }) {
+            let response = self
+                .send("getting user", "user", self.request(Method::GET, "user"))
+                .await?;
+            if !response.status().is_success() {
+                return Err(Self::error_for("getting the token's user", "user", response).await)
+                    .context("A user scope needs a token with write:user");
+            }
+            let user: ApiUser = response
+                .json()
+                .await
+                .context("Failed to parse Forgejo user response")?;
+            if !user.login.eq_ignore_ascii_case(name) {
+                anyhow::bail!(
+                    "Scope '@{name}' must be the token's own user, but the token belongs to '{}'",
+                    user.login
+                );
+            }
+        }
+
+        // org, user and instance scopes name each job's repository by id, which needs
+        // read:repository. Repository 0 can't exist: 404 means the lookup is allowed
+        if self
+            .scopes
+            .iter()
+            .any(|s| !matches!(s, RunnerScope::Repository { .. }))
+        {
+            let path = "repositories/0";
+            let response = self
+                .send(
+                    "checking repository access",
+                    path,
+                    self.request(Method::GET, path),
+                )
+                .await?;
+            if response.status() == StatusCode::FORBIDDEN
+                || response.status() == StatusCode::UNAUTHORIZED
+            {
+                return Err(Self::error_for("checking repository access", path, response).await)
+                    .context(
+                        "Org, user and instance scopes need a token with read:repository, to name the repositories jobs come from",
+                    );
+            }
+        }
+
         for scope in &self.scopes {
             let jobs = self
                 .list_scope_jobs(scope)
@@ -242,19 +299,29 @@ impl ForgejoClient {
         Ok(repo.full_name)
     }
 
-    /// The scope to ask about a repository's jobs: a configured org that owns it,
-    /// so an org-owner token works, else the repository itself.
+    /// The scope to ask about a repository's jobs, one the token can read: a
+    /// configured org or user that owns it, else the instance if configured, else the
+    /// repository itself.
     fn scope_for_repo(&self, repo: &str) -> Result<RunnerScope> {
         let (owner, name) = repo
             .split_once('/')
             .ok_or_else(|| anyhow!("Invalid repository '{repo}': expected 'owner/repo'"))?;
-        let org = self.scopes.iter().find(|scope| {
-            matches!(scope, RunnerScope::Organization { name } if name.eq_ignore_ascii_case(owner))
+        let owning = self.scopes.iter().find(|scope| match scope {
+            RunnerScope::Organization { name } | RunnerScope::User { name } => {
+                name.eq_ignore_ascii_case(owner)
+            }
+            _ => false,
         });
-        Ok(org.cloned().unwrap_or_else(|| RunnerScope::Repository {
+        if let Some(scope) = owning {
+            return Ok(scope.clone());
+        }
+        if self.scopes.contains(&RunnerScope::Instance) {
+            return Ok(RunnerScope::Instance);
+        }
+        Ok(RunnerScope::Repository {
             owner: owner.to_string(),
             repo: name.to_string(),
-        }))
+        })
     }
 
     /// Every runner directly registered in a scope.
@@ -291,10 +358,13 @@ impl ForgejoClient {
 impl Forge for ForgejoClient {
     fn scope_url(&self, scope: &RunnerScope) -> String {
         match scope {
-            RunnerScope::Organization { name } => format!("{}/{name}", self.base_url),
+            RunnerScope::Organization { name } | RunnerScope::User { name } => {
+                format!("{}/{name}", self.base_url)
+            }
             RunnerScope::Repository { owner, repo } => {
                 format!("{}/{owner}/{repo}", self.base_url)
             }
+            RunnerScope::Instance => self.base_url.clone(),
         }
     }
 
@@ -403,6 +473,8 @@ impl Forge for ForgejoClient {
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
         let started = Instant::now();
         let mut queued = Vec::new();
+        // overlapping scopes (the instance and an org, say) list a job more than once
+        let mut seen_handles = std::collections::HashSet::new();
         let mut failed_scopes = 0;
         for scope in &self.scopes {
             let jobs = match self.list_scope_jobs(scope).await {
@@ -422,6 +494,9 @@ impl Forge for ForgejoClient {
                 if job.status != "waiting" {
                     continue;
                 }
+                if !job.handle.is_empty() && !seen_handles.insert(job.handle.clone()) {
+                    continue;
+                }
                 if job.handle.is_empty() {
                     warn!(
                         "Forgejo job {} ('{}') has no handle - needs Forgejo 15 or newer, skipping",
@@ -431,7 +506,9 @@ impl Forge for ForgejoClient {
                 }
                 let repository = match scope {
                     RunnerScope::Repository { owner, repo } => Some(format!("{owner}/{repo}")),
-                    RunnerScope::Organization { .. } => match self.repo_name(job.repo_id).await {
+                    RunnerScope::Organization { .. }
+                    | RunnerScope::User { .. }
+                    | RunnerScope::Instance => match self.repo_name(job.repo_id).await {
                         Ok(name) => Some(name),
                         Err(e) => {
                             warn!(
@@ -496,6 +573,10 @@ mod tests {
         registered: Mutex<Vec<Value>>,
         repo_lookups: Mutex<u32>,
         runners: Vec<Value>,
+        /// the token lacks read:repository
+        no_repo_read: bool,
+        /// the token's user, for /user
+        login: Option<&'static str>,
     }
 
     fn authed(headers: &HeaderMap) -> bool {
@@ -519,9 +600,41 @@ mod tests {
         async fn repo_jobs() -> (StatusCode, Json<Value>) {
             (StatusCode::FORBIDDEN, Json(json!({"message": "not owner"})))
         }
-        async fn repository(State(fake): State<Arc<Fake>>, Path(id): Path<i64>) -> Json<Value> {
+        async fn repository(
+            State(fake): State<Arc<Fake>>,
+            Path(id): Path<i64>,
+        ) -> (StatusCode, Json<Value>) {
+            if fake.no_repo_read {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(
+                        json!({"message": "token does not have at least one of required scope(s): [read:repository]"}),
+                    ),
+                );
+            }
+            if id == 0 {
+                return (StatusCode::NOT_FOUND, Json(json!({})));
+            }
             *fake.repo_lookups.lock().unwrap() += 1;
-            Json(json!({"id": id, "full_name": "lodge/app"}))
+            let name = if id == 8 { "kbot/solo" } else { "lodge/app" };
+            (StatusCode::OK, Json(json!({"id": id, "full_name": name})))
+        }
+        async fn user(State(fake): State<Arc<Fake>>) -> Json<Value> {
+            Json(json!({"login": fake.login.unwrap_or("kbot")}))
+        }
+        async fn user_jobs() -> Json<Value> {
+            Json(json!([
+                {"id": 9, "handle": "h-solo", "repo_id": 8, "runs_on": ["linux"], "status": "waiting", "name": "solo"}
+            ]))
+        }
+        async fn admin_jobs() -> Json<Value> {
+            Json(json!([
+                {"id": 1, "handle": "h-wait", "repo_id": 7, "runs_on": ["linux"], "status": "waiting", "name": "build"},
+                {"id": 9, "handle": "h-solo", "repo_id": 8, "runs_on": ["linux"], "status": "waiting", "name": "solo"}
+            ]))
+        }
+        async fn not_found() -> StatusCode {
+            StatusCode::NOT_FOUND
         }
         async fn runners(
             State(fake): State<Arc<Fake>>,
@@ -575,6 +688,11 @@ mod tests {
                 get(repo_jobs),
             )
             .route("/api/v1/repositories/{id}", get(repository))
+            .route("/api/v1/user", get(user))
+            .route("/api/v1/user/actions/runners/jobs", get(user_jobs))
+            .route("/api/v1/user/actions/runners/{id}", delete(not_found))
+            .route("/api/v1/admin/actions/runners/jobs", get(admin_jobs))
+            .route("/api/v1/admin/actions/runners/{id}", delete(not_found))
             .route(
                 "/api/v1/orgs/lodge/actions/runners",
                 get(runners).post(register),
@@ -622,6 +740,124 @@ mod tests {
         // the repo name is cached
         forge.list_queued_jobs().await.unwrap();
         assert_eq!(*fake.repo_lookups.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn user_and_org_scopes() {
+        let url = serve(Arc::new(Fake::default())).await;
+        let forge = client(&url, &["@kbot", "lodge"]);
+        forge.validate().await.unwrap();
+        let mut jobs = forge.list_queued_jobs().await.unwrap();
+        jobs.sort_by(|a, b| a.id.cmp(&b.id));
+        let found: Vec<_> = jobs
+            .iter()
+            .map(|j| {
+                (
+                    j.id.as_str(),
+                    j.repository.as_deref(),
+                    j.runner_scope.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    "h-solo",
+                    Some("kbot/solo"),
+                    RunnerScope::User {
+                        name: "kbot".into()
+                    }
+                ),
+                (
+                    "h-wait",
+                    Some("lodge/app"),
+                    RunnerScope::Organization {
+                        name: "lodge".into()
+                    }
+                ),
+            ]
+        );
+        // status checks go to the scope that owns the repository
+        assert_eq!(
+            forge.get_job_status("kbot/solo", "h-solo").await.unwrap(),
+            Some("queued".to_string())
+        );
+        assert_eq!(
+            forge.get_job_status("lodge/app", "h-wait").await.unwrap(),
+            Some("queued".to_string())
+        );
+        let user = RunnerScope::User {
+            name: "kbot".into(),
+        };
+        assert_eq!(forge.scope_url(&user), format!("{url}kbot"));
+        assert_eq!(ForgejoClient::scope_path(&user), "user");
+    }
+
+    #[tokio::test]
+    async fn user_scope_must_be_the_tokens_user() {
+        let url = serve(Arc::new(Fake {
+            login: Some("someone-else"),
+            ..Fake::default()
+        }))
+        .await;
+        let err = client(&url, &["@kbot"]).validate().await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("token belongs to 'someone-else'"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_scope_covers_everything_once() {
+        let url = serve(Arc::new(Fake::default())).await;
+        // an org scope alongside the instance lists h-wait twice; it's kept once
+        let forge = client(&url, &["*", "lodge"]);
+        forge.validate().await.unwrap();
+        let jobs = forge.list_queued_jobs().await.unwrap();
+        let mut ids: Vec<_> = jobs.iter().map(|j| j.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["h-solo", "h-wait"]);
+        assert_eq!(
+            forge.scope_url(&RunnerScope::Instance),
+            url.trim_end_matches('/')
+        );
+        assert_eq!(ForgejoClient::scope_path(&RunnerScope::Instance), "admin");
+        // a repository no configured org or user owns is asked about at the instance
+        assert_eq!(
+            client(&url, &["*"]).scope_for_repo("kbot/solo").unwrap(),
+            RunnerScope::Instance
+        );
+        assert_eq!(
+            client(&url, &["*"])
+                .get_job_status("kbot/solo", "h-solo")
+                .await
+                .unwrap(),
+            Some("queued".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn non_repo_scopes_need_repository_read() {
+        let url = serve(Arc::new(Fake {
+            no_repo_read: true,
+            ..Fake::default()
+        }))
+        .await;
+        for scopes in [&["*"][..], &["@kbot"], &["lodge"]] {
+            let err = client(&url, scopes).validate().await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("read:repository"),
+                "{scopes:?}: {err:#}"
+            );
+        }
+        // a repo scope names its repository itself
+        let fake = serve(Arc::new(Fake {
+            no_repo_read: true,
+            ..Fake::default()
+        }))
+        .await;
+        assert!(client(&fake, &["bad/repo"]).validate().await.is_err()); // 403 on its jobs, not the probe
     }
 
     #[tokio::test]

@@ -407,6 +407,19 @@ impl GitHubClient {
         match scope {
             RunnerScope::Organization { name } => name,
             RunnerScope::Repository { owner, .. } => owner,
+            RunnerScope::User { name } => name,
+            RunnerScope::Instance => "",
+        }
+    }
+
+    /// GitHub registers runners for organizations and repositories only.
+    fn require_github_scope(scope: &RunnerScope) -> Result<()> {
+        if scope.is_github_scope() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "GitHub can't register runners at {scope:?}: use an organization or repository scope"
+            ))
         }
     }
 
@@ -470,6 +483,7 @@ impl GitHubClient {
     /// Get a runner registration token for the given scope
     pub async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String> {
         // Get installation ID for this scope (auto-discovers if needed)
+        Self::require_github_scope(scope)?;
         let account = Self::scope_account(scope);
         let installation_id = self.get_installation_id(account).await?;
 
@@ -513,6 +527,7 @@ impl GitHubClient {
         labels: &[String],
         runner_group_id: u64,
     ) -> Result<String> {
+        Self::require_github_scope(scope)?;
         let account = Self::scope_account(scope);
         let installation_id = self.get_installation_id(account).await?;
         let access_token = self.get_access_token(installation_id).await?;
@@ -564,6 +579,7 @@ impl GitHubClient {
         scope: &RunnerScope,
         runner_name: &str,
     ) -> Result<Option<RunnerInfo>> {
+        Self::require_github_scope(scope)?;
         let account = Self::scope_account(scope);
         let installation_id = self.get_installation_id(account).await?;
         let access_token = self.get_access_token(installation_id).await?;
@@ -616,6 +632,7 @@ impl GitHubClient {
 
     /// Delete a runner by its ID. Ok(false) when GitHub refuses because it's running a job
     async fn try_delete_runner(&self, scope: &RunnerScope, runner_id: u64) -> Result<bool> {
+        Self::require_github_scope(scope)?;
         let account = Self::scope_account(scope);
         let installation_id = self.get_installation_id(account).await?;
         let access_token = self.get_access_token(installation_id).await?;

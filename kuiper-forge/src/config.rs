@@ -452,9 +452,17 @@ pub struct ForgejoConfig {
     #[serde(default)]
     pub token_env: Option<String>,
 
-    /// Orgs (`org`) and repositories (`owner/repo`) to poll for queued jobs and
-    /// register runners in. Forgejo tokens can't list what they can reach, so
-    /// these must be named.
+    /// Where to poll for queued jobs and register runners. Forgejo tokens can't list
+    /// what they can reach, so these must be named:
+    /// - `org`: an organization's repositories (token user owns the org,
+    ///   `write:organization`)
+    /// - `owner/repo`: one repository (token user owns it, `write:repository`)
+    /// - `@user`: every repository the user owns, not its orgs' (the token must be
+    ///   that user's, `write:user`)
+    /// - `*`: every repository on the instance (a site admin's token, `write:admin`)
+    ///
+    /// Org, user and instance scopes also need `read:repository`, to name the
+    /// repositories jobs come from.
     pub scopes: Vec<String>,
 }
 
@@ -486,17 +494,28 @@ impl ForgejoConfig {
         self.scopes
             .iter()
             .map(|scope| match scope.split('/').collect::<Vec<_>>()[..] {
-                [org] if !org.is_empty() => Ok(RunnerScope::Organization {
-                    name: org.to_string(),
+                ["*"] => Ok(RunnerScope::Instance),
+                [user] if user.len() > 1 && user.starts_with('@') => Ok(RunnerScope::User {
+                    name: user[1..].to_string(),
                 }),
-                [owner, repo] if !owner.is_empty() && !repo.is_empty() => {
+                [org] if !org.is_empty() && !org.starts_with('@') => {
+                    Ok(RunnerScope::Organization {
+                        name: org.to_string(),
+                    })
+                }
+                [owner, repo]
+                    if !owner.is_empty()
+                        && !repo.is_empty()
+                        && !owner.starts_with('@')
+                        && owner != "*" =>
+                {
                     Ok(RunnerScope::Repository {
                         owner: owner.to_string(),
                         repo: repo.to_string(),
                     })
                 }
                 _ => Err(anyhow::anyhow!(
-                    "Invalid Forgejo scope '{scope}': use 'org' or 'owner/repo'"
+                    "Invalid Forgejo scope '{scope}': use 'org', 'owner/repo', '@user' or '*'"
                 )),
             })
             .collect()
@@ -782,7 +801,7 @@ impl Default for AdminConfig {
     }
 }
 
-/// GitHub runner registration scope.
+/// Where runners are registered on a forge.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RunnerScope {
@@ -791,9 +810,25 @@ pub enum RunnerScope {
 
     /// Repository-level runner
     Repository { owner: String, repo: String },
+
+    /// User-level runner, for every repository the user owns (Forgejo only; the
+    /// token must be that user's)
+    User { name: String },
+
+    /// Instance-wide runner, for every repository on the forge (Forgejo only; needs a
+    /// site admin's token)
+    Instance,
 }
 
 impl RunnerScope {
+    /// Whether GitHub can register runners here: organizations and repositories only.
+    pub fn is_github_scope(&self) -> bool {
+        matches!(
+            self,
+            RunnerScope::Organization { .. } | RunnerScope::Repository { .. }
+        )
+    }
+
     /// Get the URL for this runner scope
     pub fn to_url(&self) -> String {
         match self {
@@ -803,6 +838,8 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("https://github.com/{owner}/{repo}")
             }
+            RunnerScope::User { name } => format!("https://github.com/{name}"),
+            RunnerScope::Instance => "https://github.com".to_string(),
         }
     }
 
@@ -815,6 +852,8 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners/generate-jitconfig")
             }
+            // not GitHub scopes; GitHubClient refuses them before building a path
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 
@@ -827,6 +866,7 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners/registration-token")
             }
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 
@@ -839,6 +879,7 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners")
             }
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 
@@ -851,6 +892,7 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners/{runner_id}")
             }
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 }
@@ -984,8 +1026,12 @@ private_key_path = "{data_dir_str}/github-app.pem"
 #
 # A Forgejo (15+) forge is polled for queued jobs, so it needs
 # [provisioning] mode = "polling". Its runners are one-job runners, on agents
-# that support them (proxmox Linux/Windows VMs, tart VMs). The token's user must own every scope: an org owner with
-# write:organization, or the repo owner with write:repository.
+# that support them (proxmox Linux/Windows VMs, tart VMs). Scopes, and what the
+# token needs:
+#   "org"         the org's repos     org owner, write:organization + read:repository
+#   "owner/repo"  one repo            repo owner, write:repository
+#   "@user"       repos the user owns the token's own user, write:user + read:repository
+#   "*"           every repo          site admin, write:admin + read:repository
 # required_labels applies to every forge: Forgejo doesn't add "self-hosted" the
 # way GitHub does, so put it in Forgejo workflows' runs-on too (or pick labels
 # both forges' workflows use), or every Forgejo job is skipped.
@@ -995,7 +1041,7 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # type = "forgejo"
 # url = "https://git.example.com"
 # token_env = "KUIPER_FORGEJO_TOKEN"   # or token_path / token
-# scopes = ["my-org", "someone/some-repo"]
+# scopes = ["my-org", "@me", "someone/some-repo"]   # or ["*"] with an admin token
 #
 # Forgejo runners whose job hasn't started after [provisioning]
 # idle_runner_timeout_secs (default 600, 0 disables) are destroyed, and the job
@@ -1532,10 +1578,51 @@ scopes = ["lodge", "jfro/kuiper-forge"]
     }
 
     #[test]
+    fn test_forgejo_user_and_instance_scopes() {
+        let forgejo = ForgejoConfig {
+            url: "https://git.example.com".into(),
+            token: Some("t".into()),
+            token_path: None,
+            token_env: None,
+            scopes: vec!["*".into(), "@jfro".into(), "lodge".into()],
+        };
+        assert_eq!(
+            forgejo.runner_scopes().unwrap(),
+            vec![
+                RunnerScope::Instance,
+                RunnerScope::User {
+                    name: "jfro".into()
+                },
+                RunnerScope::Organization {
+                    name: "lodge".into()
+                },
+            ]
+        );
+        // stored runner scopes round-trip, and old rows still parse
+        for scope in forgejo.runner_scopes().unwrap() {
+            let json = serde_json::to_string(&scope).unwrap();
+            assert_eq!(serde_json::from_str::<RunnerScope>(&json).unwrap(), scope);
+        }
+        assert_eq!(
+            serde_json::to_string(&RunnerScope::Instance).unwrap(),
+            r#"{"type":"instance"}"#
+        );
+        assert!(!RunnerScope::Instance.is_github_scope());
+    }
+
+    #[test]
     fn test_forgejo_forge_errors() {
         let polling = format!("{FORGE_BASE}\n[provisioning]\nmode = \"polling\"\n");
         // bad scopes
-        for bad in ["[]", "[\"a/b/c\"]", "[\"/repo\"]", "[\"\"]"] {
+        for bad in [
+            "[]",
+            "[\"a/b/c\"]",
+            "[\"/repo\"]",
+            "[\"\"]",
+            "[\"@\"]",
+            "[\"@me/repo\"]",
+            "[\"*/repo\"]",
+        ] {
             let entry = FORGEJO_ENTRY.replace(r#"["lodge", "jfro/kuiper-forge"]"#, bad);
             assert!(
                 parse_config(&format!("{polling}{entry}"))
