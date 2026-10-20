@@ -32,7 +32,7 @@ contents:
     file_info:
       mode: 0755
 
-  - src: packaging/proxmox-agent/kuiper-proxmox-agent.service
+  - src: kuiper-proxmox-agent/packaging/kuiper-proxmox-agent.service
     dst: /usr/lib/systemd/system/kuiper-proxmox-agent.service
 
   # Reference config showing every option. The live config in /etc is created by
@@ -41,6 +41,6 @@ contents:
     dst: /usr/share/doc/kuiper-proxmox-agent/config.example.toml
 
 scripts:
-  postinstall: packaging/proxmox-agent/scripts/postinstall.sh
-  preremove: packaging/proxmox-agent/scripts/preremove.sh
-  postremove: packaging/proxmox-agent/scripts/postremove.sh
+  postinstall: kuiper-proxmox-agent/packaging/scripts/postinstall.sh
+  preremove: kuiper-proxmox-agent/packaging/scripts/preremove.sh
+  postremove: kuiper-proxmox-agent/packaging/scripts/postremove.sh

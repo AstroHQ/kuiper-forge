@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 RUN groupadd --system kuiper && useradd --system --gid kuiper --create-home kuiper
 
 COPY --from=builder /src/target/release/kuiper-forge /usr/local/bin/kuiper-forge
-COPY docker/kuiper-forge/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY kuiper-forge/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 RUN mkdir -p /data && chown kuiper:kuiper /data

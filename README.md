@@ -87,7 +87,7 @@ The proxmox agent can be packaged with [nfpm](https://nfpm.goreleaser.com). The
 package installs the binary to `/usr/bin`, a `--system` systemd unit to
 `/usr/lib/systemd/system`, and (via maintainer scripts) creates a dedicated
 `kuiper` user plus `/etc`, `/var/lib`, and `/var/log` directories. Config is
-defined in `packaging/proxmox-agent/`.
+defined in `kuiper-proxmox-agent/packaging/`.
 
 `.deb` and `.rpm` (x86_64 and arm64) are built and attached automatically to
 `kuiper-proxmox-agent-v*` GitHub releases — grab them from the release page. To
@@ -159,6 +159,19 @@ One coordinator can serve several forges via `[[forges]]`. Forgejo support is in
 
 ```bash
 cargo build --release
+```
+
+## Releasing
+
+Releases are handled by [release-plz](https://release-plz.dev) (config in `release-plz.toml`).
+Every push to `main` updates a release PR that bumps versions and changelogs for the crates
+with `feat`/`fix`/`perf`/`refactor` commits since their last release. Merging it publishes
+those crates to crates.io and tags them, and the tags kick off the binary and Docker builds.
+
+To preview locally what the next release PR would contain:
+
+```bash
+GIT_TOKEN=$(gh auth token) mise x -- release-plz update  # then discard the changes
 ```
 
 ## Similar projects

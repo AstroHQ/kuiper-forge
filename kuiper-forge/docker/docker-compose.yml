@@ -16,7 +16,7 @@ services:
   kuiper-forge:
     build:
       context: ../..
-      dockerfile: docker/kuiper-forge/Dockerfile
+      dockerfile: kuiper-forge/docker/Dockerfile
       args:
         DB_BACKEND: postgres
     depends_on:
