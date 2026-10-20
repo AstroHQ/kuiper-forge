@@ -166,7 +166,7 @@ jobs:
               -v "$PWD":/work -w /work \
               -e VERSION -e ARCH \
               ghcr.io/goreleaser/nfpm:latest \
-              package --config packaging/proxmox-agent/nfpm.yaml --packager "$pkg" --target target/packages
+              package --config kuiper-proxmox-agent/packaging/nfpm.yaml --packager "$pkg" --target target/packages
           done
 
           # Move packages to the repo root so they upload flat (no target/packages/
