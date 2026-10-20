@@ -13,6 +13,8 @@ use std::time::Duration;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::forge::RunnerKind;
+
 /// Type of agent (Tart for macOS, Proxmox for Windows/Linux)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentType {
@@ -77,6 +79,8 @@ pub struct AgentCapacity {
     pub label_set_ids: Vec<String>,
     /// Index of the set for the agent's default resource. None from older agents
     pub default_set: Option<usize>,
+    /// Runner programs the agent can start besides GitHub's, like "forgejo". Empty from older agents
+    pub runner_kinds: Vec<String>,
 }
 
 impl From<&kuiper_agent_proto::AgentStatus> for AgentCapacity {
@@ -91,6 +95,7 @@ impl From<&kuiper_agent_proto::AgentStatus> for AgentCapacity {
             label_set_pools: status.label_sets.iter().map(|ls| ls.pool_size).collect(),
             label_set_ids: status.label_sets.iter().map(|ls| ls.id.clone()).collect(),
             default_set: status.label_sets.iter().position(|ls| ls.is_default),
+            runner_kinds: status.runner_kinds.clone(),
         }
     }
 }
@@ -143,6 +148,9 @@ pub struct ConnectedAgent {
     /// Index of the set for the agent's default resource
     default_set: Option<usize>,
 
+    /// Runner programs the agent can start besides GitHub's, like "forgejo"
+    runner_kinds: Vec<String>,
+
     /// Reserved slots by runner name: commands sent whose VM isn't in the agent's status yet. This prevents
     /// over-scheduling when sending multiple commands quickly. An entry goes when its runner is released or its VM
     /// shows up, so releasing a runner that already has a VM can't free someone else's slot
@@ -194,6 +202,7 @@ impl ConnectedAgent {
             label_set_pools: Vec::new(),
             label_set_ids: Vec::new(),
             default_set: None,
+            runner_kinds: Vec::new(),
             reservations: HashMap::new(),
             labels,
             label_sets,
@@ -329,6 +338,15 @@ impl ConnectedAgent {
     /// Returns true if the agent sets its own fixed-capacity pools per label set.
     pub fn has_explicit_pools(&self) -> bool {
         self.label_set_pools.iter().any(Option::is_some)
+    }
+
+    /// Whether this agent can start `kind` runners. Every agent runs GitHub's.
+    pub fn runs(&self, kind: RunnerKind) -> bool {
+        kind == RunnerKind::GitHub
+            || self
+                .runner_kinds
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(kind.as_str()))
     }
 
     /// Returns true if the agent is part of the legacy pool with these (normalized) labels.
@@ -582,6 +600,17 @@ impl AgentRegistry {
     /// the first match biased everything onto whichever agent happened to hash first.
     pub async fn select_agent(&self, labels: &[String], avoid: &[String]) -> Option<String> {
         self.select_agent_where(labels, avoid, |_| true).await
+    }
+
+    /// Like [`select_agent`](Self::select_agent), among agents that can start `kind` runners.
+    pub async fn select_agent_for_kind(
+        &self,
+        labels: &[String],
+        avoid: &[String],
+        kind: RunnerKind,
+    ) -> Option<String> {
+        self.select_agent_where(labels, avoid, |a| a.runs(kind))
+            .await
     }
 
     /// Pick the least loaded member of the legacy pool with these (normalized) labels that has a free slot.
@@ -864,6 +893,7 @@ impl AgentRegistry {
                 || agent.label_set_pools != capacity.label_set_pools
                 || agent.label_set_ids != capacity.label_set_ids
                 || agent.default_set != capacity.default_set
+                || agent.runner_kinds != capacity.runner_kinds
             {
                 debug!(agent_id = %agent_id, capacity = ?capacity, "Agent capacity changed");
 
@@ -872,6 +902,7 @@ impl AgentRegistry {
                 agent.label_set_pools = capacity.label_set_pools;
                 agent.label_set_ids = capacity.label_set_ids;
                 agent.default_set = capacity.default_set;
+                agent.runner_kinds = capacity.runner_kinds;
             }
         }
     }
@@ -2040,6 +2071,56 @@ mod tests {
         assert_eq!(
             registry.select_agent(&labels, &[]).await,
             Some("busy".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_select_agent_for_kind_needs_advertised_kind() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        for id in ["a", "b"] {
+            registry
+                .register(
+                    id.to_string(),
+                    AgentType::Proxmox,
+                    format!("{id}.local"),
+                    2,
+                    0,
+                    vec!["linux".to_string()],
+                    vec![],
+                    tx.clone(),
+                )
+                .await;
+        }
+        let labels = ["linux".to_string()];
+        // nobody advertises forgejo yet (older agents)
+        assert_eq!(
+            registry
+                .select_agent_for_kind(&labels, &[], RunnerKind::Forgejo)
+                .await,
+            None
+        );
+        registry
+            .set_capacity(
+                "b",
+                AgentCapacity {
+                    runner_kinds: vec!["forgejo".to_string()],
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(
+            registry
+                .select_agent_for_kind(&labels, &[], RunnerKind::Forgejo)
+                .await,
+            Some("b".to_string())
+        );
+        // every agent runs GitHub's runner
+        assert_eq!(
+            registry
+                .select_agent_for_kind(&labels, &[], RunnerKind::GitHub)
+                .await,
+            Some("a".to_string())
         );
     }
 

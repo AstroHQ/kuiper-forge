@@ -10,6 +10,8 @@
 use crate::config::{SshConfig, VmConfig};
 use crate::error::{Error, Result};
 use crate::ssh::{RunnerConfigBuilder, SshClient, SshSession};
+use kuiper_agent_lib::forgejo_runner;
+use kuiper_agent_proto::ForgejoRunner;
 use kuiper_proxmox_api::ProxmoxVEAPI;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +26,8 @@ pub struct RunnerParams<'a> {
     pub runner_scope_url: &'a str,
     pub runner_name: &'a str,
     pub jit_config: &'a str,
+    /// Set for Forgejo jobs: run `forgejo-runner one-job` instead of the GitHub runner
+    pub forgejo: Option<&'a ForgejoRunner>,
 }
 
 /// Information about a running VM.
@@ -260,6 +264,7 @@ impl VmManager {
             runner_scope_url,
             runner_name,
             jit_config,
+            forgejo,
         } = params;
         // Update state
         if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
@@ -314,6 +319,13 @@ impl VmManager {
                     warn!("Time sync command failed on VM {}: {}", vmid, e);
                 }
             }
+        }
+
+        if let Some(forgejo) = forgejo {
+            self.run_forgejo_job(vmid, &mut session, forgejo, labels, is_windows)
+                .await?;
+            session.close().await?;
+            return Ok((is_windows, shell_is_powershell));
         }
 
         // Build runner commands
@@ -404,7 +416,9 @@ impl VmManager {
                 vmid,
                 jit_config.len()
             );
-            let write_output = session.execute(&write_cmd).await?;
+            let write_output = session
+                .execute_secret(&write_cmd, "write JIT config")
+                .await?;
             if write_output.exit_code != 0 {
                 error!(
                     local_only = tracing::field::Empty,
@@ -446,7 +460,9 @@ impl VmManager {
                 builder.config_command(runner_scope_url, registration_token, labels, runner_name);
 
             info!("Running configuration command on VM {}", vmid);
-            let output = session.execute(&config_cmd).await?;
+            let output = session
+                .execute_secret(&config_cmd, "config.sh (registration token)")
+                .await?;
             if output.exit_code != 0 {
                 error!(
                     local_only = tracing::field::Empty,
@@ -482,7 +498,7 @@ impl VmManager {
             vmid
         );
         let run_start = Instant::now();
-        let output = session.execute(&run_cmd).await?;
+        let output = self.execute_runner(&mut session, &run_cmd, vmid).await?;
         let run_elapsed = run_start.elapsed();
 
         info!(
@@ -594,13 +610,215 @@ impl VmManager {
         Ok((is_windows, shell_is_powershell))
     }
 
-    /// Destroy a VM.
-    pub async fn destroy_vm(&self, vmid: u32) -> Result<()> {
-        info!("Destroying VM {}", vmid);
+    /// Install forgejo-runner if needed, then run one Forgejo job attempt and wait for it.
+    ///
+    /// Linux VMs use `~/forgejo-runner` and bash; Windows VMs use `C:\forgejo-runner` and
+    /// PowerShell scripts sent with `-EncodedCommand`, which work from cmd.exe and
+    /// PowerShell SSH shells alike.
+    async fn run_forgejo_job(
+        &self,
+        vmid: u32,
+        session: &mut SshSession,
+        forgejo: &ForgejoRunner,
+        labels: &[String],
+        is_windows: bool,
+    ) -> Result<()> {
+        let win_dir = forgejo_runner::WINDOWS_RUNNER_DIR;
+        let check_cmd = if is_windows {
+            forgejo_runner::windows_check_installed_command(win_dir)
+        } else {
+            forgejo_runner::check_installed_command()
+        };
+        let check = session.execute(&check_cmd).await?;
+        if check.stdout.trim() != "installed" {
+            let version =
+                forgejo_runner::resolve_version(&self.vm_config.forgejo_runner_version).to_string();
+            let (os, arch) = if is_windows {
+                // like the GitHub runner path: x64 Windows only for now
+                (
+                    forgejo_runner::Os::Windows,
+                    crate::ssh::github_runner::Arch::X64,
+                )
+            } else {
+                let uname = session.execute("uname -m").await?;
+                let arch = crate::ssh::github_runner::Arch::from_uname(&uname.stdout).ok_or_else(
+                    || {
+                        Error::runner(format!(
+                            "forgejo-runner has no release for architecture '{}'",
+                            uname.stdout.trim()
+                        ))
+                    },
+                )?;
+                (forgejo_runner::Os::Linux, arch)
+            };
+            let url = forgejo_runner::download_url(
+                &self.vm_config.forgejo_runner_url,
+                &version,
+                os,
+                arch,
+            );
+            info!(
+                "forgejo-runner not installed on VM {}, installing v{} ({}) from {}...",
+                vmid,
+                version,
+                arch.as_str(),
+                url
+            );
+            let install_cmd = if is_windows {
+                forgejo_runner::windows_install_command(&url, win_dir)
+            } else {
+                forgejo_runner::install_command(&url, &version, os, arch)
+            };
+            let install = session.execute(&install_cmd).await?;
+            if install.exit_code != 0 {
+                error!(
+                    local_only = tracing::field::Empty,
+                    "forgejo-runner installation failed on VM {}: stdout={}, stderr={}",
+                    vmid,
+                    install.stdout,
+                    install.stderr
+                );
+                return Err(Error::runner(format!(
+                    "Failed to install forgejo-runner v{version} (exit code {})",
+                    install.exit_code
+                )));
+            }
+            info!(
+                local_only = tracing::field::Empty,
+                "forgejo-runner installed on VM {}: {}",
+                vmid,
+                install.stdout.trim()
+            );
+        } else {
+            debug!("forgejo-runner already installed on VM {}", vmid);
+        }
 
-        // Update state
+        let job = forgejo_runner::OneJob {
+            instance_url: &forgejo.instance_url,
+            uuid: &forgejo.uuid,
+            token: &forgejo.token,
+            handle: &forgejo.handle,
+            labels,
+        };
+        let prepare = if is_windows {
+            forgejo_runner::windows_prepare_command(&job, win_dir)
+        } else {
+            forgejo_runner::prepare_command(&job)
+        }
+        .map_err(Error::runner)?;
+        let prepared = session
+            .execute_secret(&prepare, "write forgejo-runner job files (runner token)")
+            .await?;
+        if prepared.exit_code != 0 {
+            error!(
+                local_only = tracing::field::Empty,
+                "Writing forgejo-runner job files failed on VM {}: {}",
+                vmid,
+                prepared.stderr.trim()
+            );
+            return Err(Error::runner(format!(
+                "Failed to write forgejo-runner job files (exit code {})",
+                prepared.exit_code
+            )));
+        }
+
         if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
-            vm.state = VmState::Destroying;
+            vm.state = VmState::RunnerActive;
+        }
+        info!(
+            "Running forgejo-runner one-job on VM {} for handle {} (will block until the job completes)",
+            vmid, forgejo.handle
+        );
+        let started = Instant::now();
+        let run_cmd = if is_windows {
+            forgejo_runner::windows_run_command(win_dir)
+        } else {
+            forgejo_runner::run_command()
+        };
+        let output = self.execute_runner(session, &run_cmd, vmid).await?;
+        let elapsed = started.elapsed();
+        info!(
+            "forgejo-runner on VM {} exited with code {} in {:.1}s",
+            vmid,
+            output.exit_code,
+            elapsed.as_secs_f64()
+        );
+        // forgejo-runner logs to stderr; keep the tail of both for diagnosis
+        let tail = |s: &str| {
+            let skip = s.chars().count().saturating_sub(4000);
+            s.chars().skip(skip).collect::<String>()
+        };
+        if !output.stdout.is_empty() {
+            info!(
+                local_only = tracing::field::Empty,
+                "forgejo-runner stdout (VM {}): {}",
+                vmid,
+                tail(output.stdout.trim())
+            );
+        }
+        if !output.stderr.is_empty() {
+            info!(
+                local_only = tracing::field::Empty,
+                "forgejo-runner stderr (VM {}): {}",
+                vmid,
+                tail(output.stderr.trim())
+            );
+        }
+        if output.exit_code != 0 {
+            warn!(
+                "forgejo-runner on VM {} failed after {:.1}s (exit {}) for handle {}",
+                vmid,
+                elapsed.as_secs_f64(),
+                output.exit_code,
+                forgejo.handle
+            );
+            return Err(Error::runner(format!(
+                "forgejo-runner exited with code {}",
+                output.exit_code
+            )));
+        }
+        Ok(())
+    }
+
+    /// Destroy one of this agent's VMs.
+    ///
+    /// `name` is the VM's name when it was created. The destroy only goes ahead if this agent
+    /// still tracks `vmid` under that name and nothing else is already destroying it, and
+    /// Proxmox's name for the VMID matches too. Once a VM has been destroyed (say by an idle
+    /// teardown) Proxmox can hand its VMID to a new clone, so a late destroy by bare VMID could
+    /// otherwise delete someone else's VM.
+    pub async fn destroy_vm(&self, vmid: u32, name: &str) -> Result<()> {
+        if !self.claim_for_destroy(vmid, name).await {
+            return Ok(());
+        }
+        info!("Destroying VM {} ({})", vmid, name);
+        let started = Instant::now();
+
+        // make sure Proxmox still has our VM under this VMID before stopping or deleting it
+        match self.proxmox.get_vm_status(vmid).await {
+            Ok(status) => {
+                if let Some(actual) = status.name.as_deref()
+                    && actual != name
+                {
+                    error!(
+                        "Not destroying VMID {}: Proxmox names it '{}' but this agent created '{}' \
+                         there; dropping it from tracking",
+                        vmid, actual, name
+                    );
+                    self.untrack(vmid, name).await;
+                    return Err(Error::vm(format!(
+                        "VMID {vmid} is now '{actual}', not '{name}'; refusing to destroy it"
+                    )));
+                }
+            }
+            Err(e) => {
+                // the VM may already be gone, or the API is having a moment; we still track it
+                // under this name, so carry on and let stop/delete report what they find
+                warn!(
+                    "Couldn't read VM {} ({}) status before destroying it: {}",
+                    vmid, name, e
+                );
+            }
         }
 
         // Try to stop the VM first (graceful shutdown)
@@ -621,46 +839,151 @@ impl VmManager {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Delete the VM
-        match self.proxmox.delete_vm(vmid).await {
-            Ok(task) => {
-                self.proxmox.wait_for_task(&task).await?;
-            }
+        let result = match self.proxmox.delete_vm(vmid).await {
+            Ok(task) => self.proxmox.wait_for_task(&task).await.map_err(|e| {
+                error!("Delete task for VM {} ({}) failed: {}", vmid, name, e);
+                Error::from(e)
+            }),
             Err(e) => {
-                error!("Failed to delete VM {}: {}", vmid, e);
+                error!("Failed to delete VM {} ({}): {}", vmid, name, e);
                 // Remove from tracking even on failure
+                Ok(())
+            }
+        };
+
+        self.untrack(vmid, name).await;
+        info!(
+            "VM {} ({}) destroyed in {:.1}s",
+            vmid,
+            name,
+            started.elapsed().as_secs_f64()
+        );
+        result
+    }
+
+    /// Mark `vmid` as being destroyed if this agent still tracks it under `name` and no other
+    /// destroy has it. Returns false (and logs why) when the destroy should be skipped.
+    async fn claim_for_destroy(&self, vmid: u32, name: &str) -> bool {
+        let mut vms = self.active_vms.write().await;
+        match vms.get_mut(&vmid) {
+            Some(vm) if vm.name != name => {
+                info!(
+                    "Skipping destroy of VM {} ({}): that VMID now belongs to {}",
+                    vmid, name, vm.name
+                );
+                false
+            }
+            Some(vm) if vm.state == VmState::Destroying => {
+                debug!(
+                    "Skipping destroy of VM {} ({}): already being destroyed",
+                    vmid, name
+                );
+                false
+            }
+            Some(vm) => {
+                vm.state = VmState::Destroying;
+                true
+            }
+            None => {
+                debug!(
+                    "Skipping destroy of VM {} ({}): no longer tracked (already destroyed)",
+                    vmid, name
+                );
+                false
             }
         }
+    }
 
-        // Remove from tracking
-        self.active_vms.write().await.remove(&vmid);
-        self.state_changed.notify_one();
+    /// Stop tracking `vmid`, but only if it's still the VM named `name`.
+    async fn untrack(&self, vmid: u32, name: &str) {
+        let mut vms = self.active_vms.write().await;
+        if vms.get(&vmid).is_some_and(|vm| vm.name == name) {
+            vms.remove(&vmid);
+            drop(vms);
+            self.state_changed.notify_one();
+        }
+    }
 
-        info!("VM {} destroyed", vmid);
-        Ok(())
+    /// Run the runner's blocking command, giving up if the VM is torn down meanwhile (an idle
+    /// teardown or DestroyRunner), so the lifecycle always ends and reports Completed/Failed.
+    async fn execute_runner(
+        &self,
+        session: &mut SshSession,
+        command: &str,
+        vmid: u32,
+    ) -> Result<crate::ssh::CommandOutput> {
+        let Some(name) = self
+            .active_vms
+            .read()
+            .await
+            .get(&vmid)
+            .map(|vm| vm.name.clone())
+        else {
+            return Err(Error::vm(format!(
+                "VM {vmid} was destroyed before its runner started"
+            )));
+        };
+        tokio::select! {
+            output = session.execute(command) => output,
+            () = self.torn_down(vmid, &name) => {
+                warn!("VM {} ({}) was destroyed while its runner was running", vmid, name);
+                Err(Error::vm(format!(
+                    "VM {vmid} ({name}) was destroyed while its runner was running"
+                )))
+            }
+        }
+    }
+
+    /// Resolves once `vmid` is no longer this agent's running VM `name` (destroyed, or being
+    /// destroyed). Checked every 5s.
+    async fn torn_down(&self, vmid: u32, name: &str) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let running = self
+                .active_vms
+                .read()
+                .await
+                .get(&vmid)
+                .is_some_and(|vm| vm.name == name && vm.state != VmState::Destroying);
+            if !running {
+                return;
+            }
+        }
     }
 
     /// Force destroy a VM by ID string.
+    ///
+    /// `vm_id` is the Proxmox VMID or the VM's name (what the coordinator calls the runner).
     pub async fn force_destroy(&self, vm_id: &str) -> Result<()> {
-        let vmid: u32 = vm_id
-            .parse()
-            .map_err(|_| Error::vm(format!("Invalid VM ID: {vm_id}")))?;
+        let found = {
+            let vms = self.active_vms.read().await;
+            match vm_id.parse::<u32>() {
+                Ok(vmid) => vms.get(&vmid).map(|vm| (vmid, vm.name.clone())),
+                Err(_) => vms
+                    .iter()
+                    .find(|(_, vm)| vm.name == vm_id)
+                    .map(|(vmid, vm)| (*vmid, vm.name.clone())),
+            }
+        };
+        let (vmid, name) = found
+            .ok_or_else(|| Error::vm(format!("No VM with ID or name '{vm_id}' on this agent")))?;
 
-        self.destroy_vm(vmid).await
+        self.destroy_vm(vmid, &name).await
     }
 
     /// Cleanup stale VMs that have exceeded the maximum age.
     pub async fn cleanup_stale_vms(&self, max_age: Duration) {
-        let stale_vms: Vec<u32> = {
+        let stale_vms: Vec<(u32, String)> = {
             let vms = self.active_vms.read().await;
             vms.iter()
                 .filter(|(_, instance)| instance.created_at.elapsed() > max_age)
-                .map(|(vmid, _)| *vmid)
+                .map(|(vmid, instance)| (*vmid, instance.name.clone()))
                 .collect()
         };
 
-        for vmid in stale_vms {
-            warn!("Cleaning up stale VM: {}", vmid);
-            if let Err(e) = self.destroy_vm(vmid).await {
+        for (vmid, name) in stale_vms {
+            warn!("Cleaning up stale VM: {} ({})", vmid, name);
+            if let Err(e) = self.destroy_vm(vmid, &name).await {
                 error!("Failed to cleanup stale VM {}: {}", vmid, e);
             }
         }
@@ -668,7 +991,12 @@ impl VmManager {
 
     /// Destroy all active VMs (used during shutdown).
     pub async fn destroy_all_vms(&self) {
-        let vmids: Vec<u32> = { self.active_vms.read().await.keys().copied().collect() };
+        let vmids: Vec<(u32, String)> = {
+            let vms = self.active_vms.read().await;
+            vms.iter()
+                .map(|(vmid, vm)| (*vmid, vm.name.clone()))
+                .collect()
+        };
 
         if vmids.is_empty() {
             info!("No active VMs to clean up");
@@ -676,9 +1004,8 @@ impl VmManager {
         }
 
         info!("Destroying {} active VM(s)...", vmids.len());
-        for vmid in vmids {
-            info!("Destroying VM {}", vmid);
-            if let Err(e) = self.destroy_vm(vmid).await {
+        for (vmid, name) in vmids {
+            if let Err(e) = self.destroy_vm(vmid, &name).await {
                 error!("Failed to destroy VM {}: {}", vmid, e);
             }
         }
@@ -765,8 +1092,9 @@ impl VmManager {
             error!("Lifecycle failed, cleaning up VM {}: {}", vmid, e);
         }
 
-        // Destroy VM (ignore errors during cleanup)
-        let _ = self.destroy_vm(vmid).await;
+        // Destroy VM (ignore errors during cleanup). A no-op if an idle teardown already
+        // destroyed it: by then its VMID may belong to another runner's clone.
+        let _ = self.destroy_vm(vmid, vm_name).await;
 
         result
     }
@@ -787,7 +1115,7 @@ impl VmManager {
         match &result {
             Ok(_) => {
                 // Success — clean up normally
-                let _ = self.destroy_vm(vmid).await;
+                let _ = self.destroy_vm(vmid, vm_name).await;
             }
             Err(e) => {
                 error!(
@@ -831,5 +1159,91 @@ mod tests {
         assert_eq!(VmState::Running.as_str(), "running");
         assert_eq!(VmState::RunnerActive.as_str(), "runner_active");
         assert_eq!(VmState::Destroying.as_str(), "destroying");
+    }
+
+    /// A manager whose Proxmox API is unreachable (connections are refused right away).
+    fn test_manager() -> VmManager {
+        let proxmox = ProxmoxVEAPI::new(
+            "root@pam",
+            kuiper_proxmox_api::ProxmoxAuth::password("x"),
+            "http://127.0.0.1:1/",
+            false,
+        )
+        .unwrap();
+        let vm_config: VmConfig =
+            toml::from_str("template_vmid = 9000\nstorage = \"local\"").unwrap();
+        let ssh_config: SshConfig = toml::from_str("").unwrap();
+        VmManager::new(Arc::new(proxmox), vm_config, ssh_config)
+    }
+
+    async fn track(manager: &VmManager, vmid: u32, name: &str) {
+        manager.active_vms.write().await.insert(
+            vmid,
+            VmInstance {
+                vmid,
+                name: name.to_string(),
+                ip_address: None,
+                state: VmState::RunnerActive,
+                created_at: Instant::now(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn test_destroy_after_force_destroy_is_noop() {
+        let manager = test_manager();
+        track(&manager, 120, "runner-a").await;
+
+        // idle teardown by name frees VMID 120
+        manager.force_destroy("runner-a").await.unwrap();
+        assert!(manager.list_vms().await.is_empty());
+
+        // Proxmox hands 120 to another runner's clone
+        track(&manager, 120, "runner-b").await;
+
+        // runner-a's lifecycle task finishes and cleans up: it must leave runner-b alone
+        manager.destroy_vm(120, "runner-a").await.unwrap();
+        let vms = manager.list_vms().await;
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0].name, "runner-b");
+        assert_eq!(vms[0].state, VmState::RunnerActive);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_torn_down_fires_on_teardown_or_reuse() {
+        let manager = test_manager();
+        track(&manager, 123, "runner-d").await;
+        let still_running =
+            tokio::time::timeout(Duration::from_secs(60), manager.torn_down(123, "runner-d")).await;
+        assert!(still_running.is_err(), "a running VM isn't torn down");
+
+        manager.claim_for_destroy(123, "runner-d").await;
+        tokio::time::timeout(Duration::from_secs(10), manager.torn_down(123, "runner-d"))
+            .await
+            .expect("a VM being destroyed counts as torn down");
+
+        manager.active_vms.write().await.clear();
+        track(&manager, 123, "runner-e").await;
+        tokio::time::timeout(Duration::from_secs(10), manager.torn_down(123, "runner-d"))
+            .await
+            .expect("a reused VMID counts as torn down");
+    }
+
+    #[tokio::test]
+    async fn test_destroy_untracked_is_noop() {
+        let manager = test_manager();
+        manager.destroy_vm(121, "gone").await.unwrap();
+        assert!(manager.list_vms().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_destroy_skips_vm_already_being_destroyed() {
+        let manager = test_manager();
+        track(&manager, 122, "runner-c").await;
+        assert!(manager.claim_for_destroy(122, "runner-c").await);
+        // a second destroy while the first is in flight does nothing
+        assert!(!manager.claim_for_destroy(122, "runner-c").await);
+        manager.destroy_vm(122, "runner-c").await.unwrap();
+        assert_eq!(manager.list_vms().await[0].state, VmState::Destroying);
     }
 }

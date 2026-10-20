@@ -118,6 +118,18 @@ pub struct VmConfig {
     /// GitHub Actions runner version to install (e.g., "2.321.0")
     #[serde(default = "default_runner_version")]
     pub runner_version: String,
+    /// forgejo-runner version to install on Linux VMs for Forgejo jobs (e.g., "13.2.0", at least 13.1.0).
+    /// "latest" means the version this agent release pins, since builds come from kuiper-forge's releases
+    #[serde(default = "default_runner_version")]
+    pub forgejo_runner_version: String,
+    /// Where to download forgejo-runner from: a URL template with `{version}`, `{os}`, `{arch}` and `{ext}`,
+    /// with a `.sha256` next to each binary. Defaults to kuiper-forge's GitHub releases
+    #[serde(default = "default_forgejo_runner_url")]
+    pub forgejo_runner_url: String,
+}
+
+fn default_forgejo_runner_url() -> String {
+    kuiper_agent_lib::forgejo_runner::DEFAULT_URL_TEMPLATE.to_string()
 }
 
 fn default_linked_clone() -> bool {
@@ -403,6 +415,8 @@ impl Config {
                 clone_timeout_secs: default_clone_timeout(),
                 template_mappings: vec![],
                 runner_version: default_runner_version(),
+                forgejo_runner_version: default_runner_version(),
+                forgejo_runner_url: default_forgejo_runner_url(),
             },
             ssh: SshConfig {
                 private_key_path: None, // User must set

@@ -79,6 +79,15 @@ max_total_vms = 5
 # runner_version = "latest"
 # runner_version = "2.321.0"
 
+# forgejo-runner for Forgejo jobs (default: "latest")
+#   - "latest": the version this agent release pins (builds come from
+#     kuiper-forge's forgejo-runner-v* GitHub releases, not upstream)
+#   - Specific version: "13.2.0" (at least 13.1.0, for one-job --handle)
+# forgejo_runner_version = "latest"
+# Download URL template ({version}, {os}, {arch}, {ext}); a .sha256 must sit next to
+# each binary. Default: kuiper-forge's GitHub releases
+# forgejo_runner_url = "https://github.com/AstroHQ/kuiper-forge/releases/download/forgejo-runner-v{version}/forgejo-runner-{version}-{os}-{arch}{ext}"
+
 # Image mappings for label-based VM image selection
 # When a job requests runners with specific labels, the first matching mapping
 # determines which Tart image to use. A mapping matches if ALL its labels

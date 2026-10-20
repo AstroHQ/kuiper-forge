@@ -192,6 +192,8 @@ pub fn blank_config(coordinator: config::CoordinatorConfig, tls: config::TlsConf
             shared_cache_dir: None,
             ssh: config::SshAuthConfig::default(),
             runner_version: "latest".to_string(),
+            forgejo_runner_version: "latest".to_string(),
+            forgejo_runner_url: kuiper_agent_lib::forgejo_runner::DEFAULT_URL_TEMPLATE.to_string(),
             image_mappings: vec![],
         },
         cleanup: config::CleanupConfig::default(),

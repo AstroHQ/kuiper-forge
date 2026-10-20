@@ -6,7 +6,7 @@
 //! - Getting registration tokens from GitHub (or mock provider in dry-run mode)
 //! - Recovering runners when agents reconnect after coordinator restart
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -15,16 +15,80 @@ use uuid::Uuid;
 
 use kuiper_agent_proto::{
     AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand,
-    DestroyRunnerCommand, RunnerEvent, RunnerEventType,
+    DestroyRunnerCommand, ForgejoRunner, RunnerEvent, RunnerEventType,
 };
 
 use crate::agent_failures::{AgentFailureStore, FailureKind};
 use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
-use crate::forge::{Forge, ForgeRegistry, IdleRemoval, JobKey};
+use crate::forge::{Forge, ForgeRegistry, IdleRemoval, JobKey, RunnerKind, RunnerLaunch};
 use crate::pending_jobs::{PendingJobInfo, PendingJobStore};
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{WebhookEvent, WebhookNotifier};
+
+/// How often webhook mode scans forges for queued jobs it missed.
+pub const RECOVERY_SCAN_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Longest wait before a job whose runner sat idle gets another one.
+const MAX_IDLE_BACKOFF: Duration = Duration::from_secs(3600);
+
+/// How long a destroy command for an idle runner may go unanswered before it's sent again.
+const IDLE_DESTROY_RETRY: Duration = Duration::from_secs(120);
+
+/// How long late events for a torn-down idle runner are ignored.
+const TORN_DOWN_MEMORY: Duration = Duration::from_secs(600);
+
+/// What to do with a job-bound runner past the idle timeout, from its job's status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleAction {
+    /// The job is running: the runner isn't idle, stop checking it.
+    Started,
+    /// The job is still waiting (or gone, e.g. cancelled): the runner can't do anything, destroy it.
+    TearDown,
+    /// Couldn't tell, or the job is finishing: leave it and check next time.
+    Wait,
+}
+
+fn idle_action(status: &anyhow::Result<Option<String>>) -> IdleAction {
+    match status {
+        Ok(Some(s)) if s == "in_progress" => IdleAction::Started,
+        Ok(Some(s)) if s == "queued" => IdleAction::TearDown,
+        Ok(None) => IdleAction::TearDown,
+        Ok(Some(_)) | Err(_) => IdleAction::Wait,
+    }
+}
+
+/// The delay before a job gets another runner after an idle teardown: the idle
+/// timeout the first time, doubling each time after, at most [`MAX_IDLE_BACKOFF`].
+fn next_idle_backoff(previous: Option<Duration>, timeout: Duration) -> Duration {
+    match previous {
+        None => timeout,
+        Some(delay) => delay * 2,
+    }
+    .min(MAX_IDLE_BACKOFF)
+}
+
+/// In-memory bookkeeping for idle job-bound runners. Lost on restart, which at worst
+/// means one more runner for a job that's being held back.
+#[derive(Default)]
+struct IdleRunners {
+    /// Runners whose job was seen running: not idle, not checked again
+    started: HashSet<String>,
+    /// Runners being destroyed for idling, and when the destroy was sent. Their
+    /// events aren't failures
+    tearing_down: HashMap<String, std::time::Instant>,
+    /// Runners recently torn down for idling, so their late events (the agent sends
+    /// one for the killed job and one for the destroy) aren't recorded as failures
+    torn_down: HashMap<String, std::time::Instant>,
+    /// Jobs whose runner idled: not given a new runner before `until`
+    backoff: HashMap<JobKey, IdleBackoff>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IdleBackoff {
+    until: std::time::Instant,
+    delay: Duration,
+}
 
 /// How long a pool runner on an unavailable agent may stay unregistered before it's destroyed anyway. A runner
 /// that's still booting registers well within this, then gets drained as idle.
@@ -146,14 +210,14 @@ impl FleetNotifier {
     }
 }
 
-/// What GitHub says about a job after the runner we made for it finished.
+/// What the forge says about a job after the runner we made for it finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JobCheck {
     /// Still queued: the runner ran some other same-label job, ours needs a new runner.
     Queued,
     /// Running, finished, or gone: safe to drop the pending record.
     Done,
-    /// GitHub didn't answer: keep the record, the periodic verify settles it.
+    /// The forge didn't answer: keep the record, the periodic verify settles it.
     Unknown,
 }
 
@@ -184,7 +248,7 @@ async fn check_job_after_runner(
 pub struct FleetManager {
     /// Configuration
     config: Config,
-    /// Forges runners register with (GitHub API or mock), by configured name
+    /// Forges runners register with (GitHub/Forgejo API or mock), by configured name
     forges: Arc<ForgeRegistry>,
     /// Agent registry for sending commands
     agent_registry: Arc<AgentRegistry>,
@@ -207,6 +271,8 @@ pub struct FleetManager {
     /// Agents already warned about label sets that fixed-capacity provisioning
     /// can't pre-create. Warn once per agent to avoid log spam on each reconcile.
     warned_capability_agents: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Idle job-bound runners being watched or torn down, and jobs backing off
+    idle: std::sync::Mutex<IdleRunners>,
     /// Drained runners we sent DestroyRunner for, and when, so it isn't resent every reconcile
     draining: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
@@ -270,6 +336,7 @@ impl FleetManager {
             webhook_rx,
             notify_tx: notify_tx.clone(),
             warned_capability_agents: std::sync::Mutex::new(std::collections::HashSet::new()),
+            idle: std::sync::Mutex::new(IdleRunners::default()),
             draining: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
@@ -290,7 +357,7 @@ impl FleetManager {
     /// Behavior depends on provisioning mode:
     /// - **Fixed Capacity**: Actively reconciles runner pools to maintain target counts.
     /// - **Webhook**: Creates runners on-demand for jobs delivered by webhook events.
-    /// - **Polling**: Creates runners on-demand for jobs found by scanning the GitHub API.
+    /// - **Polling**: Creates runners on-demand for jobs found by scanning the forges' APIs.
     ///
     /// All modes handle runner events and recovery for runners that were created.
     pub async fn run(mut self) {
@@ -317,10 +384,14 @@ impl FleetManager {
                 let interval = self.config.provisioning.polling_config().interval();
                 info!("Fleet manager started in POLLING mode");
                 info!(
-                    "Runners will be created on-demand for queued jobs found by scanning GitHub every {}s",
+                    "Runners will be created on-demand for queued jobs found by scanning forges every {}s",
                     interval.as_secs()
                 );
-                if interval < Duration::from_secs(60) {
+                let polls_github = self
+                    .forges
+                    .iter()
+                    .any(|(_, forge)| forge.runner_kind() == crate::forge::RunnerKind::GitHub);
+                if polls_github && interval < Duration::from_secs(60) {
                     warn!(
                         "Polling interval {}s is short: each scan lists workflow runs per repo and may exhaust GitHub API rate limits",
                         interval.as_secs()
@@ -384,7 +455,7 @@ impl FleetManager {
     /// Run the on-demand provisioning loop (webhook and polling modes).
     ///
     /// Runners are created for jobs in the pending queue. In webhook mode the queue
-    /// is fed by webhook events, with a GitHub scan every 5 minutes as a safety net.
+    /// is fed by webhook events, with a forge scan every 5 minutes as a safety net.
     /// In polling mode the scan is the only source and runs every `interval_secs`.
     /// This loop also handles recovery and runner lifecycle events.
     ///
@@ -413,7 +484,7 @@ impl FleetManager {
         }
 
         if polling {
-            info!("Polling provisioning mode active - scanning GitHub for queued jobs");
+            info!("Polling provisioning mode active - scanning forges for queued jobs");
         } else {
             info!("Webhook provisioning mode active - waiting for webhook events");
         }
@@ -422,27 +493,27 @@ impl FleetManager {
         info!("Checking for pending jobs from previous run...");
         self.process_pending_jobs().await;
 
-        // Scan GitHub for queued jobs: in webhook mode, ones missed during downtime;
+        // Scan forges for queued jobs: in webhook mode, ones missed during downtime;
         // in polling mode, this is the first poll
-        self.scan_github().await;
+        self.scan_forges().await;
 
-        // GitHub scan interval - in webhook mode, verify pending jobs are still queued
+        // Forge scan interval - in webhook mode, verify pending jobs are still queued
         // and recover missed ones; in polling mode, the poll itself.
         // Tracked as an elapsed-time check on the ticker rather than a separate
         // select! branch, because select! can starve lower-priority branches when
         // higher-priority ones (notifications, events) have constant traffic.
         // also the backstop that re-adds jobs lost to runner steals, so keep it short-ish
-        let github_scan_interval = if polling {
+        let forge_scan_interval = if polling {
             self.config.provisioning.polling_config().interval()
         } else {
-            Duration::from_secs(300)
+            RECOVERY_SCAN_INTERVAL
         };
-        let mut last_github_check = tokio::time::Instant::now();
+        let mut last_forge_scan = tokio::time::Instant::now();
 
         // Periodic check interval - ensures pending jobs are processed even if
         // notifications are lost (belt-and-suspenders with the DB-backed queue).
         // Never slower than the scan, so a short poll interval is honoured.
-        let check_interval = Duration::from_secs(30).min(github_scan_interval);
+        let check_interval = Duration::from_secs(30).min(forge_scan_interval);
         let mut ticker = tokio::time::interval(check_interval);
 
         loop {
@@ -451,11 +522,14 @@ impl FleetManager {
                     // Periodic check for pending jobs (in case notifications were lost)
                     self.process_pending_jobs().await;
 
-                    // Piggyback the GitHub scan on the ticker to avoid select!
+                    // Destroy job-bound runners whose job never started
+                    self.check_idle_runners().await;
+
+                    // Piggyback the forge scan on the ticker to avoid select!
                     // starvation (guaranteed to run within one tick of being due)
-                    if last_github_check.elapsed() >= github_scan_interval {
-                        last_github_check = tokio::time::Instant::now();
-                        self.scan_github().await;
+                    if last_forge_scan.elapsed() >= forge_scan_interval {
+                        last_forge_scan = tokio::time::Instant::now();
+                        self.scan_forges().await;
                     }
                 }
                 Some(()) = self.notify_rx.recv() => {
@@ -485,6 +559,180 @@ impl FleetManager {
         }
     }
 
+    /// Destroy job-bound runners whose job hasn't started within the idle timeout.
+    ///
+    /// Only runners bound to one job (Forgejo one-job runners) are checked: such a
+    /// runner can only ever run its own job, so if that job is still waiting (held
+    /// back by a concurrency group, say) or gone (cancelled), the runner and its VM
+    /// are idle. The job stays pending and gets a new runner after a growing delay.
+    /// GitHub JIT runners can take any queued job with matching labels, so "its job
+    /// is still queued" doesn't mean they're idle; they're left alone.
+    async fn check_idle_runners(&self) {
+        let Some(timeout) = self.config.provisioning.idle_runner_timeout() else {
+            return;
+        };
+        let runners = match self.runner_state.get_all_runners().await {
+            Ok(runners) => runners,
+            Err(e) => {
+                warn!("Idle runner check: failed to list runners: {}", e);
+                return;
+            }
+        };
+        let now = chrono::Utc::now();
+
+        // forget runners that no longer exist
+        {
+            let names: HashSet<&str> = runners.iter().map(|(n, _)| n.as_str()).collect();
+            let mut idle = self.idle.lock().unwrap();
+            idle.started.retain(|n| names.contains(n.as_str()));
+            idle.tearing_down.retain(|n, _| names.contains(n.as_str()));
+            idle.torn_down
+                .retain(|_, at| at.elapsed() < TORN_DOWN_MEMORY);
+        }
+
+        for (runner_name, info) in runners {
+            let Some(job_id) = info.job_id.clone() else {
+                continue;
+            };
+            let Ok(forge) = self.forges.for_job(&job_id) else {
+                continue;
+            };
+            if forge.runner_kind() != RunnerKind::Forgejo {
+                continue;
+            }
+            let age = (now - info.created_at).to_std().unwrap_or_default();
+            if age < timeout {
+                continue;
+            }
+            {
+                let idle = self.idle.lock().unwrap();
+                if idle.started.contains(&runner_name)
+                    || idle
+                        .tearing_down
+                        .get(&runner_name)
+                        .is_some_and(|sent| sent.elapsed() < IDLE_DESTROY_RETRY)
+                {
+                    continue;
+                }
+            }
+            let Some(repo) = info.repository.as_deref() else {
+                continue;
+            };
+
+            let status = forge.get_job_status(repo, job_id.id()).await;
+            match idle_action(&status) {
+                IdleAction::Started => {
+                    debug!(runner_name = %runner_name, job_id = %job_id, "Runner's job is running");
+                    self.idle.lock().unwrap().started.insert(runner_name);
+                }
+                IdleAction::Wait => {
+                    if let Err(e) = status {
+                        debug!(
+                            runner_name = %runner_name,
+                            job_id = %job_id,
+                            "Idle runner check: couldn't get job status: {e:#}"
+                        );
+                    }
+                }
+                IdleAction::TearDown => {
+                    let job_state = match &status {
+                        Ok(Some(_)) => "still waiting",
+                        _ => "gone (finished or cancelled)",
+                    };
+                    let delay = {
+                        let mut idle = self.idle.lock().unwrap();
+                        idle.tearing_down
+                            .insert(runner_name.clone(), std::time::Instant::now());
+                        let delay =
+                            next_idle_backoff(idle.backoff.get(&job_id).map(|b| b.delay), timeout);
+                        idle.backoff.insert(
+                            job_id.clone(),
+                            IdleBackoff {
+                                until: std::time::Instant::now() + delay,
+                                delay,
+                            },
+                        );
+                        delay
+                    };
+                    warn!(
+                        agent_id = %info.agent_id,
+                        runner_name = %runner_name,
+                        job_id = %job_id,
+                        idle_secs = age.as_secs(),
+                        retry_in_secs = delay.as_secs(),
+                        "Runner's job is {job_state} after the idle timeout - destroying its VM"
+                    );
+                    self.send_destroy(&info.agent_id, &runner_name).await;
+                }
+            }
+        }
+
+        // drop backoff for jobs that left the queue
+        if let Ok(pending) = self.pending_job_store.get_all_pending_jobs().await {
+            let keys: HashSet<&JobKey> = pending.iter().map(|(k, _)| k).collect();
+            self.idle
+                .lock()
+                .unwrap()
+                .backoff
+                .retain(|k, _| keys.contains(k));
+        }
+    }
+
+    /// Ask an agent to destroy a runner's VM. If it doesn't happen, the idle check
+    /// sends it again after [`IDLE_DESTROY_RETRY`].
+    async fn send_destroy(&self, agent_id: &str, runner_name: &str) {
+        let command_id = Uuid::new_v4().to_string();
+        let msg = CoordinatorMessage {
+            payload: Some(CoordinatorPayload::DestroyRunner(DestroyRunnerCommand {
+                command_id: command_id.clone(),
+                vm_id: runner_name.to_string(),
+            })),
+        };
+        match self
+            .agent_registry
+            .send_command(agent_id, msg, &command_id, Duration::from_secs(30))
+            .await
+        {
+            Ok(response) => match response.payload {
+                Some(AgentPayload::Ack(ack)) if ack.accepted => {
+                    info!(agent_id = %agent_id, runner_name = %runner_name, "DestroyRunner accepted");
+                }
+                Some(AgentPayload::Ack(ack)) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        runner_name = %runner_name,
+                        "DestroyRunner rejected: {}",
+                        ack.error
+                    );
+                }
+                other => {
+                    warn!(
+                        agent_id = %agent_id,
+                        runner_name = %runner_name,
+                        "Unexpected response to DestroyRunner: {other:?}"
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    agent_id = %agent_id,
+                    runner_name = %runner_name,
+                    "DestroyRunner failed: {e:#}"
+                );
+            }
+        }
+    }
+
+    /// Whether a pending job is still waiting out its delay after an idle runner.
+    fn job_backing_off(&self, job_id: &JobKey) -> bool {
+        self.idle
+            .lock()
+            .unwrap()
+            .backoff
+            .get(job_id)
+            .is_some_and(|b| b.until > std::time::Instant::now())
+    }
+
     /// Handle a webhook event (new job notification or job completion).
     async fn handle_webhook_event(&self, event: WebhookEvent) {
         match event {
@@ -504,27 +752,27 @@ impl FleetManager {
         }
     }
 
-    /// Verify pending jobs are still queued on GitHub.
+    /// Verify pending jobs are still queued on their forge.
     ///
     /// Jobs may have been cancelled, picked up by another runner, or expired.
-    /// This method queries GitHub for each pending job's status and removes
+    /// This method queries the forge for each pending job's status and removes
     /// any that are no longer queued.
-    async fn verify_pending_jobs_with_github(&self) {
+    async fn verify_pending_jobs(&self) {
         let pending = match self.pending_job_store.get_all_pending_jobs().await {
             Ok(jobs) => jobs,
             Err(e) => {
-                warn!("Failed to get pending jobs for GitHub verification: {}", e);
+                warn!("Failed to get pending jobs for forge verification: {}", e);
                 return;
             }
         };
 
         if pending.is_empty() {
-            debug!("No pending jobs to verify with GitHub");
+            debug!("No pending jobs to verify with forges");
             return;
         }
 
         info!(
-            "Verifying {} pending job(s) are still queued on GitHub",
+            "Verifying {} pending job(s) are still queued on their forge",
             pending.len()
         );
 
@@ -533,19 +781,19 @@ impl FleetManager {
         }
     }
 
-    /// Scan GitHub for queued jobs, as the active on-demand mode needs.
+    /// Scan forges for queued jobs, as the active on-demand mode needs.
     ///
     /// - **Webhook**: verify every pending job is still queued, then recover missed jobs.
     /// - **Polling**: the poll. Add newly queued jobs (applying label mappings like the
     ///   webhook handler does), then verify only the pending jobs the scan no longer saw.
-    async fn scan_github(&self) {
+    async fn scan_forges(&self) {
         if self.config.provisioning.mode == ProvisioningMode::Polling {
-            if let Some(scan) = self.recover_queued_jobs_from_github(true).await {
+            if let Some(scan) = self.recover_queued_jobs(true).await {
                 self.verify_dropped_pending_jobs(&scan).await;
             }
         } else {
-            self.verify_pending_jobs_with_github().await;
-            self.recover_queued_jobs_from_github(false).await;
+            self.verify_pending_jobs().await;
+            self.recover_queued_jobs(false).await;
         }
     }
 
@@ -559,7 +807,7 @@ impl FleetManager {
         let pending = match self.pending_job_store.get_all_pending_jobs().await {
             Ok(jobs) => jobs,
             Err(e) => {
-                warn!("Failed to get pending jobs for GitHub verification: {}", e);
+                warn!("Failed to get pending jobs for forge verification: {}", e);
                 return;
             }
         };
@@ -568,7 +816,7 @@ impl FleetManager {
             return;
         }
         info!(
-            "{} pending job(s) no longer listed as queued - verifying with GitHub",
+            "{} pending job(s) no longer listed as queued - verifying with their forge",
             dropped.len()
         );
         for (job_id, info) in dropped {
@@ -576,13 +824,13 @@ impl FleetManager {
         }
     }
 
-    /// Check one pending job's status on GitHub and drop it from the queue unless
-    /// it's still queued (or GitHub couldn't be asked).
+    /// Check one pending job's status on its forge and drop it from the queue unless
+    /// it's still queued (or the forge couldn't be asked).
     async fn verify_pending_job(&self, job_id: &JobKey, info: &PendingJobInfo) {
-        // Age threshold for jobs without repository info (can't check GitHub status)
+        // Age threshold for jobs without repository info (can't check forge status)
         let max_age_without_repo = chrono::Duration::hours(24);
         let now = chrono::Utc::now();
-        // Jobs without repository info can't be checked on GitHub
+        // Jobs without repository info can't be checked on their forge
         // Remove them if they're older than the threshold
         let Some(ref repo) = info.repository else {
             let age = now - info.created_at;
@@ -595,7 +843,7 @@ impl FleetManager {
                 self.pending_job_store.remove_job(job_id).await;
             } else {
                 debug!(
-                    "Skipping job {} - no repository info for GitHub status check ({}h old)",
+                    "Skipping job {} - no repository info for forge status check ({}h old)",
                     job_id, age_hours
                 );
             }
@@ -613,13 +861,13 @@ impl FleetManager {
 
         match forge.get_job_status(repo, job_id.id()).await {
             Ok(Some(status)) if status == "queued" || status == "waiting" => {
-                // Job is still pending on GitHub - keep it
-                debug!("Job {} is still {} on GitHub", job_id, status);
+                // Job is still pending on its forge - keep it
+                debug!("Job {} is still {} on its forge", job_id, status);
             }
             Ok(Some(status)) => {
                 // Job has progressed or completed - remove from our queue
                 info!(
-                    "Pending job {} has status '{}' on GitHub - removing from queue",
+                    "Pending job {} has status '{}' on its forge - removing from queue",
                     job_id, status
                 );
                 self.pending_job_store.remove_job(job_id).await;
@@ -627,7 +875,7 @@ impl FleetManager {
             Ok(None) => {
                 // Job not found (404) - probably deleted or expired
                 info!(
-                    "Pending job {} not found on GitHub (404) - removing from queue",
+                    "Pending job {} not found on its forge - removing from queue",
                     job_id
                 );
                 self.pending_job_store.remove_job(job_id).await;
@@ -635,14 +883,14 @@ impl FleetManager {
             Err(e) => {
                 // API error - log but don't remove (could be transient)
                 warn!(
-                    "Failed to check status for job {} on GitHub: {} - keeping in queue",
+                    "Failed to check status for job {} on its forge: {} - keeping in queue",
                     job_id, e
                 );
             }
         }
     }
 
-    /// Add queued jobs found by scanning the GitHub API to the pending queue.
+    /// Add queued jobs found by scanning the forges' APIs to the pending queue.
     ///
     /// In webhook mode this recovers jobs queued while the coordinator was down or
     /// whose webhooks were lost. In polling mode it's the poll itself (`polling`
@@ -652,19 +900,19 @@ impl FleetManager {
     ///
     /// Returns which forges were listed and every job they listed as queued, or
     /// `None` if the scan didn't run or no forge could be listed.
-    async fn recover_queued_jobs_from_github(&self, polling: bool) -> Option<QueueScan> {
+    async fn recover_queued_jobs(&self, polling: bool) -> Option<QueueScan> {
         use crate::webhook::{WebhookRunnerRequest, has_required_labels, resolve_runner_scope};
 
         let Some(filters) = self.config.provisioning.on_demand_filters() else {
-            debug!("No webhook config - skipping GitHub job recovery");
+            debug!("No webhook config - skipping forge job recovery");
             return None;
         };
         let required_labels = filters.required_labels;
 
         if polling {
-            debug!("Polling GitHub API for queued jobs...");
+            debug!("Polling forges for queued jobs...");
         } else {
-            info!("Polling GitHub API for queued jobs that may have been missed...");
+            info!("Polling forges for queued jobs that may have been missed...");
         }
 
         // Query every forge for queued jobs; a forge that fails is left out of this scan
@@ -691,16 +939,16 @@ impl FleetManager {
 
         if queued_jobs.is_empty() {
             if polling {
-                debug!("No queued jobs found in GitHub");
+                debug!("No queued jobs found on any forge");
             } else {
-                info!("No queued jobs found in GitHub");
+                info!("No queued jobs found on any forge");
             }
             return Some(scan);
         }
 
         let total_jobs = queued_jobs.len();
         info!(
-            "Found {} queued job(s) in GitHub - checking against filters",
+            "Found {} queued job(s) across forges - checking against filters",
             total_jobs
         );
 
@@ -734,7 +982,7 @@ impl FleetManager {
                 info!(
                     job_id = %job_id,
                     runners = ?existing,
-                    "Job already has active runner - skipping GitHub recovery"
+                    "Job already has active runner - skipping forge recovery"
                 );
                 continue;
             }
@@ -755,25 +1003,29 @@ impl FleetManager {
                 runner_scope,
                 runner_group,
                 repository: job.repository,
-                job_name: None,      // Not available from GitHub list_queued_jobs
-                workflow_name: None, // Not available from GitHub list_queued_jobs
+                job_name: None,      // Not available from list_queued_jobs
+                workflow_name: None, // Not available from list_queued_jobs
             };
 
             if self.pending_job_store.add_job(&request).await {
-                info!("Recovered queued job {} (labels: {:?})", job_id, job.labels);
+                if polling {
+                    info!("Queued job {} found (labels: {:?})", job_id, job.labels);
+                } else {
+                    info!("Recovered queued job {} (labels: {:?})", job_id, job.labels);
+                }
                 added_count += 1;
             }
         }
 
         if added_count > 0 {
             info!(
-                "Recovered {} job(s) from GitHub API - processing",
+                "Recovered {} job(s) from forge APIs - processing",
                 added_count
             );
             self.process_pending_jobs().await;
         } else {
             debug!(
-                "All {} GitHub job(s) already in pending queue, have runners, or were filtered out - no new jobs to add",
+                "All {} queued job(s) already in pending queue, have runners, or were filtered out - no new jobs to add",
                 total_jobs
             );
         }
@@ -808,6 +1060,15 @@ impl FleetManager {
                     job_id, MAX_RETRIES
                 );
                 self.pending_job_store.remove_job(&job_id).await;
+                continue;
+            }
+
+            // Skip jobs whose last runner idled until their delay is up
+            if self.job_backing_off(&job_id) {
+                debug!(
+                    "Pending job {} is backing off after an idle runner - skipping",
+                    job_id
+                );
                 continue;
             }
 
@@ -908,11 +1169,17 @@ impl FleetManager {
 
         // Find the least loaded agent with matching labels, steering away from ones that already
         // failed this job
+        let kind = forge.runner_kind();
         let agent_id = self
             .agent_registry
-            .select_agent(labels, avoid_agents)
+            .select_agent_for_kind(labels, avoid_agents, kind)
             .await
-            .ok_or_else(|| anyhow::anyhow!("No available agent for labels {labels:?}"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No available agent for labels {labels:?} that runs {} runners",
+                    kind.as_str()
+                )
+            })?;
 
         info!(
             "Found available agent {} for job {} with labels {:?}",
@@ -948,7 +1215,7 @@ impl FleetManager {
                 }
                 Ok(None) => {
                     info!(
-                        "Job {} not found on GitHub — removing from pending queue",
+                        "Job {} not found on its forge — removing from pending queue",
                         job_id
                     );
                     self.agent_registry
@@ -968,12 +1235,18 @@ impl FleetManager {
             }
         }
 
-        // Generate JIT config (webhook mode — runner is pre-assigned to this job)
-        let jit_config = match forge
-            .generate_jitconfig(runner_scope, &runner_name, labels, runner_group_id)
+        // Register a single-use runner: a GitHub JIT config, or a Forgejo runner for this job attempt
+        let launch = match forge
+            .create_job_runner(
+                runner_scope,
+                &runner_name,
+                labels,
+                runner_group_id,
+                job_id.id(),
+            )
             .await
         {
-            Ok(config) => config,
+            Ok(launch) => launch,
             Err(e) => {
                 // Release the reserved slot since we won't use it
                 self.agent_registry
@@ -999,7 +1272,19 @@ impl FleetManager {
             )
             .await;
 
-        // Build CreateRunner command with JIT config
+        // Build CreateRunner command with the JIT config or Forgejo runner
+        let (jit_config, forgejo) = match launch {
+            RunnerLaunch::GitHubJit(jit_config) => (jit_config, None),
+            RunnerLaunch::Forgejo(f) => (
+                String::new(),
+                Some(Box::new(ForgejoRunner {
+                    instance_url: f.instance_url,
+                    uuid: f.uuid,
+                    token: f.token,
+                    handle: f.handle,
+                })),
+            ),
+        };
         let create_cmd = CreateRunnerCommand {
             command_id: command_id.clone(),
             vm_name: runner_name.clone(),
@@ -1008,6 +1293,7 @@ impl FleetManager {
             runner_scope_url: forge.scope_url(runner_scope),
             jit_config,
             label_set_id: String::new(), // the agent picks by job labels
+            forgejo,
         };
 
         let coordinator_msg = CoordinatorMessage {
@@ -1100,7 +1386,7 @@ impl FleetManager {
                                 forge.remove_runner(&runner_scope, &runner_name_clone).await
                             {
                                 warn!(
-                                    "Could not remove runner '{}' from GitHub: {}",
+                                    "Could not remove runner '{}' from its forge: {}",
                                     runner_name_clone, e
                                 );
                             }
@@ -1128,7 +1414,7 @@ impl FleetManager {
                             {
                                 JobCheck::Queued => {
                                     warn!(
-                                        "Runner {} completed but job {} is still queued on GitHub - it ran another job, re-provisioning",
+                                        "Runner {} completed but job {} is still queued on its forge - it ran another job, re-provisioning",
                                         runner_name_clone, job_id
                                     );
                                     reprovision = true;
@@ -1170,7 +1456,7 @@ impl FleetManager {
                         if let Err(e) = forge.remove_runner(&runner_scope, &runner_name_clone).await
                         {
                             warn!(
-                                "Could not remove runner '{}' from GitHub: {}",
+                                "Could not remove runner '{}' from its forge: {}",
                                 runner_name_clone, e
                             );
                         }
@@ -1201,7 +1487,7 @@ impl FleetManager {
                         if let Err(e) = forge.remove_runner(&runner_scope, &runner_name_clone).await
                         {
                             warn!(
-                                "Could not remove runner '{}' from GitHub: {}",
+                                "Could not remove runner '{}' from its forge: {}",
                                 runner_name_clone, e
                             );
                         }
@@ -1233,7 +1519,7 @@ impl FleetManager {
                         forge.remove_runner(&runner_scope, &runner_name_clone).await
                     {
                         warn!(
-                            "Could not remove runner '{}' from GitHub: {}",
+                            "Could not remove runner '{}' from its forge: {}",
                             runner_name_clone, e_inner
                         );
                     }
@@ -1299,7 +1585,7 @@ impl FleetManager {
             } else {
                 // VM is gone - the runner completed or failed while coordinator was down
                 warn!(
-                    "Persisted runner '{}' not found on agent '{}' - cleaning up from GitHub",
+                    "Persisted runner '{}' not found on agent '{}' - cleaning up from its forge",
                     runner_name, recovery_info.agent_id
                 );
 
@@ -1315,7 +1601,7 @@ impl FleetManager {
                         .await
                     {
                         warn!(
-                            "Could not remove stale runner '{}' from GitHub: {}",
+                            "Could not remove stale runner '{}' from its forge: {}",
                             runner_name_clone, e
                         );
                     }
@@ -1362,6 +1648,53 @@ impl FleetManager {
             }
             RunnerEventType::Completed | RunnerEventType::Failed | RunnerEventType::Destroyed => {
                 let runner_info = self.runner_state.get_runner(&runner_name).await;
+
+                // We destroyed this one for idling: not a failure, and its job keeps its backoff
+                let (idled, late) = {
+                    let mut idle = self.idle.lock().unwrap();
+                    idle.started.remove(&runner_name);
+                    let idled = idle.tearing_down.remove(&runner_name).is_some();
+                    if idled {
+                        idle.torn_down
+                            .insert(runner_name.clone(), std::time::Instant::now());
+                    }
+                    (idled, !idled && idle.torn_down.contains_key(&runner_name))
+                };
+                if late {
+                    debug!(
+                        agent_id = %event.agent_id,
+                        runner_name = %runner_name,
+                        "Late event for a torn-down idle runner - ignoring"
+                    );
+                    return;
+                }
+                if idled {
+                    if let Some(runner_info) = runner_info {
+                        self.agent_registry
+                            .release_slot(&event.agent_id, &runner_name)
+                            .await;
+                        self.runner_state.remove_runner(&runner_name).await;
+                        info!(
+                            agent_id = %event.agent_id,
+                            runner_name = %runner_name,
+                            job_id = ?runner_info.job_id,
+                            "Idle runner torn down"
+                        );
+                        let forge = self.runner_forge(runner_info.forge.as_deref());
+                        let scope = runner_info.runner_scope.clone();
+                        let name = runner_name.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = forge.remove_runner(&scope, &name).await {
+                                warn!(
+                                    "Could not remove idle runner '{}' from its forge: {}",
+                                    name, e
+                                );
+                            }
+                        });
+                    }
+                    self.process_pending_jobs().await;
+                    return;
+                }
 
                 // record before the early return below, a failed destroy arrives after the runner is untracked
                 if event_type == RunnerEventType::Failed {
@@ -1460,7 +1793,7 @@ impl FleetManager {
                                         agent_id = %event.agent_id,
                                         runner_name = %runner_name,
                                         job_id = %job_id,
-                                        "Runner completed but its job is still queued on GitHub - it ran another job, re-provisioning"
+                                        "Runner completed but its job is still queued on its forge - it ran another job, re-provisioning"
                                     );
                                 }
                                 JobCheck::Unknown => {
@@ -1564,7 +1897,7 @@ impl FleetManager {
                         .await
                     {
                         warn!(
-                            "Could not remove runner '{}' from GitHub: {}",
+                            "Could not remove runner '{}' from its forge: {}",
                             runner_name_clone, e
                         );
                     }
@@ -1581,7 +1914,7 @@ impl FleetManager {
     /// Spawn a watcher task for a recovered runner.
     ///
     /// The watcher will poll the agent's VM list until the runner completes,
-    /// then clean up from GitHub and update state.
+    /// then clean up from the forge and update state.
     fn spawn_runner_watcher(
         &self,
         runner_name: String,
@@ -1641,9 +1974,9 @@ impl FleetManager {
                 }
             }
 
-            // Clean up from GitHub
+            // Clean up from the forge
             info!(
-                "Recovery watcher for '{}' exiting, cleaning up from GitHub",
+                "Recovery watcher for '{}' exiting, cleaning up from its forge",
                 runner_name
             );
             if let Err(e) = token_provider
@@ -1651,7 +1984,7 @@ impl FleetManager {
                 .await
             {
                 warn!(
-                    "Could not remove runner '{}' from GitHub: {}",
+                    "Could not remove runner '{}' from its forge: {}",
                     runner_name, e
                 );
             }
@@ -1677,13 +2010,14 @@ impl FleetManager {
             agent_count
         );
 
+        // checked at startup (Config::resolved_forges); fixed-capacity mode needs it
+        let Some(runner_scope) = self.config.runner_scope.as_ref() else {
+            error!("Fixed-capacity mode has no [runner_scope] - not creating pool runners");
+            return;
+        };
         for pool_def in &pool_defs {
             if let Err(e) = self
-                .reconcile_pool(
-                    pool_def,
-                    &self.config.runner_scope,
-                    self.config.runner_group.as_ref(),
-                )
+                .reconcile_pool(pool_def, runner_scope, self.config.runner_group.as_ref())
                 .await
             {
                 error!("Failed to reconcile pool for {:?}: {}", pool_def.labels, e);
@@ -2051,6 +2385,7 @@ impl FleetManager {
                 labels: pool_def.labels.clone(),
                 runner_scope_url: forge.scope_url(runner_scope),
                 jit_config: String::new(),
+                forgejo: None,
                 label_set_id: pool_def.label_set_id.clone(),
             };
 
@@ -2109,7 +2444,7 @@ impl FleetManager {
                                     .await
                                 {
                                     warn!(
-                                        "Could not remove runner '{}' from GitHub: {}",
+                                        "Could not remove runner '{}' from its forge: {}",
                                         runner_name_clone, e
                                     );
                                 }
@@ -2139,7 +2474,7 @@ impl FleetManager {
                                 .await
                             {
                                 warn!(
-                                    "Could not remove runner '{}' from GitHub (may have self-removed): {}",
+                                    "Could not remove runner '{}' from its forge (may have self-removed): {}",
                                     runner_name_clone, e
                                 );
                             }
@@ -2167,7 +2502,7 @@ impl FleetManager {
                                 .await
                             {
                                 warn!(
-                                    "Could not remove runner '{}' from GitHub: {}",
+                                    "Could not remove runner '{}' from its forge: {}",
                                     runner_name_clone, e
                                 );
                             }
@@ -2193,7 +2528,7 @@ impl FleetManager {
                             .await
                         {
                             warn!(
-                                "Could not remove runner '{}' from GitHub: {}",
+                                "Could not remove runner '{}' from its forge: {}",
                                 runner_name_clone, e
                             );
                         }
@@ -2256,12 +2591,49 @@ fn dropped_pending_jobs(
 #[cfg(test)]
 mod tests {
     use super::{
-        DRAIN_BOOT_GRACE, DrainStep, QueueScan, drain_step, dropped_pending_jobs,
-        runner_name_for_host,
+        DRAIN_BOOT_GRACE, DrainStep, IdleAction, MAX_IDLE_BACKOFF, QueueScan, drain_step,
+        dropped_pending_jobs, idle_action, next_idle_backoff, runner_name_for_host,
     };
     use crate::config::RunnerScope;
     use crate::forge::{IdleRemoval, JobKey};
     use crate::pending_jobs::PendingJobInfo;
+    use std::time::Duration;
+
+    #[test]
+    fn idle_action_from_job_status() {
+        assert_eq!(
+            idle_action(&Ok(Some("in_progress".into()))),
+            IdleAction::Started
+        );
+        assert_eq!(
+            idle_action(&Ok(Some("queued".into()))),
+            IdleAction::TearDown
+        );
+        assert_eq!(idle_action(&Ok(None)), IdleAction::TearDown);
+        assert_eq!(idle_action(&Ok(Some("completed".into()))), IdleAction::Wait);
+        assert_eq!(idle_action(&Err(anyhow::anyhow!("boom"))), IdleAction::Wait);
+    }
+
+    #[test]
+    fn idle_backoff_doubles_up_to_the_cap() {
+        let timeout = Duration::from_secs(600);
+        let first = next_idle_backoff(None, timeout);
+        assert_eq!(first, timeout);
+        let second = next_idle_backoff(Some(first), timeout);
+        assert_eq!(second, Duration::from_secs(1200));
+        assert_eq!(
+            next_idle_backoff(Some(second), timeout),
+            Duration::from_secs(2400)
+        );
+        assert_eq!(
+            next_idle_backoff(Some(Duration::from_secs(2400)), timeout),
+            MAX_IDLE_BACKOFF
+        );
+        assert_eq!(
+            next_idle_backoff(None, Duration::from_secs(7200)),
+            MAX_IDLE_BACKOFF
+        );
+    }
 
     fn pending_job() -> PendingJobInfo {
         PendingJobInfo {

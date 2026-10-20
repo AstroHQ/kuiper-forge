@@ -557,11 +557,48 @@ impl VmManager {
         Ok(())
     }
 
+    /// Install forgejo-runner on a VM if needed and prepare it to run one Forgejo job attempt.
+    pub async fn configure_forgejo_runner(
+        &self,
+        vm_id: &str,
+        forgejo: &kuiper_agent_proto::ForgejoRunner,
+        labels: &[String],
+    ) -> Result<()> {
+        let (ip, os) = self.ip_and_os(vm_id).await?;
+        self.update_state(vm_id, VmStatus::ConfiguringRunner).await;
+        let job = kuiper_agent_lib::forgejo_runner::OneJob {
+            instance_url: &forgejo.instance_url,
+            uuid: &forgejo.uuid,
+            token: &forgejo.token,
+            handle: &forgejo.handle,
+            labels,
+        };
+        ssh::prepare_forgejo_runner(
+            ip,
+            &self.ssh_config,
+            &job,
+            &self.config.forgejo_runner_version,
+            &self.config.forgejo_runner_url,
+            os,
+        )
+        .await?;
+        self.update_state(vm_id, VmStatus::RunnerActive).await;
+        Ok(())
+    }
+
     /// Wait for the runner to complete its job.
     ///
     /// On macOS the runner runs in the Terminal.app GUI context for macOS services (code signing, keychain,
     /// notarization). If `jit_config` is non-empty, it's written to the VM and passed to run.sh --jitconfig.
-    pub async fn wait_for_runner_exit(&self, vm_id: &str, jit_config: &str) -> Result<()> {
+    ///
+    /// Returns an error as soon as the VM is destroyed (a DestroyRunner from the coordinator, say), instead of
+    /// polling a VM that's gone until the job timeout.
+    pub async fn wait_for_runner_exit(
+        &self,
+        vm_id: &str,
+        jit_config: &str,
+        program: ssh::RunnerProgram,
+    ) -> Result<()> {
         let (ip, os) = self.ip_and_os(vm_id).await?;
 
         info!(
@@ -573,7 +610,21 @@ impl VmManager {
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
         let log_file = self.log_dir.join(format!("runner-{vm_id}-{timestamp}.log"));
 
-        ssh::start_runner_and_wait(ip, &self.ssh_config, &log_file, jit_config, os).await?;
+        let vm_gone = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if !self.active_vms.read().await.contains_key(vm_id) {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            result = ssh::start_runner_and_wait(ip, &self.ssh_config, &log_file, jit_config, os, program) => result?,
+            () = vm_gone => {
+                warn!("VM {} was destroyed while its runner was running", vm_id);
+                return Err(Error::VmNotFound(format!("{vm_id} (destroyed while its runner was running)")));
+            }
+        }
 
         info!(
             "Runner completed on VM {} (log: {})",
@@ -853,6 +904,8 @@ mod tests {
             shared_cache_dir: None,
             ssh: Default::default(),
             runner_version: "latest".to_string(),
+            forgejo_runner_version: "latest".to_string(),
+            forgejo_runner_url: kuiper_agent_lib::forgejo_runner::DEFAULT_URL_TEMPLATE.to_string(),
             image_mappings: Vec::new(),
         };
         let log_dir = std::env::temp_dir().join("kuiper-tart-agent-test-logs");
@@ -874,6 +927,8 @@ mod tests {
             shared_cache_dir: None,
             ssh: Default::default(),
             runner_version: "latest".to_string(),
+            forgejo_runner_version: "latest".to_string(),
+            forgejo_runner_url: kuiper_agent_lib::forgejo_runner::DEFAULT_URL_TEMPLATE.to_string(),
             image_mappings: Vec::new(),
         };
         let manager = VmManager::new(config, SshConfig::default(), std::env::temp_dir());
@@ -902,6 +957,8 @@ mod tests {
             shared_cache_dir: None,
             ssh: Default::default(),
             runner_version: "latest".to_string(),
+            forgejo_runner_version: "latest".to_string(),
+            forgejo_runner_url: kuiper_agent_lib::forgejo_runner::DEFAULT_URL_TEMPLATE.to_string(),
             image_mappings: Vec::new(),
         };
         let manager = VmManager::new(config, SshConfig::default(), std::env::temp_dir());

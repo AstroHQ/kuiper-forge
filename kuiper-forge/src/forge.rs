@@ -1,4 +1,4 @@
-//! Forge abstraction: the CI host (GitHub, later Forgejo) runners register with.
+//! Forge abstraction: the CI host (GitHub or Forgejo) runners register with.
 //!
 //! A coordinator can serve several forges at once. Each is configured under a
 //! unique name, and every job and runner records which forge it belongs to:
@@ -92,6 +92,48 @@ pub struct QueuedJob {
     pub repository: Option<String>,
 }
 
+/// Which runner program a forge's runners use. Agents advertise the kinds they can
+/// launch besides GitHub's, so jobs only go to agents that can run them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerKind {
+    /// The GitHub Actions runner (`run.sh`). Every agent supports it.
+    GitHub,
+    /// `forgejo-runner one-job`
+    Forgejo,
+}
+
+impl RunnerKind {
+    /// The name agents advertise in `AgentStatus.runner_kinds`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunnerKind::GitHub => "github",
+            RunnerKind::Forgejo => "forgejo",
+        }
+    }
+}
+
+/// How an agent starts a runner registered for one job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerLaunch {
+    /// GitHub JIT config blob for `run.sh --jitconfig`.
+    GitHubJit(String),
+    /// A Forgejo ephemeral runner, for `forgejo-runner one-job`.
+    Forgejo(ForgejoLaunch),
+}
+
+/// An ephemeral Forgejo runner registered for one job attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoLaunch {
+    /// Forgejo instance URL the runner connects to
+    pub instance_url: String,
+    /// Runner UUID from registration
+    pub uuid: String,
+    /// Runner token from registration
+    pub token: String,
+    /// The job attempt to run (`one-job --handle`)
+    pub handle: String,
+}
+
 /// What [`Forge::remove_idle_runner`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleRemoval {
@@ -111,19 +153,27 @@ pub trait Forge: Send + Sync {
     /// The web URL of a runner scope on this forge, as runners register against it.
     fn scope_url(&self, scope: &RunnerScope) -> String;
 
+    /// The runner program this forge's runners use.
+    fn runner_kind(&self) -> RunnerKind {
+        RunnerKind::GitHub
+    }
+
     /// Get a registration token for the given runner scope.
     async fn get_registration_token(&self, scope: &RunnerScope) -> Result<String>;
 
-    /// Generate a JIT (Just-In-Time) runner configuration.
-    /// Returns an encoded config blob that can be passed to `run.sh --jitconfig`.
-    /// The runner is pre-assigned to a specific job and auto-deregisters.
-    async fn generate_jitconfig(
+    /// Register a single-use runner for one job and return how to start it.
+    ///
+    /// GitHub returns a JIT config (any queued job with matching labels may take
+    /// the runner); Forgejo registers an ephemeral runner that runs exactly the job
+    /// attempt `job_id` (its handle).
+    async fn create_job_runner(
         &self,
         scope: &RunnerScope,
         runner_name: &str,
         labels: &[String],
         runner_group_id: u64,
-    ) -> Result<String>;
+        job_id: &str,
+    ) -> Result<RunnerLaunch>;
 
     /// Remove a runner from the forge by name.
     /// This is called when a runner VM is destroyed or agent disconnects.
@@ -140,8 +190,8 @@ pub trait Forge: Send + Sync {
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>>;
 
     /// Get the status of a specific workflow job by the forge's own id.
-    /// Returns the job status ("queued", "in_progress", "completed", etc.)
-    /// or None if the job is not found (404).
+    /// Returns the job status in GitHub's terms ("queued", "in_progress",
+    /// "completed", etc.) or None if the job is not found.
     async fn get_job_status(&self, repo: &str, job_id: &str) -> Result<Option<String>>;
 }
 
@@ -234,13 +284,14 @@ impl Forge for MockForge {
         Ok(fake_token)
     }
 
-    async fn generate_jitconfig(
+    async fn create_job_runner(
         &self,
         scope: &RunnerScope,
         runner_name: &str,
         labels: &[String],
         _runner_group_id: u64,
-    ) -> Result<String> {
+        _job_id: &str,
+    ) -> Result<RunnerLaunch> {
         let fake_jit = format!(
             "dry-run-jitconfig-{}",
             &uuid::Uuid::new_v4().to_string()[..8]
@@ -249,7 +300,7 @@ impl Forge for MockForge {
             "DRY-RUN: Generated fake JIT config for runner '{}' in {:?} with labels {:?}",
             runner_name, scope, labels
         );
-        Ok(fake_jit)
+        Ok(RunnerLaunch::GitHubJit(fake_jit))
     }
 
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {

@@ -680,6 +680,7 @@ impl ProxmoxAgent {
             runner_scope_url: &cmd.runner_scope_url,
             runner_name: &cmd.vm_name,
             jit_config: &cmd.jit_config,
+            forgejo: cmd.forgejo.as_deref(),
         };
         let result = if self.debug_keep_vms {
             self.vm_manager
@@ -733,7 +734,23 @@ impl ProxmoxAgent {
     /// Destroy a runner VM, reporting the result.
     async fn handle_destroy_runner(&self, cmd: DestroyRunnerCommand, events: runtime::EventSender) {
         let vm_id = cmd.vm_id.clone();
-        let runner_name = vm_id.clone();
+        // the coordinator names runners by VM name; report the event under that name so it
+        // finds the runner, whether it sent the name or the VMID
+        let runner_name = match vm_id.parse::<u32>() {
+            Ok(vmid) => self
+                .vm_manager
+                .list_vms()
+                .await
+                .into_iter()
+                .find(|vm| vm.vmid == vmid)
+                .map(|vm| vm.name)
+                .unwrap_or_else(|| vm_id.clone()),
+            Err(_) => vm_id.clone(),
+        };
+        info!(
+            "DestroyRunner received for {} (runner {})",
+            vm_id, runner_name
+        );
 
         match self.vm_manager.force_destroy(&vm_id).await {
             Ok(()) => {
@@ -809,6 +826,8 @@ impl ProxmoxAgent {
             label_sets,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             limits: Vec::new(),
+            // forgejo-runner one-job on Linux and Windows VMs
+            runner_kinds: vec!["forgejo".to_string()],
         }
     }
 }

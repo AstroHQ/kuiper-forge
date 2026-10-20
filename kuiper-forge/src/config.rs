@@ -90,9 +90,35 @@ pub struct ProvisioningConfig {
     /// every field has a default, so `mode = "polling"` alone is enough.
     #[serde(default)]
     pub polling: Option<PollingConfig>,
+
+    /// Seconds a job-bound runner may wait for its job to start before its VM is
+    /// destroyed (default: 600, `0` disables). Applies to Forgejo one-job runners,
+    /// whose job can stay "waiting" behind a concurrency group; the job is retried
+    /// later with a growing delay. GitHub JIT runners aren't bound to one job, so
+    /// they're left alone.
+    #[serde(default = "default_idle_runner_timeout_secs")]
+    pub idle_runner_timeout_secs: u64,
 }
 
+fn default_idle_runner_timeout_secs() -> u64 {
+    600
+}
+
+/// Shortest idle runner timeout: below this a VM may not have booted yet.
+pub const MIN_IDLE_RUNNER_TIMEOUT_SECS: u64 = 120;
+
 impl ProvisioningConfig {
+    /// The idle runner timeout, or `None` when disabled. Values below
+    /// [`MIN_IDLE_RUNNER_TIMEOUT_SECS`] are raised to it.
+    pub fn idle_runner_timeout(&self) -> Option<std::time::Duration> {
+        match self.idle_runner_timeout_secs {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(
+                secs.max(MIN_IDLE_RUNNER_TIMEOUT_SECS),
+            )),
+        }
+    }
+
     /// Job filters for the active on-demand mode, or `None` in fixed-capacity mode
     /// (and in webhook mode without a `[provisioning.webhook]` section).
     pub fn on_demand_filters(&self) -> Option<OnDemandFilters> {
@@ -134,6 +160,7 @@ impl Default for ProvisioningConfig {
             mode: ProvisioningMode::FixedCapacity,
             webhook: None,
             polling: None,
+            idle_runner_timeout_secs: default_idle_runner_timeout_secs(),
         }
     }
 }
@@ -165,7 +192,8 @@ pub struct WebhookConfig {
     ///
     /// This is a pre-filter before checking `label_mappings`. Jobs that don't have
     /// ALL of these labels are ignored. This prevents accepting GitHub-hosted runner
-    /// jobs by mistake.
+    /// jobs by mistake. It applies to jobs from every forge, so workflows on all of
+    /// them must carry these labels (Forgejo doesn't add "self-hosted" by itself).
     ///
     /// Set to empty `[]` to disable the filter (not recommended).
     #[serde(default = "default_required_labels")]
@@ -216,7 +244,8 @@ pub struct PollingConfig {
     pub interval_secs: u64,
 
     /// Required labels that ALL jobs must have to be accepted (default: ["self-hosted"]).
-    /// Same meaning as in webhook mode.
+    /// Same meaning as in webhook mode. Applies to jobs from every forge, so GitHub
+    /// and Forgejo workflows must both carry these labels.
     #[serde(default = "default_required_labels")]
     pub required_labels: Vec<String>,
 
@@ -349,11 +378,13 @@ pub struct Config {
     #[serde(default)]
     pub provisioning: ProvisioningConfig,
 
-    /// Global runner scope - where all runners are registered on the default forge.
+    /// Where fixed-capacity pool runners are registered on the default forge.
     ///
-    /// In fixed capacity mode, agents report their labels and capacity,
-    /// and all runners are registered to this scope.
-    pub runner_scope: RunnerScope,
+    /// Required in fixed-capacity mode, unused otherwise: on-demand runners are
+    /// registered where their job is (the webhook's scope, the scan's, or a label
+    /// mapping's).
+    #[serde(default)]
+    pub runner_scope: Option<RunnerScope>,
 
     /// Optional runner group ID for JIT config generation (default: 1).
     ///
@@ -389,6 +420,108 @@ pub struct ForgeConfig {
 pub enum ForgeKindConfig {
     /// GitHub, authenticated as a GitHub App.
     Github(GitHubConfig),
+    /// Forgejo (15 or newer), authenticated with an access token. Polling mode only.
+    Forgejo(ForgejoConfig),
+}
+
+/// A Forgejo instance, polled for queued jobs.
+///
+/// ```toml
+/// [[forges]]
+/// name = "knope"
+/// type = "forgejo"
+/// url = "https://git.knope.dev"
+/// token_env = "KUIPER_KNOPE_TOKEN"
+/// scopes = ["lodge", "jfro/kuiper-forge"]
+/// ```
+///
+/// The token's user must own every scope: an org owner with `write:organization`
+/// for org scopes, the repo owner with `write:repository` for repo scopes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForgejoConfig {
+    /// Base URL of the Forgejo instance, like `https://git.example.com`
+    pub url: String,
+
+    /// Access token, inline. Prefer `token_env` or `token_path`.
+    #[serde(default)]
+    pub token: Option<String>,
+
+    /// Path to a file holding the access token.
+    #[serde(default)]
+    pub token_path: Option<PathBuf>,
+
+    /// Name of an environment variable holding the access token.
+    #[serde(default)]
+    pub token_env: Option<String>,
+
+    /// Where to poll for queued jobs and register runners. Forgejo tokens can't list
+    /// what they can reach, so these must be named:
+    /// - `org`: an organization's repositories (token user owns the org,
+    ///   `write:organization`)
+    /// - `owner/repo`: one repository (token user owns it, `write:repository`)
+    /// - `@user`: every repository the user owns, not its orgs' (the token must be
+    ///   that user's, `write:user`)
+    /// - `*`: every repository on the instance (a site admin's token, `write:admin`)
+    ///
+    /// Org, user and instance scopes also need `read:repository`, to name the
+    /// repositories jobs come from.
+    pub scopes: Vec<String>,
+}
+
+impl ForgejoConfig {
+    /// Resolve the access token from `token_env`, `token_path` or `token`, in that order.
+    pub fn token_content(&self) -> Result<String> {
+        let token = if let Some(ref var) = self.token_env {
+            std::env::var(var).with_context(|| format!("Forgejo token_env '{var}' is not set"))?
+        } else if let Some(ref path) = self.token_path {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read Forgejo token: {}", path.display()))?
+        } else if let Some(ref token) = self.token {
+            token.clone()
+        } else {
+            anyhow::bail!("One of token_env, token_path or token must be set for a Forgejo forge")
+        };
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            anyhow::bail!("Forgejo token is empty");
+        }
+        Ok(token)
+    }
+
+    /// The configured scopes as runner scopes.
+    pub fn runner_scopes(&self) -> Result<Vec<RunnerScope>> {
+        if self.scopes.is_empty() {
+            anyhow::bail!("A Forgejo forge needs at least one entry in scopes");
+        }
+        self.scopes
+            .iter()
+            .map(|scope| match scope.split('/').collect::<Vec<_>>()[..] {
+                ["*"] => Ok(RunnerScope::Instance),
+                [user] if user.len() > 1 && user.starts_with('@') => Ok(RunnerScope::User {
+                    name: user[1..].to_string(),
+                }),
+                [org] if !org.is_empty() && !org.starts_with('@') => {
+                    Ok(RunnerScope::Organization {
+                        name: org.to_string(),
+                    })
+                }
+                [owner, repo]
+                    if !owner.is_empty()
+                        && !repo.is_empty()
+                        && !owner.starts_with('@')
+                        && owner != "*" =>
+                {
+                    Ok(RunnerScope::Repository {
+                        owner: owner.to_string(),
+                        repo: repo.to_string(),
+                    })
+                }
+                _ => Err(anyhow::anyhow!(
+                    "Invalid Forgejo scope '{scope}': use 'org', 'owner/repo', '@user' or '*'"
+                )),
+            })
+            .collect()
+    }
 }
 
 /// GitHub App authentication configuration.
@@ -445,6 +578,44 @@ impl Config {
             if forges[..i].iter().any(|f| f.name == forge.name) {
                 anyhow::bail!("Forge name '{}' is configured more than once", forge.name);
             }
+            if let ForgeKindConfig::Forgejo(forgejo) = &forge.kind {
+                let url = reqwest::Url::parse(&forgejo.url).with_context(|| {
+                    format!("Invalid url '{}' for forge '{}'", forgejo.url, forge.name)
+                })?;
+                if !matches!(url.scheme(), "http" | "https") {
+                    anyhow::bail!(
+                        "Invalid url '{}' for forge '{}': must be http or https",
+                        forgejo.url,
+                        forge.name
+                    );
+                }
+                forgejo
+                    .runner_scopes()
+                    .with_context(|| format!("Invalid scopes for forge '{}'", forge.name))?;
+            }
+        }
+        // Fixed-capacity pools register long-lived runners at [runner_scope] on the
+        // default forge
+        if self.provisioning.mode == ProvisioningMode::FixedCapacity {
+            match &self.runner_scope {
+                None => {
+                    anyhow::bail!("Fixed-capacity mode needs a [runner_scope] for its pool runners")
+                }
+                Some(scope) if !scope.is_github_scope() => anyhow::bail!(
+                    "[runner_scope] must be an organization or repository for fixed-capacity pools"
+                ),
+                Some(_) => {}
+            }
+        }
+        // ...which Forgejo's one-job runners can't be
+        if self.provisioning.mode == ProvisioningMode::FixedCapacity
+            && matches!(forges[0].kind, ForgeKindConfig::Forgejo(_))
+        {
+            anyhow::bail!(
+                "Forge '{}' is Forgejo, which needs provisioning mode \"polling\"; \
+                 fixed-capacity pools register with the first forge",
+                forges[0].name
+            );
         }
         Ok(forges)
     }
@@ -644,7 +815,7 @@ impl Default for AdminConfig {
     }
 }
 
-/// GitHub runner registration scope.
+/// Where runners are registered on a forge.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RunnerScope {
@@ -653,9 +824,25 @@ pub enum RunnerScope {
 
     /// Repository-level runner
     Repository { owner: String, repo: String },
+
+    /// User-level runner, for every repository the user owns (Forgejo only; the
+    /// token must be that user's)
+    User { name: String },
+
+    /// Instance-wide runner, for every repository on the forge (Forgejo only; needs a
+    /// site admin's token)
+    Instance,
 }
 
 impl RunnerScope {
+    /// Whether GitHub can register runners here: organizations and repositories only.
+    pub fn is_github_scope(&self) -> bool {
+        matches!(
+            self,
+            RunnerScope::Organization { .. } | RunnerScope::Repository { .. }
+        )
+    }
+
     /// Get the URL for this runner scope
     pub fn to_url(&self) -> String {
         match self {
@@ -665,6 +852,8 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("https://github.com/{owner}/{repo}")
             }
+            RunnerScope::User { name } => format!("https://github.com/{name}"),
+            RunnerScope::Instance => "https://github.com".to_string(),
         }
     }
 
@@ -677,6 +866,8 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners/generate-jitconfig")
             }
+            // not GitHub scopes; GitHubClient refuses them before building a path
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 
@@ -689,6 +880,7 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners/registration-token")
             }
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 
@@ -701,6 +893,7 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners")
             }
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 
@@ -713,6 +906,7 @@ impl RunnerScope {
             RunnerScope::Repository { owner, repo } => {
                 format!("/repos/{owner}/{repo}/actions/runners/{runner_id}")
             }
+            RunnerScope::User { .. } | RunnerScope::Instance => String::new(),
         }
     }
 }
@@ -788,9 +982,9 @@ impl Config {
             database: DatabaseConfig::default(),
             admin: AdminConfig::default(),
             provisioning: ProvisioningConfig::default(),
-            runner_scope: RunnerScope::Organization {
+            runner_scope: Some(RunnerScope::Organization {
                 name: "test-org".into(),
-            },
+            }),
             runner_group: None,
         })
     }
@@ -844,6 +1038,29 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # app_id = 123456
 # private_key_path = "{data_dir_str}/github-app.pem"
 #
+# A Forgejo (15+) forge is polled for queued jobs, so it needs
+# [provisioning] mode = "polling". Its runners are one-job runners, on agents
+# that support them (proxmox Linux/Windows VMs, tart VMs). Scopes, and what the
+# token needs:
+#   "org"         the org's repos     org owner, write:organization + read:repository
+#   "owner/repo"  one repo            repo owner, write:repository
+#   "@user"       repos the user owns the token's own user, write:user + read:repository
+#   "*"           every repo          site admin, write:admin + read:repository
+# required_labels applies to every forge: Forgejo doesn't add "self-hosted" the
+# way GitHub does, so put it in Forgejo workflows' runs-on too (or pick labels
+# both forges' workflows use), or every Forgejo job is skipped.
+#
+# [[forges]]
+# name = "forgejo"
+# type = "forgejo"
+# url = "https://git.example.com"
+# token_env = "KUIPER_FORGEJO_TOKEN"   # or token_path / token
+# scopes = ["my-org", "@me", "someone/some-repo"]   # or ["*"] with an admin token
+#
+# Forgejo runners whose job hasn't started after [provisioning]
+# idle_runner_timeout_secs (default 600, 0 disables) are destroyed, and the job
+# retried later; a job held back by a concurrency group stays "waiting" meanwhile.
+#
 # Label mappings (webhook/polling modes) can be limited to one forge with
 # `forge = "<name>"`, and [provisioning.webhook] takes `forge = "<name>"` to
 # say which GitHub forge its deliveries come from (default: the first).
@@ -873,9 +1090,10 @@ server_key = "{data_dir_str}/server.key"
 # Runner Scope
 # =============================================================================
 #
-# Define where all runners should be registered in GitHub.
-# Agents report their labels and capacity; pools are automatically created
-# based on connected agents.
+# Where fixed-capacity pool runners are registered on the default (GitHub)
+# forge. Agents report their labels and capacity; pools are automatically
+# created based on connected agents. Only fixed-capacity mode uses it: webhook
+# and polling modes register each runner where its job is, so leave it out there.
 
 [runner_scope]
 type = "organization"
@@ -992,7 +1210,7 @@ mode = "fixed_capacity"
 #
 # [provisioning.polling]
 # interval_secs = 120                 # seconds between scans (default 120, min 10)
-# required_labels = ["self-hosted"]   # same as webhook mode
+# required_labels = ["self-hosted"]   # same as webhook mode; applies to every forge
 # queued_scan_lookback_hours = 168    # only scan repos pushed within this window (0 = all)
 #
 # [[provisioning.polling.label_mappings]]
@@ -1045,9 +1263,9 @@ name = "my-org"
         assert_eq!(config.grpc.listen_addr, "0.0.0.0:9443");
         assert_eq!(
             config.runner_scope,
-            RunnerScope::Organization {
+            Some(RunnerScope::Organization {
                 name: "my-org".to_string()
-            }
+            })
         );
     }
 
@@ -1288,7 +1506,9 @@ name = "test-org"
         let forges = config.resolved_forges().unwrap();
         assert_eq!(forges.len(), 1);
         assert_eq!(forges[0].name, "github");
-        let ForgeKindConfig::Github(github) = &forges[0].kind;
+        let ForgeKindConfig::Github(github) = &forges[0].kind else {
+            panic!("expected a GitHub forge");
+        };
         assert_eq!(github.app_id, 7);
     }
 
@@ -1313,7 +1533,9 @@ private_key = "PEM"
         let forges = config.resolved_forges().unwrap();
         let names: Vec<_> = forges.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["gh-main", "gh-other"]);
-        let ForgeKindConfig::Github(second) = &forges[1].kind;
+        let ForgeKindConfig::Github(second) = &forges[1].kind else {
+            panic!("expected a GitHub forge");
+        };
         assert_eq!(second.app_id, 2);
         assert_eq!(second.private_key.as_deref(), Some("PEM"));
     }
@@ -1335,6 +1557,159 @@ private_key = "PEM"
         // ':' in a name
         let colon = format!("{FORGE_BASE}{}", entry("a:b"));
         assert!(parse_config(&colon).resolved_forges().is_err());
+    }
+
+    const FORGEJO_ENTRY: &str = r#"
+[[forges]]
+name = "knope"
+type = "forgejo"
+url = "https://git.knope.dev"
+token = "abc"
+scopes = ["lodge", "jfro/kuiper-forge"]
+"#;
+
+    #[test]
+    fn test_forgejo_forge() {
+        let config = parse_config(&format!(
+            "{FORGE_BASE}\n[provisioning]\nmode = \"polling\"\n{FORGEJO_ENTRY}"
+        ));
+        let forges = config.resolved_forges().unwrap();
+        let ForgeKindConfig::Forgejo(forgejo) = &forges[0].kind else {
+            panic!("expected a Forgejo forge");
+        };
+        assert_eq!(forgejo.token_content().unwrap(), "abc");
+        assert_eq!(
+            forgejo.runner_scopes().unwrap(),
+            vec![
+                RunnerScope::Organization {
+                    name: "lodge".into()
+                },
+                RunnerScope::Repository {
+                    owner: "jfro".into(),
+                    repo: "kuiper-forge".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_runner_scope_only_needed_for_fixed_capacity() {
+        let base = FORGE_BASE.replace(
+            "\n[runner_scope]\ntype = \"organization\"\nname = \"test-org\"\n",
+            "",
+        );
+        assert!(!base.contains("[runner_scope]"));
+        // polling with a Forgejo forge: no [runner_scope] needed
+        let polling = parse_config(&format!(
+            "{base}\n[provisioning]\nmode = \"polling\"\n{FORGEJO_ENTRY}"
+        ));
+        assert_eq!(polling.runner_scope, None);
+        assert!(polling.resolved_forges().is_ok());
+        // fixed capacity needs one
+        let github = "\n[github]\napp_id = 1\nprivate_key_path = \"/k.pem\"\n";
+        assert!(
+            parse_config(&format!("{base}{github}"))
+                .resolved_forges()
+                .is_err()
+        );
+        assert!(
+            parse_config(&format!("{FORGE_BASE}{github}"))
+                .resolved_forges()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_forgejo_user_and_instance_scopes() {
+        let forgejo = ForgejoConfig {
+            url: "https://git.example.com".into(),
+            token: Some("t".into()),
+            token_path: None,
+            token_env: None,
+            scopes: vec!["*".into(), "@jfro".into(), "lodge".into()],
+        };
+        assert_eq!(
+            forgejo.runner_scopes().unwrap(),
+            vec![
+                RunnerScope::Instance,
+                RunnerScope::User {
+                    name: "jfro".into()
+                },
+                RunnerScope::Organization {
+                    name: "lodge".into()
+                },
+            ]
+        );
+        // stored runner scopes round-trip, and old rows still parse
+        for scope in forgejo.runner_scopes().unwrap() {
+            let json = serde_json::to_string(&scope).unwrap();
+            assert_eq!(serde_json::from_str::<RunnerScope>(&json).unwrap(), scope);
+        }
+        assert_eq!(
+            serde_json::to_string(&RunnerScope::Instance).unwrap(),
+            r#"{"type":"instance"}"#
+        );
+        assert!(!RunnerScope::Instance.is_github_scope());
+    }
+
+    #[test]
+    fn test_forgejo_forge_errors() {
+        let polling = format!("{FORGE_BASE}\n[provisioning]\nmode = \"polling\"\n");
+        // bad scopes
+        for bad in [
+            "[]",
+            "[\"a/b/c\"]",
+            "[\"/repo\"]",
+            "[\"\"]",
+            "[\"@\"]",
+            "[\"@me/repo\"]",
+            "[\"*/repo\"]",
+        ] {
+            let entry = FORGEJO_ENTRY.replace(r#"["lodge", "jfro/kuiper-forge"]"#, bad);
+            assert!(
+                parse_config(&format!("{polling}{entry}"))
+                    .resolved_forges()
+                    .is_err(),
+                "scopes {bad} should be rejected"
+            );
+        }
+        // bad url
+        let entry = FORGEJO_ENTRY.replace("https://git.knope.dev", "git.knope.dev");
+        assert!(
+            parse_config(&format!("{polling}{entry}"))
+                .resolved_forges()
+                .is_err()
+        );
+        // fixed-capacity with Forgejo as the default forge
+        assert!(
+            parse_config(&format!("{FORGE_BASE}{FORGEJO_ENTRY}"))
+                .resolved_forges()
+                .is_err()
+        );
+        // missing token
+        let entry = FORGEJO_ENTRY.replace("token = \"abc\"\n", "");
+        let config = parse_config(&format!("{polling}{entry}"));
+        let forges = config.resolved_forges().unwrap();
+        let ForgeKindConfig::Forgejo(forgejo) = &forges[0].kind else {
+            panic!("expected a Forgejo forge");
+        };
+        assert!(forgejo.token_content().is_err());
+    }
+
+    #[test]
+    fn test_idle_runner_timeout() {
+        let mut provisioning = ProvisioningConfig::default();
+        assert_eq!(
+            provisioning.idle_runner_timeout(),
+            Some(std::time::Duration::from_secs(600))
+        );
+        provisioning.idle_runner_timeout_secs = 0;
+        assert_eq!(provisioning.idle_runner_timeout(), None);
+        provisioning.idle_runner_timeout_secs = 5;
+        assert_eq!(
+            provisioning.idle_runner_timeout(),
+            Some(std::time::Duration::from_secs(MIN_IDLE_RUNNER_TIMEOUT_SECS))
+        );
     }
 
     #[test]

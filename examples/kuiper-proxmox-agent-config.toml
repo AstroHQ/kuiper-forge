@@ -97,6 +97,16 @@ clone_timeout_secs = 300
 #   - Specific version: "2.321.0" (see https://github.com/actions/runner/releases)
 runner_version = "latest"
 
+# forgejo-runner version for Forgejo jobs on Linux VMs (default: "latest")
+#   - "latest": the version this agent release pins (builds come from
+#     kuiper-forge's forgejo-runner-v* GitHub releases, not upstream)
+#   - Specific version: "13.2.0" (at least 13.1.0, for one-job --handle); needs a
+#     forgejo-runner-v<version> release, or a mirror via forgejo_runner_url
+# forgejo_runner_version = "latest"
+# Download URL template ({version}, {os}, {arch}, {ext}); a .sha256 must sit next to
+# each binary. Default: kuiper-forge's GitHub releases
+# forgejo_runner_url = "https://github.com/AstroHQ/kuiper-forge/releases/download/forgejo-runner-v{version}/forgejo-runner-{version}-{os}-{arch}{ext}"
+
 # Template mappings for label-based VM template selection
 # When a job requests runners with specific labels, the first matching mapping
 # determines which Proxmox template to use. A mapping matches if ALL its labels
