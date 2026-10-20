@@ -23,7 +23,8 @@ polling, whichever it supports.
 | 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Next (needs Forgejo 17) |
 | – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later |
 | – | forgejo-runner builds for every platform, published on kuiper-forge | **Done** (workflow; first release not cut yet) |
-| – | macOS (tart) / Windows (proxmox) Forgejo runners | **Ready for testing on real hosts** |
+| – | macOS (tart) Forgejo runners | **Done**: a basic job ran on a real tart host polling a real Forgejo (2026-10-20) |
+| – | Windows (proxmox) Forgejo runners | **Ready for testing on a real Windows VM** |
 
 ### Done
 
@@ -280,8 +281,9 @@ and all agents use them, one pinned version everywhere.
 
 ## macOS and Windows runners
 
-Both agents now advertise `forgejo` and run Forgejo jobs; neither has run on a real Mac
-or Windows VM yet (see [Testing on real hosts](#testing-on-real-hosts)).
+Both agents now advertise `forgejo` and run Forgejo jobs. A basic job has run on a real
+tart Mac against a real Forgejo in polling mode (2026-10-20); Windows hasn't run on a real
+VM yet (see [Testing on real hosts](#testing-on-real-hosts)).
 
 **Tart (macOS, and tart Linux guests).**
 
