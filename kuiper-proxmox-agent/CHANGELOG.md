@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-proxmox-agent-v0.4.1 - 2026-10-20
+#### Bug Fixes
+- security update to russh - (7249398) - *jfro*
+
+- - -
 ## kuiper-proxmox-agent-v0.4.0 - 2026-09-24
 #### Features
 - report agent version in UI - (177cce8) - *jfro*
