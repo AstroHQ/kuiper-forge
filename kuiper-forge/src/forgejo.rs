@@ -340,11 +340,12 @@ impl ForgejoClient {
                 .await
                 .with_context(|| format!("Failed to parse runners list from {path}"))?
                 .unwrap_or_default();
-            let count = runners.len();
-            all.extend(runners);
-            if count < RUNNER_PAGE_SIZE {
+            // the server caps the page size at its MAX_RESPONSE_ITEMS, which can be below
+            // RUNNER_PAGE_SIZE, so a short page isn't the end: only an empty one is
+            if runners.is_empty() {
                 return Ok(all);
             }
+            all.extend(runners);
         }
         warn!(
             "Stopped after {} pages of runners in {:?} - listing may be incomplete",
@@ -577,6 +578,8 @@ mod tests {
         no_repo_read: bool,
         /// the token's user, for /user
         login: Option<&'static str>,
+        /// the server's MAX_RESPONSE_ITEMS, when below the page size asked for
+        max_page_size: Option<usize>,
     }
 
     fn authed(headers: &HeaderMap) -> bool {
@@ -642,6 +645,7 @@ mod tests {
         ) -> Json<Value> {
             let page: usize = q["page"].parse().unwrap();
             let limit: usize = q["limit"].parse().unwrap();
+            let limit = fake.max_page_size.map_or(limit, |max| limit.min(max));
             let items: Vec<Value> = fake
                 .runners
                 .iter()
@@ -983,5 +987,30 @@ mod tests {
             IdleRemoval::NotRegistered
         );
         assert_eq!(fake.deleted.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lists_runners_past_short_pages() {
+        // a server with MAX_RESPONSE_ITEMS = 30 returns 30 per page even when asked for 50
+        let mut runners: Vec<Value> = (0..RUNNER_PAGE_SIZE as i64)
+            .map(|i| json!({"id": i, "name": format!("other-{i}")}))
+            .collect();
+        runners.push(json!({"id": 500, "name": "runner-1"}));
+        let fake = Arc::new(Fake {
+            runners,
+            max_page_size: Some(30),
+            ..Fake::default()
+        });
+        let url = serve(fake.clone()).await;
+        let forge = client(&url, &["lodge"]);
+        let scope = RunnerScope::Organization {
+            name: "lodge".into(),
+        };
+        assert_eq!(
+            forge.list_runners(&scope).await.unwrap().len(),
+            RUNNER_PAGE_SIZE + 1
+        );
+        forge.remove_runner(&scope, "runner-1").await.unwrap();
+        assert_eq!(*fake.deleted.lock().unwrap(), vec![500]);
     }
 }
