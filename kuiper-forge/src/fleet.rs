@@ -14,17 +14,42 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use kuiper_agent_proto::{
-    AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand, RunnerEvent,
-    RunnerEventType,
+    AgentPayload, CoordinatorMessage, CoordinatorPayload, CreateRunnerCommand,
+    DestroyRunnerCommand, RunnerEvent, RunnerEventType,
 };
 
 use crate::agent_failures::{AgentFailureStore, FailureKind};
 use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
-use crate::forge::{Forge, ForgeRegistry, JobKey};
+use crate::forge::{Forge, ForgeRegistry, IdleRemoval, JobKey};
 use crate::pending_jobs::{PendingJobInfo, PendingJobStore};
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{WebhookEvent, WebhookNotifier};
+
+/// How long a pool runner on an unavailable agent may stay unregistered before it's destroyed anyway. A runner
+/// that's still booting registers well within this, then gets drained as idle.
+const DRAIN_BOOT_GRACE: chrono::Duration = chrono::Duration::minutes(10);
+
+/// How long to wait for the destroyed event of a drained runner before sending DestroyRunner again.
+const DRAIN_DESTROY_RETRY: Duration = Duration::from_secs(300);
+
+/// What to do with a pool runner on an unavailable agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainStep {
+    /// Leave it: it's running a job, or may still be booting
+    Keep,
+    /// Destroy its VM: it's unregistered, so it can't pick up a job
+    Destroy,
+}
+
+fn drain_step(removal: IdleRemoval, age: chrono::Duration) -> DrainStep {
+    match removal {
+        IdleRemoval::Removed => DrainStep::Destroy,
+        IdleRemoval::Busy => DrainStep::Keep,
+        IdleRemoval::NotRegistered if age < DRAIN_BOOT_GRACE => DrainStep::Keep,
+        IdleRemoval::NotRegistered => DrainStep::Destroy,
+    }
+}
 
 /// Information about an agent's VMs for recovery.
 #[derive(Debug, Clone)]
@@ -182,6 +207,8 @@ pub struct FleetManager {
     /// Agents already warned about label sets that fixed-capacity provisioning
     /// can't pre-create. Warn once per agent to avoid log spam on each reconcile.
     warned_capability_agents: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Drained runners we sent DestroyRunner for, and when, so it isn't resent every reconcile
+    draining: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl FleetManager {
@@ -243,6 +270,7 @@ impl FleetManager {
             webhook_rx,
             notify_tx: notify_tx.clone(),
             warned_capability_agents: std::sync::Mutex::new(std::collections::HashSet::new()),
+            draining: std::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         let notifier = FleetNotifier {
@@ -1366,8 +1394,25 @@ impl FleetManager {
                     .release_slot(&event.agent_id, &runner_name)
                     .await;
 
+                // we destroyed it to drain an unavailable agent, however the agent reports that it's gone
+                let drained = self
+                    .draining
+                    .lock()
+                    .expect("draining mutex poisoned")
+                    .remove(&runner_name)
+                    .is_some();
+                if drained {
+                    info!(
+                        agent_id = %event.agent_id,
+                        runner_name = %runner_name,
+                        event_type = ?event_type,
+                        "Drained runner is gone"
+                    );
+                }
+
                 // a plain destroy of a fixed-capacity runner is normal, anything else means it died mid-job
                 if event_type == RunnerEventType::Destroyed
+                    && !drained
                     && (runner_info.job_id.is_some() || !event.event.error.is_empty())
                 {
                     let message = if event.event.error.is_empty() {
@@ -1621,6 +1666,7 @@ impl FleetManager {
     /// Derives pools from connected agents and ensures target counts are met.
     async fn reconcile(&self) {
         self.warn_unprovisionable_capabilities().await;
+        self.drain_unavailable_agents().await;
 
         let agent_count = self.agent_registry.count().await;
         let pool_defs = self.agent_registry.get_pool_definitions().await;
@@ -1641,6 +1687,117 @@ impl FleetManager {
                 .await
             {
                 error!("Failed to reconcile pool for {:?}: {}", pool_def.labels, e);
+            }
+        }
+    }
+
+    /// Retire the idle pool runners of connected agents marked unavailable, so the host really drains for
+    /// maintenance. Each is unregistered from its forge first, which the forge refuses while it runs a job, and only
+    /// then is its VM destroyed. Busy runners finish their job and exit like any ephemeral runner, and the pool
+    /// doesn't replace them. Runners made for a specific job (on-demand modes) are left alone.
+    async fn drain_unavailable_agents(&self) {
+        let unavailable: HashSet<String> = self
+            .agent_registry
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|a| a.unavailable)
+            .map(|a| a.agent_id)
+            .collect();
+        if unavailable.is_empty() {
+            self.draining
+                .lock()
+                .expect("draining mutex poisoned")
+                .clear();
+            return;
+        }
+
+        let runners = match self.runner_state.get_all_runners().await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to load runners to drain unavailable agents: {}", e);
+                return;
+            }
+        };
+        {
+            let mut draining = self.draining.lock().expect("draining mutex poisoned");
+            draining.retain(|name, _| runners.iter().any(|(n, _)| n == name));
+        }
+
+        let now = chrono::Utc::now();
+        for (runner_name, runner) in runners {
+            if runner.job_id.is_some() || !unavailable.contains(&runner.agent_id) {
+                continue;
+            }
+            let recently_sent = self
+                .draining
+                .lock()
+                .expect("draining mutex poisoned")
+                .get(&runner_name)
+                .is_some_and(|at| at.elapsed() < DRAIN_DESTROY_RETRY);
+            if recently_sent {
+                continue;
+            }
+
+            let forge = self.runner_forge(runner.forge.as_deref());
+            let started = std::time::Instant::now();
+            let removal = match forge
+                .remove_idle_runner(&runner.runner_scope, &runner_name)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        agent_id = %runner.agent_id,
+                        runner_name = %runner_name,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "Couldn't check runner to drain it, retrying next reconcile: {:#}", e
+                    );
+                    continue;
+                }
+            };
+            let age = now - runner.created_at;
+            if drain_step(removal, age) == DrainStep::Keep {
+                debug!(
+                    agent_id = %runner.agent_id,
+                    runner_name = %runner_name,
+                    removal = ?removal,
+                    age_secs = age.num_seconds(),
+                    "Keeping runner on unavailable agent for now"
+                );
+                continue;
+            }
+
+            let command = CoordinatorMessage {
+                payload: Some(CoordinatorPayload::DestroyRunner(DestroyRunnerCommand {
+                    command_id: Uuid::new_v4().to_string(),
+                    vm_id: runner.vm_name.clone(),
+                })),
+            };
+            match self
+                .agent_registry
+                .send_no_reply(&runner.agent_id, command)
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        agent_id = %runner.agent_id,
+                        runner_name = %runner_name,
+                        vm_name = %runner.vm_name,
+                        removal = ?removal,
+                        age_secs = age.num_seconds(),
+                        "Draining idle runner from unavailable agent"
+                    );
+                    self.draining
+                        .lock()
+                        .expect("draining mutex poisoned")
+                        .insert(runner_name, std::time::Instant::now());
+                }
+                Err(e) => warn!(
+                    agent_id = %runner.agent_id,
+                    runner_name = %runner_name,
+                    "Failed to send DestroyRunner to drain runner: {:#}", e
+                ),
             }
         }
     }
@@ -1700,7 +1857,10 @@ impl FleetManager {
         let mut total = 0u32;
         for agent in &agents {
             // same members as legacy_pool_capacity and select_legacy_pool_agent
-            if !agent.explicit_pools && normalize_labels(&agent.labels) == pool_def.labels {
+            if !agent.explicit_pools
+                && !agent.unavailable
+                && normalize_labels(&agent.labels) == pool_def.labels
+            {
                 total += self
                     .runner_state
                     .count_runners_for_agent(&agent.agent_id)
@@ -2095,9 +2255,12 @@ fn dropped_pending_jobs(
 
 #[cfg(test)]
 mod tests {
-    use super::{QueueScan, dropped_pending_jobs, runner_name_for_host};
+    use super::{
+        DRAIN_BOOT_GRACE, DrainStep, QueueScan, drain_step, dropped_pending_jobs,
+        runner_name_for_host,
+    };
     use crate::config::RunnerScope;
-    use crate::forge::JobKey;
+    use crate::forge::{IdleRemoval, JobKey};
     use crate::pending_jobs::PendingJobInfo;
 
     fn pending_job() -> PendingJobInfo {
@@ -2161,6 +2324,24 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
         assert_eq!(dropped, vec![key("gh", "1")]);
+    }
+
+    #[test]
+    fn drain_destroys_only_unregistered_runners() {
+        let fresh = chrono::Duration::seconds(30);
+        let stale = DRAIN_BOOT_GRACE + chrono::Duration::seconds(1);
+        assert_eq!(drain_step(IdleRemoval::Removed, fresh), DrainStep::Destroy);
+        assert_eq!(drain_step(IdleRemoval::Busy, fresh), DrainStep::Keep);
+        assert_eq!(drain_step(IdleRemoval::Busy, stale), DrainStep::Keep);
+        // may still be booting, it gets drained as idle once registered
+        assert_eq!(
+            drain_step(IdleRemoval::NotRegistered, fresh),
+            DrainStep::Keep
+        );
+        assert_eq!(
+            drain_step(IdleRemoval::NotRegistered, stale),
+            DrainStep::Destroy
+        );
     }
 
     #[test]

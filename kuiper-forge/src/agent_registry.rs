@@ -165,6 +165,9 @@ pub struct ConnectedAgent {
 
     /// Last time we heard from this agent
     pub last_seen: std::time::Instant,
+
+    /// Marked unavailable by an admin (maintenance, image updates): no new runners, running ones finish
+    pub unavailable: bool,
 }
 
 impl ConnectedAgent {
@@ -197,6 +200,7 @@ impl ConnectedAgent {
             command_tx,
             pending_commands: RwLock::new(HashMap::new()),
             last_seen: std::time::Instant::now(),
+            unavailable: false,
         }
     }
 
@@ -342,6 +346,9 @@ impl ConnectedAgent {
     /// that can still be created)
     /// Takes into account both active VMs and reserved slots
     pub fn available_capacity(&self, labels: &[String], set_id: &str) -> usize {
+        if self.unavailable {
+            return 0;
+        }
         self.limits_for(labels, set_id)
             .map(|l| {
                 l.max
@@ -440,6 +447,9 @@ pub struct AgentRegistry {
     /// register against `claim_failover`, so a reconnect can't slip in between "still offline" and
     /// "fail its runners". Always taken before `agents`.
     disconnects: RwLock<HashMap<String, std::time::Instant>>,
+    /// Agents an admin marked unavailable, connected or not, so a reconnect keeps the flag. Always taken after
+    /// `agents`.
+    unavailable: RwLock<std::collections::HashSet<String>>,
 }
 
 impl AgentRegistry {
@@ -472,12 +482,16 @@ impl AgentRegistry {
             command_tx,
         )));
 
-        {
+        let unavailable = {
             let mut disconnects = self.disconnects.write().await;
             let mut agents = self.agents.write().await;
+            // under the agents lock, so a concurrent set_unavailable can't slip in between
+            let unavailable = self.unavailable.read().await.contains(&agent_id);
+            agent.write().await.unavailable = unavailable;
             agents.insert(agent_id.clone(), Arc::clone(&agent));
             disconnects.remove(&agent_id);
-        }
+            unavailable
+        };
 
         info!(
             agent_id = %agent_id,
@@ -487,6 +501,7 @@ impl AgentRegistry {
             label_sets = ?label_sets,
             max_vms = max_vms,
             active_vms = active_vms,
+            unavailable = unavailable,
             "Agent registered"
         );
 
@@ -603,10 +618,11 @@ impl AgentRegistry {
                 continue;
             }
             reasons.push(format!(
-                "{}: matches={}, capacity={} (active={}, reserved={}, max={}, usable={})",
+                "{}: matches={}, capacity={} (unavailable={}, active={}, reserved={}, max={}, usable={})",
                 id,
                 matches,
                 has_cap,
+                agent.unavailable,
                 agent.active_vms,
                 agent.reserved_slots(),
                 agent.max_vms,
@@ -730,6 +746,19 @@ impl AgentRegistry {
                 Err(anyhow!("Command timed out"))
             }
         }
+    }
+
+    /// Send a command that has no reply, e.g. DestroyRunner: the agent answers with a runner event instead.
+    pub async fn send_no_reply(&self, agent_id: &str, command: CoordinatorMessage) -> Result<()> {
+        let agent = self
+            .get(agent_id)
+            .await
+            .ok_or_else(|| anyhow!("Agent not found: {agent_id}"))?;
+        let command_tx = agent.read().await.command_tx.clone();
+        command_tx
+            .send(command)
+            .await
+            .map_err(|_| anyhow!("Failed to send command to agent"))
     }
 
     /// Handle a response from an agent
@@ -865,6 +894,44 @@ impl AgentRegistry {
         }
     }
 
+    /// Mark an agent unavailable (no new runners, running ones finish) or available again. Works for agents that
+    /// aren't connected too: they pick it up when they connect.
+    pub async fn set_unavailable(&self, agent_id: &str, unavailable: bool) {
+        let agents = self.agents.read().await;
+        let mut set = self.unavailable.write().await;
+        let changed = if unavailable {
+            set.insert(agent_id.to_string())
+        } else {
+            set.remove(agent_id)
+        };
+        drop(set);
+
+        match agents.get(agent_id) {
+            Some(agent) => {
+                let mut agent = agent.write().await;
+                agent.unavailable = unavailable;
+                if changed {
+                    info!(
+                        agent_id = %agent_id,
+                        unavailable = unavailable,
+                        active_vms = agent.active_vms,
+                        reserved_slots = agent.reserved_slots(),
+                        "Agent availability changed"
+                    );
+                }
+            }
+            None if changed => {
+                info!(agent_id = %agent_id, unavailable = unavailable, "Availability changed for offline agent");
+            }
+            None => {}
+        }
+    }
+
+    /// Returns true if the agent is marked unavailable, connected or not.
+    pub async fn is_unavailable(&self, agent_id: &str) -> bool {
+        self.unavailable.read().await.contains(agent_id)
+    }
+
     /// Reserve a slot on an agent for an upcoming VM creation
     /// Returns true if reservation succeeded
     pub async fn reserve_slot(
@@ -959,6 +1026,7 @@ impl AgentRegistry {
                     .collect(),
                 explicit_pools: agent.has_explicit_pools(),
                 last_seen_secs: agent.last_seen.elapsed().as_secs(),
+                unavailable: agent.unavailable,
             });
         }
         result
@@ -1008,6 +1076,11 @@ impl AgentRegistry {
 
         for agent in agents.values() {
             let agent = agent.read().await;
+
+            // an unavailable agent's pools shrink to nothing, so nothing gets topped up on it
+            if agent.unavailable {
+                continue;
+            }
 
             if agent.has_explicit_pools() {
                 for (i, set) in agent.label_sets.iter().enumerate() {
@@ -1067,6 +1140,8 @@ pub struct AgentInfo {
     /// Returns true if the agent sets its own fixed-capacity pools per label set
     pub explicit_pools: bool,
     pub last_seen_secs: u64,
+    /// Marked unavailable by an admin, see [`ConnectedAgent::unavailable`]
+    pub unavailable: bool,
 }
 
 /// Fixed-capacity pool derived from connected agents.
@@ -1965,6 +2040,93 @@ mod tests {
         assert_eq!(
             registry.select_agent(&labels, &[]).await,
             Some("busy".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_agent_gets_no_new_runners() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        let labels = vec!["macos".to_string()];
+
+        for id in ["a1", "a2"] {
+            registry
+                .register(
+                    id.to_string(),
+                    AgentType::Tart,
+                    format!("{id}.local"),
+                    2,
+                    0,
+                    labels.clone(),
+                    vec![],
+                    tx.clone(),
+                )
+                .await;
+        }
+        assert_eq!(registry.available_capacity(&labels).await, 4);
+
+        registry.set_unavailable("a1", true).await;
+        assert!(registry.is_unavailable("a1").await);
+        assert_eq!(registry.available_capacity(&labels).await, 2);
+        assert_eq!(registry.agent_capacity("a1", &labels, "").await, 0);
+        assert!(!registry.reserve_slot("a1", &labels, "", "r1").await);
+        // still matches, so the dashboard can say why a job waits
+        assert_eq!(registry.find_agents_by_labels(&labels).await.len(), 2);
+        // even when it's the only agent left, unlike one that failed the job
+        assert_eq!(
+            registry.select_agent(&labels, &["a2".to_string()]).await,
+            Some("a2".to_string())
+        );
+
+        let pools = registry.get_pool_definitions().await;
+        assert_eq!(pools.len(), 1);
+        assert_eq!(pools[0].target_count, 2);
+
+        registry.set_unavailable("a2", true).await;
+        assert_eq!(registry.select_agent(&labels, &[]).await, None);
+        assert!(registry.get_pool_definitions().await.is_empty());
+        assert!(registry.list_all().await.iter().all(|a| a.unavailable));
+
+        registry.set_unavailable("a1", false).await;
+        assert_eq!(
+            registry.select_agent(&labels, &[]).await,
+            Some("a1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_survives_reconnect() {
+        let registry = AgentRegistry::new();
+        let (tx, _rx) = mpsc::channel(32);
+        let labels = vec!["macos".to_string()];
+        let register = || {
+            registry.register(
+                "a1".to_string(),
+                AgentType::Tart,
+                "a1.local".to_string(),
+                2,
+                0,
+                labels.clone(),
+                vec![],
+                tx.clone(),
+            )
+        };
+
+        // set while offline, e.g. seeded from the DB at startup
+        registry.set_unavailable("a1", true).await;
+        register().await;
+        assert_eq!(registry.select_agent(&labels, &[]).await, None);
+
+        registry.unregister("a1").await;
+        register().await;
+        assert_eq!(registry.select_agent(&labels, &[]).await, None);
+
+        registry.set_unavailable("a1", false).await;
+        registry.unregister("a1").await;
+        register().await;
+        assert_eq!(
+            registry.select_agent(&labels, &[]).await,
+            Some("a1".to_string())
         );
     }
 

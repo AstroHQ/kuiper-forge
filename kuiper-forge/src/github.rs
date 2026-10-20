@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::config::RunnerScope;
-use crate::forge::{Forge, QueuedJob};
+use crate::forge::{Forge, IdleRemoval, QueuedJob};
 
 /// GitHub API base URL
 const GITHUB_API_URL: &str = "https://api.github.com";
@@ -155,7 +155,6 @@ struct RunnerInfo {
     os: String,
     #[allow(dead_code)]
     status: String,
-    #[allow(dead_code)]
     busy: bool,
 }
 
@@ -559,17 +558,25 @@ impl GitHubClient {
         Ok(jit_response.encoded_jit_config)
     }
 
-    /// List all runners for the given scope
-    async fn list_runners(&self, scope: &RunnerScope) -> Result<Vec<RunnerInfo>> {
+    /// Find a runner of the given scope by name. Filtered by GitHub, so it's found however many runners there are
+    async fn find_runner(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+    ) -> Result<Option<RunnerInfo>> {
         let account = Self::scope_account(scope);
         let installation_id = self.get_installation_id(account).await?;
         let access_token = self.get_access_token(installation_id).await?;
 
-        let url = format!("{}{}", GITHUB_API_URL, scope.runners_list_path());
+        let url = reqwest::Url::parse_with_params(
+            &format!("{}{}", GITHUB_API_URL, scope.runners_list_path()),
+            [("name", runner_name)],
+        )
+        .context("Failed to build runners list URL")?;
 
         let response = self
             .http_client
-            .get(&url)
+            .get(url)
             .header("Authorization", format!("Bearer {access_token}"))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
@@ -590,11 +597,25 @@ impl GitHubClient {
             .await
             .context("Failed to parse runners list response")?;
 
-        Ok(runners_response.runners)
+        // exact match, in case the filter ever matches loosely
+        Ok(runners_response
+            .runners
+            .into_iter()
+            .find(|r| r.name == runner_name))
     }
 
     /// Delete a runner by its ID
     async fn delete_runner(&self, scope: &RunnerScope, runner_id: u64) -> Result<()> {
+        if !self.try_delete_runner(scope, runner_id).await? {
+            return Err(anyhow!(
+                "GitHub refused to delete runner {runner_id}: it's running a job"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Delete a runner by its ID. Ok(false) when GitHub refuses because it's running a job
+    async fn try_delete_runner(&self, scope: &RunnerScope, runner_id: u64) -> Result<bool> {
         let account = Self::scope_account(scope);
         let installation_id = self.get_installation_id(account).await?;
         let access_token = self.get_access_token(installation_id).await?;
@@ -613,7 +634,14 @@ impl GitHubClient {
 
         // 204 No Content is the success response
         if response.status().as_u16() == 204 {
-            return Ok(());
+            return Ok(true);
+        }
+
+        // 422 is GitHub saying the runner is still running a job
+        if response.status().as_u16() == 422 {
+            let body = response.text().await.unwrap_or_default();
+            info!(runner_id, "GitHub won't delete busy runner: {}", body);
+            return Ok(false);
         }
 
         if !response.status().is_success() {
@@ -624,19 +652,43 @@ impl GitHubClient {
             ));
         }
 
-        Ok(())
+        Ok(true)
+    }
+
+    /// Unregister a runner only if it's not running a job
+    pub async fn remove_idle_runner(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+    ) -> Result<IdleRemoval> {
+        let Some(runner) = self.find_runner(scope, runner_name).await? else {
+            return Ok(IdleRemoval::NotRegistered);
+        };
+        if runner.busy {
+            debug!(
+                runner_id = runner.id,
+                "Runner '{}' is busy, keeping it", runner_name
+            );
+            return Ok(IdleRemoval::Busy);
+        }
+        // a job can land between the list and the delete, GitHub refuses the delete then
+        if !self.try_delete_runner(scope, runner.id).await? {
+            return Ok(IdleRemoval::Busy);
+        }
+        info!(
+            runner_id = runner.id,
+            status = %runner.status,
+            "Removed idle runner '{}' from {:?}",
+            runner_name, scope
+        );
+        Ok(IdleRemoval::Removed)
     }
 
     /// Remove a runner by name (looks up the runner ID first)
     pub async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {
         info!("Removing runner '{}' from {:?}", runner_name, scope);
 
-        // List runners to find the one with this name
-        let runners = self.list_runners(scope).await?;
-
-        let runner = runners.iter().find(|r| r.name == runner_name);
-
-        match runner {
+        match self.find_runner(scope, runner_name).await? {
             Some(r) => {
                 debug!(
                     "Found runner '{}' with ID {}, deleting...",
@@ -991,6 +1043,14 @@ impl Forge for GitHubClient {
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()> {
         // Delegate to the inherent method
         GitHubClient::remove_runner(self, scope, runner_name).await
+    }
+
+    async fn remove_idle_runner(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+    ) -> Result<IdleRemoval> {
+        GitHubClient::remove_idle_runner(self, scope, runner_name).await
     }
 
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
