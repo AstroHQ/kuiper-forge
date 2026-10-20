@@ -74,6 +74,25 @@ fn parse_unavailable_at(row: &crate::db::DbRow) -> Option<DateTime<Utc>> {
     )
 }
 
+/// An agent row's max_vms. The column is INTEGER on SQLite and INT4 on Postgres, so read it
+/// as i32 (reading i64 panics on Postgres). Logs and skips the row if it can't be read.
+fn parse_max_vms(row: &crate::db::DbRow) -> Option<u32> {
+    let agent_id: String = row.try_get("agent_id").unwrap_or_default();
+    match row.try_get::<i32, _>("max_vms") {
+        Ok(max_vms) => match u32::try_from(max_vms) {
+            Ok(max_vms) => Some(max_vms),
+            Err(_) => {
+                tracing::error!("Agent {} has a negative max_vms ({})", agent_id, max_vms);
+                None
+            }
+        },
+        Err(e) => {
+            tracing::error!("Failed to read max_vms for agent {}: {}", agent_id, e);
+            None
+        }
+    }
+}
+
 /// Database-backed storage for tokens and agents.
 pub struct AuthStore {
     pool: DbPool,
@@ -258,7 +277,7 @@ impl AuthStore {
             hostname: row.get("hostname"),
             agent_type: row.get("agent_type"),
             labels: serde_json::from_str(row.get("labels")).ok()?,
-            max_vms: row.get::<i64, _>("max_vms") as u32,
+            max_vms: parse_max_vms(&row)?,
             serial_number: row.get("serial_number"),
             created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
                 .ok()?
@@ -286,7 +305,7 @@ impl AuthStore {
                     hostname: row.get("hostname"),
                     agent_type: row.get("agent_type"),
                     labels: serde_json::from_str(row.get("labels")).ok()?,
-                    max_vms: row.get::<i64, _>("max_vms") as u32,
+                    max_vms: parse_max_vms(&row)?,
                     serial_number: row.get("serial_number"),
                     created_at: DateTime::parse_from_rfc3339(row.get("created_at"))
                         .ok()?
