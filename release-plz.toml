@@ -31,3 +31,9 @@ commit_parsers = [
     { message = "^revert", group = "<!-- 4 -->Reverts" },
     { message = ".*", skip = true },
 ]
+
+[[package]]
+name = "kuiper-forge"
+# cargo-semver-checks builds docs with all features, and sqlite/postgres are
+# mutually exclusive. Nothing depends on kuiper-forge as a library anyway.
+semver_check = false
