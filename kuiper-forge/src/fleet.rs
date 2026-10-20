@@ -2010,13 +2010,14 @@ impl FleetManager {
             agent_count
         );
 
+        // checked at startup (Config::resolved_forges); fixed-capacity mode needs it
+        let Some(runner_scope) = self.config.runner_scope.as_ref() else {
+            error!("Fixed-capacity mode has no [runner_scope] - not creating pool runners");
+            return;
+        };
         for pool_def in &pool_defs {
             if let Err(e) = self
-                .reconcile_pool(
-                    pool_def,
-                    &self.config.runner_scope,
-                    self.config.runner_group.as_ref(),
-                )
+                .reconcile_pool(pool_def, runner_scope, self.config.runner_group.as_ref())
                 .await
             {
                 error!("Failed to reconcile pool for {:?}: {}", pool_def.labels, e);

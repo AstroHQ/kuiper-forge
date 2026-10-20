@@ -65,6 +65,8 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
   level by HTTP method, so a read-only token can list jobs; the delete needs `write:`
   and ownership, answering 404 when the token may manage runners and 403 when it may
   not.
+- `[runner_scope]` is optional now and only used (and required) in fixed-capacity
+  mode, for pool runners; a polling-only Forgejo config leaves it out.
 - Polling mode only: Forgejo can't be the first forge in fixed-capacity mode (pools
   register long-lived runners there), and `[provisioning.webhook].forge` must be a
   GitHub forge. In webhook mode a Forgejo forge is only picked up by the 5-minute

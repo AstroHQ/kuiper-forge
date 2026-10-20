@@ -378,11 +378,13 @@ pub struct Config {
     #[serde(default)]
     pub provisioning: ProvisioningConfig,
 
-    /// Global runner scope - where all runners are registered on the default forge.
+    /// Where fixed-capacity pool runners are registered on the default forge.
     ///
-    /// In fixed capacity mode, agents report their labels and capacity,
-    /// and all runners are registered to this scope.
-    pub runner_scope: RunnerScope,
+    /// Required in fixed-capacity mode, unused otherwise: on-demand runners are
+    /// registered where their job is (the webhook's scope, the scan's, or a label
+    /// mapping's).
+    #[serde(default)]
+    pub runner_scope: Option<RunnerScope>,
 
     /// Optional runner group ID for JIT config generation (default: 1).
     ///
@@ -592,8 +594,20 @@ impl Config {
                     .with_context(|| format!("Invalid scopes for forge '{}'", forge.name))?;
             }
         }
-        // Fixed-capacity pools register long-lived runners with the default forge,
-        // which Forgejo's one-job runners can't be
+        // Fixed-capacity pools register long-lived runners at [runner_scope] on the
+        // default forge
+        if self.provisioning.mode == ProvisioningMode::FixedCapacity {
+            match &self.runner_scope {
+                None => {
+                    anyhow::bail!("Fixed-capacity mode needs a [runner_scope] for its pool runners")
+                }
+                Some(scope) if !scope.is_github_scope() => anyhow::bail!(
+                    "[runner_scope] must be an organization or repository for fixed-capacity pools"
+                ),
+                Some(_) => {}
+            }
+        }
+        // ...which Forgejo's one-job runners can't be
         if self.provisioning.mode == ProvisioningMode::FixedCapacity
             && matches!(forges[0].kind, ForgeKindConfig::Forgejo(_))
         {
@@ -968,9 +982,9 @@ impl Config {
             database: DatabaseConfig::default(),
             admin: AdminConfig::default(),
             provisioning: ProvisioningConfig::default(),
-            runner_scope: RunnerScope::Organization {
+            runner_scope: Some(RunnerScope::Organization {
                 name: "test-org".into(),
-            },
+            }),
             runner_group: None,
         })
     }
@@ -1076,9 +1090,10 @@ server_key = "{data_dir_str}/server.key"
 # Runner Scope
 # =============================================================================
 #
-# Define where all runners should be registered in GitHub.
-# Agents report their labels and capacity; pools are automatically created
-# based on connected agents.
+# Where fixed-capacity pool runners are registered on the default (GitHub)
+# forge. Agents report their labels and capacity; pools are automatically
+# created based on connected agents. Only fixed-capacity mode uses it: webhook
+# and polling modes register each runner where its job is, so leave it out there.
 
 [runner_scope]
 type = "organization"
@@ -1248,9 +1263,9 @@ name = "my-org"
         assert_eq!(config.grpc.listen_addr, "0.0.0.0:9443");
         assert_eq!(
             config.runner_scope,
-            RunnerScope::Organization {
+            Some(RunnerScope::Organization {
                 name: "my-org".to_string()
-            }
+            })
         );
     }
 
@@ -1574,6 +1589,33 @@ scopes = ["lodge", "jfro/kuiper-forge"]
                     repo: "kuiper-forge".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn test_runner_scope_only_needed_for_fixed_capacity() {
+        let base = FORGE_BASE.replace(
+            "\n[runner_scope]\ntype = \"organization\"\nname = \"test-org\"\n",
+            "",
+        );
+        assert!(!base.contains("[runner_scope]"));
+        // polling with a Forgejo forge: no [runner_scope] needed
+        let polling = parse_config(&format!(
+            "{base}\n[provisioning]\nmode = \"polling\"\n{FORGEJO_ENTRY}"
+        ));
+        assert_eq!(polling.runner_scope, None);
+        assert!(polling.resolved_forges().is_ok());
+        // fixed capacity needs one
+        let github = "\n[github]\napp_id = 1\nprivate_key_path = \"/k.pem\"\n";
+        assert!(
+            parse_config(&format!("{base}{github}"))
+                .resolved_forges()
+                .is_err()
+        );
+        assert!(
+            parse_config(&format!("{FORGE_BASE}{github}"))
+                .resolved_forges()
+                .is_ok()
         );
     }
 
