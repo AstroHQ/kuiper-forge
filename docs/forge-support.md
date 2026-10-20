@@ -20,11 +20,25 @@ polling, whichever it supports.
 | 3 | Forgejo backend + `forgejo-runner one-job --handle` on proxmox Linux VMs | **Done** |
 | 4 | Idle runner timeout (job listed as waiting but never starts) | **Done** |
 | 5 | End-to-end tests against Forgejo 16 and 17 in Docker | **Done** |
-| 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Next (needs Forgejo 17) |
-| – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later |
-| – | forgejo-runner builds for every platform, published on kuiper-forge | **Done** (workflow; first release not cut yet) |
+| 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Later, after this PR ships |
+| – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later, after this PR ships |
+| – | Forgejo user (`@name`) and instance (`*`) scopes | **Done** |
+| – | forgejo-runner builds for every platform, published on kuiper-forge | **Done** ([forgejo-runner-v13.2.0](https://github.com/AstroHQ/kuiper-forge/releases/tag/forgejo-runner-v13.2.0)) |
 | – | macOS (tart) Forgejo runners | **Done**: a basic job ran on a real tart host polling a real Forgejo (2026-10-20) |
-| – | Windows (proxmox) Forgejo runners | **Ready for testing on a real Windows VM** |
+| – | Windows (proxmox) Forgejo runners | Built, untested on a real Windows VM; later, after this PR ships |
+
+### Later, after this PR ships
+
+This PR ships Forgejo support for Linux (proxmox) and macOS (tart) runners with polling.
+These are tabled for follow-up work:
+
+- **Windows runners.** The proxmox agent's Windows path is built and its PowerShell was
+  tested under PowerShell for Linux, but it hasn't run on a real Windows VM. Testing it
+  (and fixing what turns up) comes after this PR ships; see
+  [Testing on real hosts](#testing-on-real-hosts).
+- **Forgejo 17 job webhooks** (step 6). Polling covers Forgejo 15+; webhooks only help
+  once the instance runs 17, and git.knope.dev is on 16.
+- **Gitea.** A Gitea backend, by webhook or by polling its 1.25+ jobs API.
 
 ### Done
 
