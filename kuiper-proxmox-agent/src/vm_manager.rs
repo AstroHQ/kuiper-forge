@@ -416,7 +416,9 @@ impl VmManager {
                 vmid,
                 jit_config.len()
             );
-            let write_output = session.execute(&write_cmd).await?;
+            let write_output = session
+                .execute_secret(&write_cmd, "write JIT config")
+                .await?;
             if write_output.exit_code != 0 {
                 error!(
                     local_only = tracing::field::Empty,
@@ -458,7 +460,9 @@ impl VmManager {
                 builder.config_command(runner_scope_url, registration_token, labels, runner_name);
 
             info!("Running configuration command on VM {}", vmid);
-            let output = session.execute(&config_cmd).await?;
+            let output = session
+                .execute_secret(&config_cmd, "config.sh (registration token)")
+                .await?;
             if output.exit_code != 0 {
                 error!(
                     local_only = tracing::field::Empty,
@@ -702,7 +706,9 @@ impl VmManager {
             forgejo_runner::prepare_command(&job)
         }
         .map_err(Error::runner)?;
-        let prepared = session.execute(&prepare).await?;
+        let prepared = session
+            .execute_secret(&prepare, "write forgejo-runner job files (runner token)")
+            .await?;
         if prepared.exit_code != 0 {
             error!(
                 local_only = tracing::field::Empty,

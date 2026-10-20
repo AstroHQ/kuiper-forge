@@ -241,12 +241,32 @@ async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>>
 
 /// Execute a command on a remote host via SSH.
 pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result<String> {
-    let session = connect(ip, config).await?;
-
     debug!(
         local_only = tracing::field::Empty,
         "SSH exec on {}: {}", ip, command
     );
+    exec(ip, config, command).await
+}
+
+/// Execute a command that carries a secret (a runner token, a JIT config), logging only
+/// `what` it is instead of the command itself.
+pub async fn ssh_exec_secret(
+    ip: Ipv4Addr,
+    config: &SshConfig,
+    command: &str,
+    what: &str,
+) -> Result<String> {
+    debug!(
+        "SSH exec on {}: {} ({} bytes, redacted)",
+        ip,
+        what,
+        command.len()
+    );
+    exec(ip, config, command).await
+}
+
+async fn exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result<String> {
+    let session = connect(ip, config).await?;
 
     let mut channel = session
         .channel_open_session()
@@ -438,7 +458,7 @@ pub async fn configure_runner(
         escape_posix(&labels_str),
     );
 
-    match ssh_exec(ip, config, &config_cmd).await {
+    match ssh_exec_secret(ip, config, &config_cmd, "config.sh (registration token)").await {
         Ok(output) => {
             debug!(
                 local_only = tracing::field::Empty,
@@ -534,7 +554,14 @@ pub async fn prepare_forgejo_runner(
     }
 
     let prepare = forgejo_runner::prepare_command(job).map_err(Error::Ssh)?;
-    ssh_exec(ip, config, &prepare).await.map_err(|e| {
+    ssh_exec_secret(
+        ip,
+        config,
+        &prepare,
+        "write forgejo-runner job files (runner token)",
+    )
+    .await
+    .map_err(|e| {
         error!("Failed to write forgejo-runner job files on {}: {}", ip, e);
         log_command_stderr(&e);
         e
@@ -592,7 +619,7 @@ pub async fn start_runner_and_wait(
         info!("Writing JIT config to VM {} (skipping config.sh)", ip);
         let write_jit_cmd =
             format!("cat > ~/jit-config.txt << 'JIT_CONFIG_EOF'\n{jit_config}\nJIT_CONFIG_EOF");
-        ssh_exec(ip, config, &write_jit_cmd)
+        ssh_exec_secret(ip, config, &write_jit_cmd, "write JIT config")
             .await
             .map_err(|e| Error::Ssh(format!("Failed to write JIT config: {e}")))?;
     }

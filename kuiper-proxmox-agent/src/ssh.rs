@@ -278,7 +278,21 @@ impl SshSession {
             local_only = tracing::field::Empty,
             "Executing SSH command: {}", command
         );
+        self.run(command).await
+    }
 
+    /// Execute a command that carries a secret (a runner token, a JIT config), logging only
+    /// `what` it is instead of the command itself.
+    pub async fn execute_secret(&mut self, command: &str, what: &str) -> Result<CommandOutput> {
+        debug!(
+            "Executing SSH command: {} ({} bytes, redacted)",
+            what,
+            command.len()
+        );
+        self.run(command).await
+    }
+
+    async fn run(&mut self, command: &str) -> Result<CommandOutput> {
         let mut channel = self
             .handle
             .channel_open_session()
