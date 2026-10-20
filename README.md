@@ -161,6 +161,19 @@ One coordinator can serve several forges via `[[forges]]`. Forgejo support is in
 cargo build --release
 ```
 
+## Releasing
+
+Releases are handled by [release-plz](https://release-plz.dev) (config in `release-plz.toml`).
+Every push to `main` updates a release PR that bumps versions and changelogs for the crates
+with `feat`/`fix`/`perf`/`refactor` commits since their last release. Merging it publishes
+those crates to crates.io and tags them, and the tags kick off the binary and Docker builds.
+
+To preview locally what the next release PR would contain:
+
+```bash
+GIT_TOKEN=$(gh auth token) mise x -- release-plz update  # then discard the changes
+```
+
 ## Similar projects
 
 If you're looking for just macOS & simpler, [Tartelet](https://github.com/shapehq/tartelet) is great.

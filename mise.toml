@@ -20,3 +20,6 @@ run = "scripts/build-proxmox-agent-musl.sh"
 [tasks."package:proxmox-agent"]
 description = "Build a kuiper-proxmox-agent Linux package. Append 'arm64' for arm; set PACKAGERS to pick formats. Needs Docker + nfpm."
 run = "scripts/package-proxmox-agent.sh"
+
+[tools]
+release-plz = "0.3.172"  # keep in sync with .github/workflows/release-plz.yml
