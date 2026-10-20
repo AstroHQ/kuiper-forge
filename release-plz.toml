@@ -11,14 +11,15 @@ git_release_name = "{{ package }} v{{ version }}"
 # matches the format cocogitto used to write, so existing changelogs stay consistent.
 # release-plz splices this in right after the header's trailing `- - -`, so no trimming.
 # commit.remote.username rather than commit.author.name: release-plz 0.3.172 crashes
-# looking up the author of its synthetic "update Cargo.lock dependencies" commit
+# looking up the author of its synthetic "update Cargo.lock dependencies" commit.
+# It's unset for commits GitHub can't tie to an account, hence the `if`.
 trim = false
 body = """
 ## {{ package }}-v{{ version }} - {{ timestamp | date(format="%Y-%m-%d") }}
 {%- for group, commits in commits | group_by(attribute="group") %}
 #### {{ group | striptags | trim }}
 {%- for commit in commits %}
-- {% if commit.scope %}**({{ commit.scope }})** {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }} - ({{ commit.id | truncate(length=7, end="") }}) - *{{ commit.remote.username }}*
+- {% if commit.scope %}**({{ commit.scope }})** {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }} - ({{ commit.id | truncate(length=7, end="") }}){% if commit.remote.username %} - *{{ commit.remote.username }}*{% endif %}
 {%- endfor %}
 {% endfor %}
 - - -"""
