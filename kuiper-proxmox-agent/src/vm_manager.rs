@@ -774,13 +774,45 @@ impl VmManager {
         Ok(())
     }
 
-    /// Destroy a VM.
-    pub async fn destroy_vm(&self, vmid: u32) -> Result<()> {
-        info!("Destroying VM {}", vmid);
+    /// Destroy one of this agent's VMs.
+    ///
+    /// `name` is the VM's name when it was created. The destroy only goes ahead if this agent
+    /// still tracks `vmid` under that name and nothing else is already destroying it, and
+    /// Proxmox's name for the VMID matches too. Once a VM has been destroyed (say by an idle
+    /// teardown) Proxmox can hand its VMID to a new clone, so a late destroy by bare VMID could
+    /// otherwise delete someone else's VM.
+    pub async fn destroy_vm(&self, vmid: u32, name: &str) -> Result<()> {
+        if !self.claim_for_destroy(vmid, name).await {
+            return Ok(());
+        }
+        info!("Destroying VM {} ({})", vmid, name);
+        let started = Instant::now();
 
-        // Update state
-        if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
-            vm.state = VmState::Destroying;
+        // make sure Proxmox still has our VM under this VMID before stopping or deleting it
+        match self.proxmox.get_vm_status(vmid).await {
+            Ok(status) => {
+                if let Some(actual) = status.name.as_deref()
+                    && actual != name
+                {
+                    error!(
+                        "Not destroying VMID {}: Proxmox names it '{}' but this agent created '{}' \
+                         there; dropping it from tracking",
+                        vmid, actual, name
+                    );
+                    self.untrack(vmid, name).await;
+                    return Err(Error::vm(format!(
+                        "VMID {vmid} is now '{actual}', not '{name}'; refusing to destroy it"
+                    )));
+                }
+            }
+            Err(e) => {
+                // the VM may already be gone, or the API is having a moment; we still track it
+                // under this name, so carry on and let stop/delete report what they find
+                warn!(
+                    "Couldn't read VM {} ({}) status before destroying it: {}",
+                    vmid, name, e
+                );
+            }
         }
 
         // Try to stop the VM first (graceful shutdown)
@@ -801,61 +833,104 @@ impl VmManager {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Delete the VM
-        match self.proxmox.delete_vm(vmid).await {
-            Ok(task) => {
-                self.proxmox.wait_for_task(&task).await?;
-            }
+        let result = match self.proxmox.delete_vm(vmid).await {
+            Ok(task) => self.proxmox.wait_for_task(&task).await.map_err(|e| {
+                error!("Delete task for VM {} ({}) failed: {}", vmid, name, e);
+                Error::from(e)
+            }),
             Err(e) => {
-                error!("Failed to delete VM {}: {}", vmid, e);
+                error!("Failed to delete VM {} ({}): {}", vmid, name, e);
                 // Remove from tracking even on failure
+                Ok(())
+            }
+        };
+
+        self.untrack(vmid, name).await;
+        info!(
+            "VM {} ({}) destroyed in {:.1}s",
+            vmid,
+            name,
+            started.elapsed().as_secs_f64()
+        );
+        result
+    }
+
+    /// Mark `vmid` as being destroyed if this agent still tracks it under `name` and no other
+    /// destroy has it. Returns false (and logs why) when the destroy should be skipped.
+    async fn claim_for_destroy(&self, vmid: u32, name: &str) -> bool {
+        let mut vms = self.active_vms.write().await;
+        match vms.get_mut(&vmid) {
+            Some(vm) if vm.name != name => {
+                info!(
+                    "Skipping destroy of VM {} ({}): that VMID now belongs to {}",
+                    vmid, name, vm.name
+                );
+                false
+            }
+            Some(vm) if vm.state == VmState::Destroying => {
+                debug!(
+                    "Skipping destroy of VM {} ({}): already being destroyed",
+                    vmid, name
+                );
+                false
+            }
+            Some(vm) => {
+                vm.state = VmState::Destroying;
+                true
+            }
+            None => {
+                debug!(
+                    "Skipping destroy of VM {} ({}): no longer tracked (already destroyed)",
+                    vmid, name
+                );
+                false
             }
         }
+    }
 
-        // Remove from tracking
-        self.active_vms.write().await.remove(&vmid);
-        self.state_changed.notify_one();
-
-        info!("VM {} destroyed", vmid);
-        Ok(())
+    /// Stop tracking `vmid`, but only if it's still the VM named `name`.
+    async fn untrack(&self, vmid: u32, name: &str) {
+        let mut vms = self.active_vms.write().await;
+        if vms.get(&vmid).is_some_and(|vm| vm.name == name) {
+            vms.remove(&vmid);
+            drop(vms);
+            self.state_changed.notify_one();
+        }
     }
 
     /// Force destroy a VM by ID string.
     ///
     /// `vm_id` is the Proxmox VMID or the VM's name (what the coordinator calls the runner).
     pub async fn force_destroy(&self, vm_id: &str) -> Result<()> {
-        let vmid = match vm_id.parse::<u32>() {
-            Ok(vmid) => vmid,
-            Err(_) => self.vmid_by_name(vm_id).await.ok_or_else(|| {
-                Error::vm(format!("No VM with ID or name '{vm_id}' on this agent"))
-            })?,
+        let found = {
+            let vms = self.active_vms.read().await;
+            match vm_id.parse::<u32>() {
+                Ok(vmid) => vms.get(&vmid).map(|vm| (vmid, vm.name.clone())),
+                Err(_) => vms
+                    .iter()
+                    .find(|(_, vm)| vm.name == vm_id)
+                    .map(|(vmid, vm)| (*vmid, vm.name.clone())),
+            }
         };
+        let (vmid, name) = found
+            .ok_or_else(|| Error::vm(format!("No VM with ID or name '{vm_id}' on this agent")))?;
 
-        self.destroy_vm(vmid).await
-    }
-
-    /// The VMID of one of this agent's VMs by name.
-    pub async fn vmid_by_name(&self, name: &str) -> Option<u32> {
-        self.active_vms
-            .read()
-            .await
-            .iter()
-            .find(|(_, vm)| vm.name == name)
-            .map(|(vmid, _)| *vmid)
+        self.destroy_vm(vmid, &name).await
     }
 
     /// Cleanup stale VMs that have exceeded the maximum age.
     pub async fn cleanup_stale_vms(&self, max_age: Duration) {
-        let stale_vms: Vec<u32> = {
+        let stale_vms: Vec<(u32, String)> = {
             let vms = self.active_vms.read().await;
             vms.iter()
                 .filter(|(_, instance)| instance.created_at.elapsed() > max_age)
-                .map(|(vmid, _)| *vmid)
+                .map(|(vmid, instance)| (*vmid, instance.name.clone()))
                 .collect()
         };
 
-        for vmid in stale_vms {
-            warn!("Cleaning up stale VM: {}", vmid);
-            if let Err(e) = self.destroy_vm(vmid).await {
+        for (vmid, name) in stale_vms {
+            warn!("Cleaning up stale VM: {} ({})", vmid, name);
+            if let Err(e) = self.destroy_vm(vmid, &name).await {
                 error!("Failed to cleanup stale VM {}: {}", vmid, e);
             }
         }
@@ -863,7 +938,12 @@ impl VmManager {
 
     /// Destroy all active VMs (used during shutdown).
     pub async fn destroy_all_vms(&self) {
-        let vmids: Vec<u32> = { self.active_vms.read().await.keys().copied().collect() };
+        let vmids: Vec<(u32, String)> = {
+            let vms = self.active_vms.read().await;
+            vms.iter()
+                .map(|(vmid, vm)| (*vmid, vm.name.clone()))
+                .collect()
+        };
 
         if vmids.is_empty() {
             info!("No active VMs to clean up");
@@ -871,9 +951,8 @@ impl VmManager {
         }
 
         info!("Destroying {} active VM(s)...", vmids.len());
-        for vmid in vmids {
-            info!("Destroying VM {}", vmid);
-            if let Err(e) = self.destroy_vm(vmid).await {
+        for (vmid, name) in vmids {
+            if let Err(e) = self.destroy_vm(vmid, &name).await {
                 error!("Failed to destroy VM {}: {}", vmid, e);
             }
         }
@@ -960,8 +1039,9 @@ impl VmManager {
             error!("Lifecycle failed, cleaning up VM {}: {}", vmid, e);
         }
 
-        // Destroy VM (ignore errors during cleanup)
-        let _ = self.destroy_vm(vmid).await;
+        // Destroy VM (ignore errors during cleanup). A no-op if an idle teardown already
+        // destroyed it: by then its VMID may belong to another runner's clone.
+        let _ = self.destroy_vm(vmid, vm_name).await;
 
         result
     }
@@ -982,7 +1062,7 @@ impl VmManager {
         match &result {
             Ok(_) => {
                 // Success — clean up normally
-                let _ = self.destroy_vm(vmid).await;
+                let _ = self.destroy_vm(vmid, vm_name).await;
             }
             Err(e) => {
                 error!(
@@ -1026,5 +1106,71 @@ mod tests {
         assert_eq!(VmState::Running.as_str(), "running");
         assert_eq!(VmState::RunnerActive.as_str(), "runner_active");
         assert_eq!(VmState::Destroying.as_str(), "destroying");
+    }
+
+    /// A manager whose Proxmox API is unreachable (connections are refused right away).
+    fn test_manager() -> VmManager {
+        let proxmox = ProxmoxVEAPI::new(
+            "root@pam",
+            kuiper_proxmox_api::ProxmoxAuth::password("x"),
+            "http://127.0.0.1:1/",
+            false,
+        )
+        .unwrap();
+        let vm_config: VmConfig =
+            toml::from_str("template_vmid = 9000\nstorage = \"local\"").unwrap();
+        let ssh_config: SshConfig = toml::from_str("").unwrap();
+        VmManager::new(Arc::new(proxmox), vm_config, ssh_config)
+    }
+
+    async fn track(manager: &VmManager, vmid: u32, name: &str) {
+        manager.active_vms.write().await.insert(
+            vmid,
+            VmInstance {
+                vmid,
+                name: name.to_string(),
+                ip_address: None,
+                state: VmState::RunnerActive,
+                created_at: Instant::now(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn test_destroy_after_force_destroy_is_noop() {
+        let manager = test_manager();
+        track(&manager, 120, "runner-a").await;
+
+        // idle teardown by name frees VMID 120
+        manager.force_destroy("runner-a").await.unwrap();
+        assert!(manager.list_vms().await.is_empty());
+
+        // Proxmox hands 120 to another runner's clone
+        track(&manager, 120, "runner-b").await;
+
+        // runner-a's lifecycle task finishes and cleans up: it must leave runner-b alone
+        manager.destroy_vm(120, "runner-a").await.unwrap();
+        let vms = manager.list_vms().await;
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0].name, "runner-b");
+        assert_eq!(vms[0].state, VmState::RunnerActive);
+    }
+
+    #[tokio::test]
+    async fn test_destroy_untracked_is_noop() {
+        let manager = test_manager();
+        manager.destroy_vm(121, "gone").await.unwrap();
+        assert!(manager.list_vms().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_destroy_skips_vm_already_being_destroyed() {
+        let manager = test_manager();
+        track(&manager, 122, "runner-c").await;
+        assert!(manager.claim_for_destroy(122, "runner-c").await);
+        // a second destroy while the first is in flight does nothing
+        assert!(!manager.claim_for_destroy(122, "runner-c").await);
+        manager.destroy_vm(122, "runner-c").await.unwrap();
+        assert_eq!(manager.list_vms().await[0].state, VmState::Destroying);
     }
 }
