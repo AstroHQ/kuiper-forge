@@ -127,8 +127,13 @@ impl SshClient {
         addr: &SocketAddr,
         connect_timeout: Duration,
     ) -> Result<SshSession> {
-        // Configure SSH client
-        let ssh_config = Arc::new(Config::default());
+        // Configure SSH client. Keepalives make a dead VM (say one destroyed mid-job) fail the
+        // session after ~90s instead of leaving a runner command waiting forever.
+        let ssh_config = Arc::new(Config {
+            keepalive_interval: Some(Duration::from_secs(30)),
+            keepalive_max: 3,
+            ..Config::default()
+        });
         let handler = ClientHandler;
 
         // Connect with timeout

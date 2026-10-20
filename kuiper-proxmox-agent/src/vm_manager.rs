@@ -494,7 +494,7 @@ impl VmManager {
             vmid
         );
         let run_start = Instant::now();
-        let output = session.execute(&run_cmd).await?;
+        let output = self.execute_runner(&mut session, &run_cmd, vmid).await?;
         let run_elapsed = run_start.elapsed();
 
         info!(
@@ -729,7 +729,7 @@ impl VmManager {
         } else {
             forgejo_runner::run_command()
         };
-        let output = session.execute(&run_cmd).await?;
+        let output = self.execute_runner(session, &run_cmd, vmid).await?;
         let elapsed = started.elapsed();
         info!(
             "forgejo-runner on VM {} exited with code {} in {:.1}s",
@@ -895,6 +895,53 @@ impl VmManager {
             vms.remove(&vmid);
             drop(vms);
             self.state_changed.notify_one();
+        }
+    }
+
+    /// Run the runner's blocking command, giving up if the VM is torn down meanwhile (an idle
+    /// teardown or DestroyRunner), so the lifecycle always ends and reports Completed/Failed.
+    async fn execute_runner(
+        &self,
+        session: &mut SshSession,
+        command: &str,
+        vmid: u32,
+    ) -> Result<crate::ssh::CommandOutput> {
+        let Some(name) = self
+            .active_vms
+            .read()
+            .await
+            .get(&vmid)
+            .map(|vm| vm.name.clone())
+        else {
+            return Err(Error::vm(format!(
+                "VM {vmid} was destroyed before its runner started"
+            )));
+        };
+        tokio::select! {
+            output = session.execute(command) => output,
+            () = self.torn_down(vmid, &name) => {
+                warn!("VM {} ({}) was destroyed while its runner was running", vmid, name);
+                Err(Error::vm(format!(
+                    "VM {vmid} ({name}) was destroyed while its runner was running"
+                )))
+            }
+        }
+    }
+
+    /// Resolves once `vmid` is no longer this agent's running VM `name` (destroyed, or being
+    /// destroyed). Checked every 5s.
+    async fn torn_down(&self, vmid: u32, name: &str) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let running = self
+                .active_vms
+                .read()
+                .await
+                .get(&vmid)
+                .is_some_and(|vm| vm.name == name && vm.state != VmState::Destroying);
+            if !running {
+                return;
+            }
         }
     }
 
@@ -1154,6 +1201,26 @@ mod tests {
         assert_eq!(vms.len(), 1);
         assert_eq!(vms[0].name, "runner-b");
         assert_eq!(vms[0].state, VmState::RunnerActive);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_torn_down_fires_on_teardown_or_reuse() {
+        let manager = test_manager();
+        track(&manager, 123, "runner-d").await;
+        let still_running =
+            tokio::time::timeout(Duration::from_secs(60), manager.torn_down(123, "runner-d")).await;
+        assert!(still_running.is_err(), "a running VM isn't torn down");
+
+        manager.claim_for_destroy(123, "runner-d").await;
+        tokio::time::timeout(Duration::from_secs(10), manager.torn_down(123, "runner-d"))
+            .await
+            .expect("a VM being destroyed counts as torn down");
+
+        manager.active_vms.write().await.clear();
+        track(&manager, 123, "runner-e").await;
+        tokio::time::timeout(Duration::from_secs(10), manager.torn_down(123, "runner-d"))
+            .await
+            .expect("a reused VMID counts as torn down");
     }
 
     #[tokio::test]
