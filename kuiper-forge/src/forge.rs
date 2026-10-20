@@ -134,6 +134,17 @@ pub struct ForgejoLaunch {
     pub handle: String,
 }
 
+/// What [`Forge::remove_idle_runner`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleRemoval {
+    /// It was idle and is unregistered now, so it can't pick up a job
+    Removed,
+    /// It's running a job and stays registered
+    Busy,
+    /// No runner by that name is registered: still booting, or already gone
+    NotRegistered,
+}
+
 /// Operations kuiper needs from a forge to run ephemeral runners.
 ///
 /// Implemented by the real GitHub API client and by [`MockForge`] (dry-run/testing).
@@ -167,6 +178,13 @@ pub trait Forge: Send + Sync {
     /// Remove a runner from the forge by name.
     /// This is called when a runner VM is destroyed or agent disconnects.
     async fn remove_runner(&self, scope: &RunnerScope, runner_name: &str) -> Result<()>;
+
+    /// Unregister a runner only if it isn't running a job, so its VM can be destroyed without cutting a job short.
+    async fn remove_idle_runner(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+    ) -> Result<IdleRemoval>;
 
     /// List all queued workflow jobs this forge's credentials can see.
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>>;
@@ -291,6 +309,19 @@ impl Forge for MockForge {
             runner_name, scope
         );
         Ok(())
+    }
+
+    async fn remove_idle_runner(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+    ) -> Result<IdleRemoval> {
+        // dry-run runners never register
+        info!(
+            "DRY-RUN: runner '{}' in {:?} isn't registered",
+            runner_name, scope
+        );
+        Ok(IdleRemoval::NotRegistered)
     }
 
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {

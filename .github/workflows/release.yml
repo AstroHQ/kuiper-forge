@@ -166,7 +166,7 @@ jobs:
               -v "$PWD":/work -w /work \
               -e VERSION -e ARCH \
               ghcr.io/goreleaser/nfpm:latest \
-              package --config packaging/proxmox-agent/nfpm.yaml --packager "$pkg" --target target/packages
+              package --config kuiper-proxmox-agent/packaging/nfpm.yaml --packager "$pkg" --target target/packages
           done
 
           # Move packages to the repo root so they upload flat (no target/packages/
@@ -201,12 +201,19 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # release-plz creates the release (with changelog notes) when it pushes the
+      # tag, so normally this just attaches the binaries
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: >
-          gh release create "${{ inputs.tag || github.ref_name }}"
-          --title "${{ needs.setup.outputs.binary }} v${{ needs.setup.outputs.version }}"
-          --generate-notes
-          artifacts/*
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber artifacts/*
+          else
+            gh release create "$TAG" \
+              --title "${{ needs.setup.outputs.binary }} v${{ needs.setup.outputs.version }}" \
+              --generate-notes \
+              artifacts/*
+          fi

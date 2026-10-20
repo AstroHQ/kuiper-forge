@@ -24,7 +24,7 @@ cd "$PROJECT_ROOT"
 
 ARCH_INPUT="${1:-x86_64}"
 PACKAGERS="${PACKAGERS:-deb rpm}"
-NFPM_CONFIG="packaging/proxmox-agent/nfpm.yaml"
+NFPM_CONFIG="kuiper-proxmox-agent/packaging/nfpm.yaml"
 OUTPUT_REL="target/packages"
 OUTPUT_ABS="$PROJECT_ROOT/$OUTPUT_REL"
 

@@ -2,6 +2,18 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.7.3 - 2026-10-20
+#### Features
+- drain idle pool runners from unavailable agents - (a1ab136) - *jfro*
+- mark agents unavailable from the dashboard for maintenance - (8878a38) - *jfro*
+- multi-forge groundwork (forge trait, job keys, [[forges]] config) - (7b415f8) - *jfro*
+- polling provisioning mode for GitHub - (69e5645) - *jfro*
+
+#### Bug Fixes
+- paginate GitHub queue discovery - (32b590d) - *jfro*
+- apply label mappings to jobs recovered in webhook mode - (8879858) - *jfro*
+
+- - -
 ## kuiper-forge-v0.7.2 - 2026-09-25
 #### Bug Fixes
 - cleaner label display in dashboard - (fa20bfd) - *jfro*

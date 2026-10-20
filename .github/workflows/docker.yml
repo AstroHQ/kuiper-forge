@@ -60,7 +60,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: docker/kuiper-forge/Dockerfile
+          file: kuiper-forge/docker/Dockerfile
           platforms: ${{ matrix.platform }}
           build-args: DB_BACKEND=${{ matrix.db_backend }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true

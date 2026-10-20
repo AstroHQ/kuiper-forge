@@ -95,6 +95,15 @@ pub const REVOKE_AGENT: &str =
 pub const REVOKE_AGENT: &str =
     "UPDATE registered_agents SET revoked = 1, revoked_at = $1 WHERE agent_id = $2";
 
+/// Mark an agent unavailable (stamp) or available again (NULL). Admin-controlled, never touched by status syncs.
+#[cfg(feature = "sqlite")]
+pub const SET_AGENT_UNAVAILABLE: &str =
+    "UPDATE registered_agents SET unavailable_at = ? WHERE agent_id = ?";
+
+#[cfg(feature = "postgres")]
+pub const SET_AGENT_UNAVAILABLE: &str =
+    "UPDATE registered_agents SET unavailable_at = $1 WHERE agent_id = $2";
+
 /// Purge revoked agents whose revocation is older than the retention cutoff.
 /// (A revoked or deleted row is rejected by CHECK_AGENT_VALID either way, so
 /// removing these doesn't weaken enforcement — it just unclutters the table/UI.)

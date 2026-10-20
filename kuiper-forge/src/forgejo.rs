@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::config::{ForgejoConfig, RunnerScope};
-use crate::forge::{Forge, ForgejoLaunch, QueuedJob, RunnerKind, RunnerLaunch};
+use crate::forge::{Forge, ForgejoLaunch, IdleRemoval, QueuedJob, RunnerKind, RunnerLaunch};
 
 /// Runners per page when listing them (Forgejo's default maximum)
 const RUNNER_PAGE_SIZE: usize = 50;
@@ -379,6 +379,27 @@ impl Forge for ForgejoClient {
         Ok(())
     }
 
+    /// Forgejo runners are one-job runners bound to a job attempt, never idle pool
+    /// runners, and Forgejo's runner status reflects recent check-ins rather than
+    /// whether a job is running. So a registered runner is always reported busy and
+    /// left alone; its VM goes when its job ends, or by the idle runner timeout.
+    async fn remove_idle_runner(
+        &self,
+        scope: &RunnerScope,
+        runner_name: &str,
+    ) -> Result<IdleRemoval> {
+        let runners = self.list_runners(scope).await?;
+        if runners.iter().any(|r| r.name == runner_name) {
+            debug!(
+                "Forgejo runner '{}' in {:?} is a one-job runner, keeping it",
+                runner_name, scope
+            );
+            Ok(IdleRemoval::Busy)
+        } else {
+            Ok(IdleRemoval::NotRegistered)
+        }
+    }
+
     async fn list_queued_jobs(&self) -> Result<Vec<QueuedJob>> {
         let started = Instant::now();
         let mut queued = Vec::new();
@@ -715,6 +736,16 @@ mod tests {
         assert_eq!(*fake.deleted.lock().unwrap(), vec![500]);
         // a runner that's already gone is fine
         forge.remove_runner(&scope, "missing").await.unwrap();
+        assert_eq!(fake.deleted.lock().unwrap().len(), 1);
+        // one-job runners are never drained as idle pool runners
+        assert_eq!(
+            forge.remove_idle_runner(&scope, "runner-1").await.unwrap(),
+            IdleRemoval::Busy
+        );
+        assert_eq!(
+            forge.remove_idle_runner(&scope, "missing").await.unwrap(),
+            IdleRemoval::NotRegistered
+        );
         assert_eq!(fake.deleted.lock().unwrap().len(), 1);
     }
 }
