@@ -18,26 +18,23 @@
 {% macro labels(agent) %}
 <div class="label-sets">
     {% if !agent.base_labels.is_empty() %}
-    <div>{% for label in agent.base_labels %}<span class="badge badge-label">{{ label }}</span>{% endfor %}</div>
+    <div>{% for label in agent.base_labels %}<span class="badge label-chip" data-variant="secondary">{{ label }}</span>{% endfor %}</div>
     {% endif %}
     {% for extra in agent.mapping_labels %}
-    <div><span class="label-plus">+</span>{% for label in extra %}<span class="badge badge-label">{{ label }}</span>{% endfor %}</div>
+    <div><span class="label-plus">+</span>{% for label in extra %}<span class="badge label-chip" data-variant="secondary">{{ label }}</span>{% endfor %}</div>
     {% endfor %}
 </div>
 {% endmacro %}
 
-{# button that marks an agent unavailable for maintenance, or available again; `from` is the page to come back to #}
+{# switch that marks an agent unavailable for maintenance (off), or available again (on); `from` is the page to come back to, `size` a Basecoat data-size, `sm` leaves out the visible label #}
 {% macro availability_toggle(agent_id, unavailable_at, from, size) %}
-<form method="post" action="/admin/agents/{{ agent_id }}/availability">
+<form method="post" action="/admin/agents/{{ agent_id }}/availability" role="group" class="field availability" data-orientation="horizontal"
+    title="Off: no new runners go to this agent, e.g. while updating VM images. Running jobs finish.">
     <input type="hidden" name="from" value="{{ from }}">
-    {% if unavailable_at.is_some() %}
-    <input type="hidden" name="available" value="true">
-    <button type="submit" class="btn btn-primary {{ size }}">Mark Available</button>
-    {% else %}
-    <input type="hidden" name="available" value="false">
-    <button type="submit" class="btn btn-secondary {{ size }}"
-        title="Stop sending new runners to this agent, e.g. to update VM images. Running jobs finish."
-        onclick="return confirm('Mark this agent unavailable? It gets no new runners until marked available again. Running jobs finish.');">Mark Unavailable</button>
-    {% endif %}
+    <input type="hidden" name="available" value="{% if unavailable_at.is_some() %}true{% else %}false{% endif %}">
+    <input type="checkbox" role="switch" class="input" id="available-{{ from }}-{{ agent_id }}"{% if size == "sm" %} data-size="sm" aria-label="Available"{% endif %}{% if unavailable_at.is_none() %} checked{% endif %}
+        onchange="if (this.checked || confirm('Mark this agent unavailable? It gets no new runners until marked available again. Running jobs finish.')) this.form.submit(); else this.checked = true;">
+    {#- small ones sit in a table column already headed "Available" #}
+    {% if size != "sm" %}<label for="available-{{ from }}-{{ agent_id }}">Available</label>{% endif %}
 </form>
 {% endmacro %}

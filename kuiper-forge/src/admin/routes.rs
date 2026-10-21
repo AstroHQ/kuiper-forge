@@ -5,8 +5,9 @@
 use crate::admin::auth::AdminSession;
 use crate::admin::middleware::{AdminState, SESSION_COOKIE};
 use crate::admin::templates::{
-    AgentDetailTemplate, AgentSummary, BaseContext, DashboardTemplate, FailureSummary, LimitView,
-    LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary, split_labels,
+    AgentDetailTemplate, AgentSummary, BaseContext, CapacitySummary, DashboardTemplate,
+    FailureSummary, LimitView, LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary,
+    split_labels,
 };
 use crate::admin::{agent_log_routes, api_token_routes, user_routes};
 use crate::agent_failures::FailureKind;
@@ -30,6 +31,7 @@ use tracing::{error, info, warn};
 /// Build the admin router.
 pub fn admin_router(state: Arc<AdminState>) -> Router {
     Router::new()
+        .route("/static/basecoat-1.0.2.css", get(basecoat_css))
         .route("/login", get(login_page))
         .route("/login", post(login_submit))
         .route("/dashboard", get(dashboard))
@@ -54,6 +56,17 @@ pub fn admin_router(state: Arc<AdminState>) -> Router {
             post(api_token_routes::api_token_delete),
         )
         .with_state(state)
+}
+
+/// Vendored Basecoat (shadcn/ui as plain CSS). Versioned path so it can be cached forever, no auth so the login page gets it too.
+async fn basecoat_css() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_str!("../../static/basecoat.min.css"),
+    )
 }
 
 /// Check session and return user if authenticated.
@@ -285,6 +298,7 @@ async fn render_dashboard(
         connected_agents,
         active_runners: runners.len(),
         pending_jobs,
+        capacity: CapacitySummary::from_agents(&agents),
         agents,
         tokens,
         new_token,

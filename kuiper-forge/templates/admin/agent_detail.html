@@ -1,7 +1,7 @@
 {% extends "admin/layout.html" %}
 {% import "admin/macros.html" as m %}
 
-{% block title %}Agent: {{ agent.agent_id }}{% endblock %}
+{% block title %}{{ agent.hostname }}{% endblock %}
 
 {% block body %}
 {% include "admin/nav.html" %}
@@ -10,7 +10,8 @@
     {% include "admin/agent_header.html" %}
 
     <div class="card">
-        <div class="card-title">Agent Details</div>
+        <header><h2>Agent Details</h2></header>
+        <section>
         <div class="detail-grid">
             <div class="detail-label">Agent ID</div>
             <div>{{ agent.agent_id }}</div>
@@ -27,15 +28,15 @@
             <div class="detail-label">Status</div>
             <div>
                 {% if agent.revoked %}
-                <span class="badge badge-revoked">Revoked</span>
+                <span class="badge" data-variant="secondary">Revoked</span>
                 {% else if agent.is_online %}
-                <span class="badge badge-online">Online</span>
+                <span class="badge" data-variant="outline" data-status="ok">Online</span>
                 {% else %}
-                <span class="badge badge-offline">Offline</span>
+                <span class="badge" data-variant="outline" data-status="bad">Offline</span>
                 {% endif %}
                 {% if !agent.revoked %}
                 {% if let Some(since) = agent.unavailable_at %}
-                <span class="badge badge-revoked">Unavailable</span>
+                <span class="badge" data-variant="outline" data-status="warn">Unavailable</span>
                 <div class="muted">since {% call m::ts(since) %}{% endcall %}: gets no new runners, running ones finish</div>
                 {% endif %}
                 {% endif %}
@@ -43,9 +44,9 @@
 
             <div class="detail-label">Capacity</div>
             <div>
-                {{ agent.active_vms }} / {{ agent.max_vms }} VMs
-                {% for limit in agent.limits %}
-                <div class="muted">{{ limit.name }}: {{ limit.used }} / {{ limit.max }}{% if limit.external > 0 %}, {{ limit.external }} not managed by this agent{% endif %}</div>
+                {{ agent.capacity_used() }} / {{ agent.capacity_max() }} VMs{% if agent.capacity_external() > 0 %}, {{ agent.capacity_external() }} not managed by this agent{% endif %}
+                {% for limit in agent.other_limits() %}
+                <div class="muted">{{ limit.label() }}: {{ limit.used }} / {{ limit.max }}{% if limit.external > 0 %}, {{ limit.external }} not managed by this agent{% endif %}</div>
                 {% endfor %}
             </div>
 
@@ -57,14 +58,16 @@
             <div class="detail-label">Registered</div>
             <div>{% call m::ts(agent.created_at) %}{% endcall %}</div>
         </div>
+        </section>
     </div>
 
     <div class="card">
-        <div class="card-title">Active Runners ({{ runners.len() }})</div>
+        <header><h2>Active Runners ({{ runners.len() }})</h2></header>
+        <section>
         {% if runners.is_empty() %}
-        <p style="color: #666;">No active runners on this agent.</p>
+        <p class="empty-text">No active runners on this agent.</p>
         {% else %}
-        <table>
+        <table class="table">
             <thead>
                 <tr>
                     <th>Runner Name</th>
@@ -80,9 +83,9 @@
                     <td>
                         {% match runner.repository %}
                             {% when Some with (repo) %}
-                                <a href="https://github.com/{{ repo }}" target="_blank" style="color: #58a6ff;">{{ repo }}</a>
+                                <a href="https://github.com/{{ repo }}" target="_blank">{{ repo }}</a>
                             {% when None %}
-                                <span style="color: #666;">-</span>
+                                <span class="muted">-</span>
                         {% endmatch %}
                     </td>
                     <td>
@@ -97,7 +100,7 @@
                             {% when None %}
                         {% endmatch %}
                         {% if runner.workflow_name.is_none() && runner.job_name.is_none() %}
-                            <span style="color: #666;">-</span>
+                            <span class="muted">-</span>
                         {% endif %}
                     </td>
                     <td>{% call m::ts(runner.created_at) %}{% endcall %}</td>
@@ -106,14 +109,16 @@
             </tbody>
         </table>
         {% endif %}
+        </section>
     </div>
 
     <div class="card">
-        <div class="card-title">Recent Failures ({{ failures.len() }})</div>
+        <header><h2>Recent Failures ({{ failures.len() }})</h2></header>
+        <section>
         {% if failures.is_empty() %}
-        <p style="color: #666;">No failures recorded for this agent.</p>
+        <p class="empty-text">No failures recorded for this agent.</p>
         {% else %}
-        <table>
+        <table class="table">
             <thead>
                 <tr>
                     <th>When</th>
@@ -125,8 +130,8 @@
             <tbody>
                 {% for failure in failures %}
                 <tr>
-                    <td style="white-space: nowrap;">{% call m::ts_title(failure.occurred_at, failure.ago ~ " ago") %}{% endcall %}</td>
-                    <td style="white-space: nowrap;"><span class="badge badge-offline">{{ failure.kind }}</span></td>
+                    <td class="nowrap">{% call m::ts_title(failure.occurred_at, failure.ago ~ " ago") %}{% endcall %}</td>
+                    <td class="nowrap"><span class="badge" data-variant="destructive">{{ failure.kind }}</span></td>
                     <td>
                         {% if let Some(name) = failure.runner_name %}{{ name }}{% else %}-{% endif %}
                         {% if let Some(job_id) = failure.job_id %}<div class="muted">{{ job_id.forge() }} job #{{ job_id.id() }}</div>{% endif %}
@@ -137,6 +142,7 @@
             </tbody>
         </table>
         {% endif %}
+        </section>
     </div>
 </div>
 {% endblock %}

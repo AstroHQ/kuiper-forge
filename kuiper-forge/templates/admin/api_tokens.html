@@ -10,31 +10,36 @@
     <h1>API Tokens</h1>
 
     {% if let Some(err) = error %}
-    <div class="alert alert-danger">{{ err }}</div>
+    <div class="alert" data-variant="destructive"><h2>{{ err }}</h2></div>
     {% endif %}
 
     {% if let Some(token) = new_token %}
-    <div class="token-display">
-        <p><strong>New API token created!</strong> Copy it now - it will not be shown again.</p>
-        <code class="token-value">{{ token }}</code>
-        <p style="color: #666; margin-top: 10px;">Use it as: <code>Authorization: Bearer {{ token }}</code></p>
+    <div class="alert">
+        <h2>New API token created. Copy it now, it will not be shown again.</h2>
+        <section>
+            <code class="secret">{{ token }}</code>
+            <p>Use it as: <code>Authorization: Bearer {{ token }}</code></p>
+        </section>
     </div>
     {% endif %}
 
     <div class="card">
-        <div class="card-title">Create Token</div>
+        <header><h2>Create Token</h2></header>
+        <section>
         <form method="post" action="/admin/api-tokens/create" class="inline-form">
-            <input type="text" name="name" placeholder="Name, e.g. grafana" required maxlength="100" autocomplete="off">
-            <button type="submit" class="btn btn-primary">Create</button>
+            <input type="text" class="input" name="name" placeholder="Name, e.g. grafana" required maxlength="100" autocomplete="off">
+            <button type="submit" class="btn">Create</button>
         </form>
+        </section>
     </div>
 
     <div class="card">
-        <div class="card-title">Tokens</div>
+        <header><h2>Tokens</h2></header>
+        <section>
         {% if tokens.is_empty() %}
-        <p style="color: #666; padding: 20px 0;">No API tokens yet.</p>
+        <p class="empty-text">No API tokens yet.</p>
         {% else %}
-        <table>
+        <table class="table">
             <thead>
                 <tr>
                     <th>Name</th>
@@ -56,10 +61,10 @@
                         {% if let Some(t) = token.last_used_at %}{% call m::ts(t) %}{% endcall %}{% else %}never{% endif %}
                     </td>
                     <td>
-                        <form method="post" action="/admin/api-tokens/delete" style="display: inline;"
+                        <form method="post" action="/admin/api-tokens/delete"
                             onsubmit="return confirm('Delete this token? Anything using it will stop working.');">
                             <input type="hidden" name="id" value="{{ token.id }}">
-                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                            <button type="submit" class="btn" data-variant="destructive" data-size="sm">Delete</button>
                         </form>
                     </td>
                 </tr>
@@ -67,16 +72,19 @@
             </tbody>
         </table>
         {% endif %}
+        </section>
     </div>
 
     <div class="card">
-        <div class="card-title">Endpoints</div>
-        <table>
+        <header><h2>Endpoints</h2></header>
+        <section>
+        <table class="table">
             <tbody>
                 <tr><td><code>GET /api/v1/status</code></td><td>Fleet counts: agents, capacity, runners, pending jobs</td></tr>
                 <tr><td><code>GET /api/v1/agents</code></td><td>Every registered agent with its live status</td></tr>
             </tbody>
         </table>
+        </section>
     </div>
 </div>
 {% endblock %}
