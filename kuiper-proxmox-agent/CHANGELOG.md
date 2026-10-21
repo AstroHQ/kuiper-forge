@@ -15,6 +15,19 @@ All notable changes to this project will be documented in this file. See [conven
 - **(proxmox)** only destroy a VM while its VMID still belongs to it - (5417dec) - *jfro*
 
 - - -
+## kuiper-proxmox-agent-v0.4.2 - 2026-10-21
+#### Features
+- Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*
+- publish forgejo-runner builds for every platform on kuiper-forge - (02b6c9d) - *jfro*
+- destroy Forgejo runners whose job never starts - (89f177c) - *jfro*
+- Forgejo backend with one-job runners on proxmox Linux VMs - (5168175) - *jfro*
+
+#### Bug Fixes
+- **(agents)** keep runner tokens out of SSH debug logs - (b159eaf) - *jfro*
+- **(proxmox)** SSH keepalive, and stop waiting on a runner whose VM is torn down - (8096b49) - *jfro*
+- **(proxmox)** only destroy a VM while its VMID still belongs to it - (5417dec) - *jfro*
+
+- - -
 ## kuiper-proxmox-agent-v0.4.1 - 2026-10-20
 #### Bug Fixes
 - security update to russh - (7249398) - *jfro*

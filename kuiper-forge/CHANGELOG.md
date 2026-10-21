@@ -20,6 +20,24 @@ All notable changes to this project will be documented in this file. See [conven
 - redesign admin web UI with basecoat, tweak some of the UI to - (def7b9e) - *jfro*
 
 - - -
+## kuiper-forge-v0.7.4 - 2026-10-21
+#### Features
+- Forgejo user (@name) and instance (*) runner scopes - (7e00791) - *jfro*
+- Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*
+- destroy Forgejo runners whose job never starts - (89f177c) - *jfro*
+- Forgejo backend with one-job runners on proxmox Linux VMs - (5168175) - *jfro*
+
+#### Bug Fixes
+- **(auth)** read max_vms as i32 so listing agents works on Postgres - (5f8acd2) - *jfro*
+- **(forgejo)** page runners until an empty page - (a9a1f17) - *jfro*
+- [runner_scope] only required in fixed-capacity mode - (7e0bf9f) - *jfro*
+- Forgejo startup check needs runner write access; e2e results - (62df3e1) - *jfro*
+- grace period before a runner with a missing VM counts as lost - (cd27340) - *jfro*
+
+#### Refactoring
+- redesign admin web UI with basecoat, tweak some of the UI to - (def7b9e) - *jfro*
+
+- - -
 ## kuiper-forge-v0.7.3 - 2026-10-20
 #### Features
 - drain idle pool runners from unavailable agents - (a1ab136) - *jfro*
