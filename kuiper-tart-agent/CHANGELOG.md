@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-tart-agent-v0.5.1 - 2026-10-21
+#### Features
+- Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*
+- Forgejo backend with one-job runners on proxmox Linux VMs - (5168175) - *jfro*
+
+#### Bug Fixes
+- **(agents)** keep runner tokens out of SSH debug logs - (b159eaf) - *jfro*
+
+- - -
 ## kuiper-tart-agent-v0.5.0 - 2026-10-01
 #### Features
 - install script & `kuiper-tart-agent update` self-update from GitHub releases - (efca8cf) - *jfro*

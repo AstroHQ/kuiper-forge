@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "kuiper-agent-lib"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "kuiper-agent-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "prost",
  "tonic",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "kuiper-forge"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "kuiper-proxmox-agent"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "kuiper-tart-agent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
