@@ -81,6 +81,7 @@ pub(crate) async fn agent_logs(
         },
         agent: AgentHeader {
             agent_id: agent.agent_id,
+            hostname: agent.hostname,
             revoked: agent.revoked,
             unavailable_at: agent.unavailable_at,
         },

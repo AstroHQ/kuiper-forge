@@ -1,18 +1,24 @@
 <div class="page-header">
-    <h1 style="margin-bottom: 0;">Agent: {{ agent.agent_id }}</h1>
+    <div>
+        <h1>{{ agent.hostname }}</h1>
+        <div class="muted agent-id-full">{{ agent.agent_id }}</div>
+    </div>
     <div class="btn-group">
-        <a href="/admin/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+        <a href="/admin/dashboard" class="btn" data-variant="outline">Back to Dashboard</a>
         {% if !agent.revoked %}
-        {% call m::availability_toggle(agent.agent_id, agent.unavailable_at, "agent", "") %}{% endcall %}
+        {% call m::availability_toggle(agent.agent_id, agent.unavailable_at, "agent", "default") %}{% endcall %}
         <form method="post" action="/admin/agents/{{ agent.agent_id }}/revoke"
             onsubmit="return confirm('Are you sure you want to revoke this agent? This will disconnect the agent and require re-registration.');">
-            <button type="submit" class="btn btn-danger">Revoke Certificate</button>
+            <button type="submit" class="btn" data-variant="destructive">Revoke Certificate</button>
         </form>
         {% endif %}
     </div>
 </div>
 
+{#- plain links styled as Basecoat tabs, each tab is its own page so no tabs JS -#}
 <div class="tabs">
-    <a href="/admin/agents/{{ agent.agent_id }}" class="tab{% if tab == "overview" %} tab-active{% endif %}">Overview</a>
-    <a href="/admin/agents/{{ agent.agent_id }}/logs" class="tab{% if tab == "logs" %} tab-active{% endif %}">Logs</a>
+    <nav role="tablist" aria-orientation="horizontal">
+        <a role="tab" href="/admin/agents/{{ agent.agent_id }}" aria-selected="{% if tab == "overview" %}true{% else %}false{% endif %}">Overview</a>
+        <a role="tab" href="/admin/agents/{{ agent.agent_id }}/logs" aria-selected="{% if tab == "logs" %}true{% else %}false{% endif %}">Logs</a>
+    </nav>
 </div>

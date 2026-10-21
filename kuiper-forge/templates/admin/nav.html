@@ -1,14 +1,14 @@
-<nav>
+<nav class="topbar">
     <div class="nav-links">
-        <span class="nav-brand">KuiperForge</span>
+        <a href="/admin/dashboard" class="nav-brand">KuiperForge</a>
         <a href="/admin/dashboard">Dashboard</a>
         <a href="/admin/users">Users</a>
         <a href="/admin/api-tokens">API Tokens</a>
     </div>
     <div class="nav-user">
         {{ base.username }}
-        <form method="post" action="/admin/logout" style="display: inline;">
-            <button type="submit" style="background: none; border: none; color: #aaa; cursor: pointer; margin-left: 10px;">Logout</button>
+        <form method="post" action="/admin/logout">
+            <button type="submit" class="btn" data-variant="ghost" data-size="sm">Logout</button>
         </form>
     </div>
 </nav>

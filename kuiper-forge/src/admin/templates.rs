@@ -32,6 +32,7 @@ pub struct DashboardTemplate {
     pub connected_agents: usize,
     pub active_runners: usize,
     pub pending_jobs: Vec<PendingJobSummary>,
+    pub capacity: CapacitySummary,
     pub agents: Vec<AgentSummary>,
     pub tokens: Vec<TokenSummary>,
     pub new_token: Option<String>,
@@ -79,6 +80,80 @@ pub struct AgentSummary {
     pub version: Option<String>,
 }
 
+/// Limit a tart agent reports for VMs of any OS. It's the agent's real cap: its `max_vms` only covers its biggest
+/// label set, e.g. just macOS on a macOS-only agent
+const LIMIT_TOTAL: &str = "total";
+
+impl AgentSummary {
+    fn total_limit(&self) -> Option<&LimitView> {
+        self.limits.iter().find(|l| l.name == LIMIT_TOTAL)
+    }
+
+    /// VMs in use, external ones included when the agent reports them
+    pub fn capacity_used(&self) -> usize {
+        self.total_limit().map_or(self.active_vms, |l| l.used)
+    }
+
+    pub fn capacity_max(&self) -> usize {
+        self.total_limit().map_or(self.max_vms as usize, |l| l.max)
+    }
+
+    /// Running VMs the agent doesn't manage, counted in `capacity_used`
+    pub fn capacity_external(&self) -> usize {
+        self.total_limit().map_or(0, |l| l.external)
+    }
+
+    /// Limits shown under the total, like macOS's 2 VMs per host
+    pub fn other_limits(&self) -> Vec<&LimitView> {
+        self.limits
+            .iter()
+            .filter(|l| l.name != LIMIT_TOTAL)
+            .collect()
+    }
+}
+
+/// VM capacity across connected agents, for the dashboard
+pub struct CapacitySummary {
+    pub used: usize,
+    pub total: usize,
+    /// Of `used`, VMs the agents don't manage
+    pub external: usize,
+    /// Host-wide limits summed by name over the agents reporting them, e.g. macOS's 2 VMs per host
+    pub limits: Vec<LimitView>,
+}
+
+impl CapacitySummary {
+    pub fn from_agents(agents: &[AgentSummary]) -> Self {
+        let mut summary = Self {
+            used: 0,
+            total: 0,
+            external: 0,
+            limits: Vec::new(),
+        };
+        for agent in agents.iter().filter(|a| a.is_online && !a.revoked) {
+            summary.used += agent.capacity_used();
+            summary.total += agent.capacity_max();
+            summary.external += agent.capacity_external();
+            for limit in agent.other_limits() {
+                match summary.limits.iter_mut().find(|l| l.name == limit.name) {
+                    Some(total) => {
+                        total.used += limit.used;
+                        total.max += limit.max;
+                        total.external += limit.external;
+                    }
+                    None => summary.limits.push(LimitView {
+                        name: limit.name.clone(),
+                        used: limit.used,
+                        max: limit.max,
+                        external: limit.external,
+                    }),
+                }
+            }
+        }
+        summary
+    }
+}
+
 /// Usage of one of an agent's host-wide limits
 pub struct LimitView {
     pub name: String,
@@ -89,6 +164,15 @@ pub struct LimitView {
 }
 
 impl LimitView {
+    /// Name for display, agents report it lowercase
+    pub fn label(&self) -> &str {
+        if self.name.eq_ignore_ascii_case("macos") {
+            "macOS"
+        } else {
+            &self.name
+        }
+    }
+
     pub fn from_agent(agent: &crate::agent_registry::AgentInfo) -> Vec<Self> {
         agent
             .limits
@@ -135,6 +219,7 @@ pub struct AgentDetailTemplate {
 /// Just what the shared agent header needs
 pub struct AgentHeader {
     pub agent_id: String,
+    pub hostname: String,
     pub revoked: bool,
     pub unavailable_at: Option<DateTime<Utc>>,
 }
@@ -275,6 +360,87 @@ mod tests {
         assert_eq!(
             split_labels(&agent),
             (strings(&["self-hosted", "macos"]), vec![])
+        );
+    }
+
+    fn summary(
+        online: bool,
+        active_vms: usize,
+        max_vms: u32,
+        limits: Vec<LimitView>,
+    ) -> AgentSummary {
+        AgentSummary {
+            agent_id: "agent".to_string(),
+            hostname: "host".to_string(),
+            agent_type: "tart".to_string(),
+            base_labels: vec![],
+            mapping_labels: vec![],
+            max_vms,
+            limits,
+            is_online: online,
+            active_vms,
+            created_at: Utc::now(),
+            revoked: false,
+            unavailable_at: None,
+            version: None,
+        }
+    }
+
+    fn limit(name: &str, used: usize, max: usize, external: usize) -> LimitView {
+        LimitView {
+            name: name.to_string(),
+            used,
+            max,
+            external,
+        }
+    }
+
+    #[test]
+    fn capacity_sums_connected_agents_and_their_limits() {
+        let agents = [
+            // tart: max_vms is only the macOS cap, the total limit is what the host runs
+            summary(
+                true,
+                1,
+                2,
+                vec![limit("macos", 1, 2, 0), limit("total", 2, 5, 0)],
+            ),
+            summary(
+                true,
+                0,
+                2,
+                vec![limit("macos", 1, 2, 1), limit("total", 1, 5, 1)],
+            ),
+            // proxmox reports no limits, max_vms is its total
+            summary(true, 2, 4, vec![]),
+            // offline agents have no capacity to give
+            summary(
+                false,
+                0,
+                2,
+                vec![limit("macos", 0, 2, 0), limit("total", 0, 5, 0)],
+            ),
+        ];
+        assert_eq!(
+            (agents[0].capacity_used(), agents[0].capacity_max()),
+            (2, 5)
+        );
+        assert_eq!(
+            (agents[2].capacity_used(), agents[2].capacity_max()),
+            (2, 4)
+        );
+
+        let capacity = CapacitySummary::from_agents(&agents);
+        assert_eq!(
+            (capacity.used, capacity.total, capacity.external),
+            (5, 14, 1)
+        );
+        // total is the headline, not repeated as a limit
+        assert_eq!(capacity.limits.len(), 1);
+        let limit = &capacity.limits[0];
+        assert_eq!(
+            (limit.label(), limit.used, limit.max, limit.external),
+            ("macOS", 2, 4, 1)
         );
     }
 }
