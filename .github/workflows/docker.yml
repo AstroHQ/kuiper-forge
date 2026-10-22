@@ -66,6 +66,8 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.db_backend }}-${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.db_backend }}-${{ matrix.platform }}
+          # fresh apt packages (ca-certificates) in the runtime stage on every build
+          no-cache-filters: runtime
 
       - name: Export digest
         run: |
