@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.7.5 - 2026-10-22
+#### Bug Fixes
+- **(tls)** rustls-webpki 0.103.16, fresh ca-certificates in the image - (519d2a6) - *jfro*
+
+- - -
 ## kuiper-forge-v0.7.4 - 2026-10-21
 #### Features
 - Forgejo user (@name) and instance (*) runner scopes - (7e00791) - *jfro*
