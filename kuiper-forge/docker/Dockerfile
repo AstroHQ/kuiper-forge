@@ -35,7 +35,9 @@ RUN touch kuiper-forge/src/main.rs kuiper-agent-proto/build.rs kuiper-agent-prot
 RUN cargo build --release -p kuiper-forge --no-default-features --features ${DB_BACKEND}
 
 # --- Runtime ---
-FROM debian:bookworm-slim
+# docker.yml never builds this stage from cache, so each release installs the
+# current ca-certificates (the system store is what reqwest/tonic trust)
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
