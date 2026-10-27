@@ -6,28 +6,26 @@
 //! - Manages the full VM lifecycle (clone, start, configure runner, wait, destroy)
 //! - Reports status back to the coordinator
 
+mod backend;
 mod config;
 mod error;
 mod ssh;
-mod vm_manager;
 
+use backend::ProxmoxBackend;
 use clap::Parser;
 use config::Config;
 use error::{Error, Result};
+use kuiper_agent_lib::vm_agent::{AgentInfo, RunOptions, VmAgent};
 use kuiper_agent_lib::{
-    AgentCertStore, AgentConfig as LibAgentConfig, LogCapture, RegistrationBundle, runtime,
-};
-use kuiper_agent_proto::{
-    AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType, VmInfo,
+    AgentCertStore, AgentConfig as LibAgentConfig, LogCapture, RegistrationBundle,
 };
 use kuiper_proxmox_api::{ProxmoxAuth, ProxmoxVEAPI};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-use vm_manager::VmManager;
 
 /// Proxmox Agent for CI Runner Coordination
 #[derive(Parser, Debug)]
@@ -182,89 +180,50 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // Create Proxmox API client
-    let proxmox = create_proxmox_client(&config)?;
-    let proxmox = Arc::new(proxmox);
-
-    // Create VM manager
-    let vm_manager = Arc::new(VmManager::new(
+    let proxmox = Arc::new(create_proxmox_client(&config)?);
+    let backend = Arc::new(ProxmoxBackend::new(
         proxmox,
+        config.agent.labels.clone(),
         config.vm.clone(),
         config.ssh.clone(),
     ));
 
-    // Spawn cleanup task
-    let cleanup_vm_manager = vm_manager.clone();
-    let cleanup_config = config.cleanup.clone();
-    tokio::spawn(async move {
-        let interval = Duration::from_secs(cleanup_config.cleanup_interval_mins as u64 * 60);
-        let max_age = Duration::from_secs(cleanup_config.max_vm_age_hours as u64 * 3600);
-        let mut ticker = tokio::time::interval(interval);
-
-        loop {
-            ticker.tick().await;
-            info!("Running stale VM cleanup");
-            cleanup_vm_manager.cleanup_stale_vms(max_age).await;
-        }
-    });
-
-    // Clone vm_manager for shutdown cleanup
-    let shutdown_vm_manager = vm_manager.clone();
-
-    // Create agent runner
     if args.debug_keep_vms {
         warn!(
             "Debug mode: VMs will NOT be deleted on failure, agent will exit on first runner failure"
         );
     }
-    let agent = ProxmoxAgent::new(config, vm_manager, cert_store, args.debug_keep_vms);
+    let agent = Arc::new(
+        VmAgent::new(
+            backend,
+            cert_store.clone(),
+            AgentInfo {
+                agent_type: "proxmox".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        )
+        .keep_failed_vms(args.debug_keep_vms),
+    );
 
-    // Live status: the agent updates this watch as its VM set changes; the runtime
-    // pushes the latest value to the coordinator (on change and on a timer).
-    let (status_tx, status_rx) = tokio::sync::watch::channel(agent.build_status().await);
-
-    // Bridge vm_manager state changes -> status watch.
-    let state_changes = agent.vm_manager.state_changes();
-    let bridge_agent = agent.clone();
-    tokio::spawn(async move {
-        loop {
-            state_changes.notified().await;
-            if status_tx.send(bridge_agent.build_status().await).is_err() {
-                break;
-            }
-        }
-    });
-
-    // Hand the connection off to the runtime, which drives the coordinator loop.
-    let upload_logs = agent.config.logging.upload;
+    let upload_logs = config.logging.upload;
     if !upload_logs {
         log_capture.disable();
     }
-    let connection = runtime::connect_with_logs(
-        LibAgentConfig {
-            coordinator_url: agent.config.coordinator.url.clone(),
-            coordinator_hostname: agent.config.coordinator.hostname.clone(),
-            registration_token: None,
-            agent_type: "proxmox".to_string(),
-        },
-        agent.cert_store.clone(),
-        status_rx,
-        Duration::from_secs(5),
-        Duration::from_secs(60),
-        upload_logs.then_some(log_capture),
-    );
-
-    // Run the command loop with graceful shutdown handling.
-    tokio::select! {
-        _ = agent.clone().serve(connection) => {
-            info!("Command stream ended");
-        }
-        _ = shutdown_signal() => {
-            info!("Shutdown signal received, cleaning up VMs...");
-            shutdown_vm_manager.destroy_all_vms().await;
-            info!("Graceful shutdown complete");
-        }
-    }
+    agent
+        .run(RunOptions {
+            agent_config: LibAgentConfig {
+                coordinator_url: config.coordinator.url.clone(),
+                coordinator_hostname: config.coordinator.hostname.clone(),
+                registration_token: None,
+                agent_type: "proxmox".to_string(),
+            },
+            initial_reconnect_delay: Duration::from_secs(5),
+            max_reconnect_delay: Duration::from_secs(60),
+            log_capture: upload_logs.then_some(log_capture),
+            cleanup_interval: Duration::from_secs(config.cleanup.cleanup_interval_mins as u64 * 60),
+            max_vm_age: Duration::from_secs(config.cleanup.max_vm_age_hours as u64 * 3600),
+        })
+        .await;
 
     Ok(())
 }
@@ -504,37 +463,6 @@ WantedBy=multi-user.target
     )
 }
 
-/// Wait for a shutdown signal (SIGTERM or SIGINT/Ctrl-C).
-async fn shutdown_signal() {
-    use tokio::signal;
-
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl-C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {
-            info!("Received Ctrl-C");
-        }
-        _ = terminate => {
-            info!("Received SIGTERM");
-        }
-    }
-}
-
 /// Create the Proxmox API client from configuration.
 fn create_proxmox_client(config: &Config) -> Result<ProxmoxVEAPI> {
     let auth = ProxmoxAuth::api_token(&config.proxmox.token_id, &config.proxmox.token_secret);
@@ -555,281 +483,6 @@ fn create_proxmox_client(config: &Config) -> Result<ProxmoxVEAPI> {
         config.proxmox.accept_invalid_certs,
     )
     .map_err(|e| Error::Vm(format!("Failed to create Proxmox client: {e}")))
-}
-
-/// The main Proxmox agent.
-struct ProxmoxAgent {
-    config: Config,
-    vm_manager: Arc<VmManager>,
-    cert_store: AgentCertStore,
-    debug_keep_vms: bool,
-}
-
-impl ProxmoxAgent {
-    /// Create a new Proxmox agent.
-    fn new(
-        config: Config,
-        vm_manager: Arc<VmManager>,
-        cert_store: AgentCertStore,
-        debug_keep_vms: bool,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            config,
-            vm_manager,
-            cert_store,
-            debug_keep_vms,
-        })
-    }
-
-    /// Select the template VMID for a create command.
-    ///
-    /// A fixed-capacity pool command names its capability's template. Otherwise it's the template_vmid of the first
-    /// mapping whose capability set (agent labels + that mapping's labels) covers the job's labels, mirroring how the
-    /// coordinator routes, or the default `template_vmid` if none does. See
-    /// [`kuiper_agent_lib::labels::mapping_for`].
-    fn select_template(&self, cmd: &CreateRunnerCommand) -> u32 {
-        match kuiper_agent_lib::labels::mapping_for(
-            &self.config.agent.labels,
-            &self.config.vm.template_vmid.to_string(),
-            &self.config.vm.template_mappings,
-            &cmd.label_set_id,
-            &cmd.labels,
-        ) {
-            Some(mapping) => {
-                info!(
-                    "Selected template {} for labels {:?} (matched mapping labels {:?})",
-                    mapping.template_vmid, cmd.labels, mapping.labels
-                );
-                mapping.template_vmid
-            }
-            None => {
-                info!(
-                    "No template mapping for labels {:?}, using default {}",
-                    cmd.labels, self.config.vm.template_vmid
-                );
-                self.config.vm.template_vmid
-            }
-        }
-    }
-}
-
-impl ProxmoxAgent {
-    async fn has_capacity(&self) -> bool {
-        self.vm_manager.has_capacity().await
-    }
-
-    /// `(active, max)` VM counts — for the capacity-rejection message.
-    async fn capacity(&self) -> (u32, u32) {
-        let active = self.vm_manager.active_count().await as u32;
-        (active, self.config.vm.concurrent_vms)
-    }
-
-    /// Read commands from the coordinator and act on them: check capacity, ack,
-    /// and spawn the (long-running) lifecycle so the loop keeps draining.
-    async fn serve(self: Arc<Self>, mut connection: runtime::Connection) {
-        while let Some(command) = connection.commands.recv().await {
-            match command {
-                runtime::RunnerCommand::Create(cmd) => {
-                    if !self.has_capacity().await {
-                        let (active, max) = self.capacity().await;
-                        warn!(
-                            "Rejecting CreateRunner for vm={}: at capacity ({}/{})",
-                            cmd.vm_name, active, max
-                        );
-                        let _ = connection
-                            .events
-                            .command_ack(
-                                cmd.command_id,
-                                false,
-                                format!("Capacity exceeded: max {max} VMs"),
-                            )
-                            .await;
-                        continue;
-                    }
-                    let _ = connection
-                        .events
-                        .command_ack(cmd.command_id.clone(), true, String::new())
-                        .await;
-                    let agent = self.clone();
-                    let events = connection.events.clone();
-                    tokio::spawn(async move { agent.handle_create_runner(cmd, events).await });
-                }
-                runtime::RunnerCommand::Destroy(cmd) => {
-                    let _ = connection
-                        .events
-                        .command_ack(cmd.command_id.clone(), true, String::new())
-                        .await;
-                    let agent = self.clone();
-                    let events = connection.events.clone();
-                    tokio::spawn(async move { agent.handle_destroy_runner(cmd, events).await });
-                }
-            }
-        }
-    }
-
-    /// Run a runner VM's full lifecycle to completion, reporting runner events.
-    /// Status updates are emitted automatically as the VM set changes (see the
-    /// status bridge in `main`), so this only sends lifecycle events.
-    async fn handle_create_runner(&self, cmd: CreateRunnerCommand, events: runtime::EventSender) {
-        // Select template based on job labels
-        let template_vmid = self.select_template(&cmd);
-
-        let params = vm_manager::RunnerParams {
-            registration_token: &cmd.registration_token,
-            labels: &cmd.labels,
-            runner_scope_url: &cmd.runner_scope_url,
-            runner_name: &cmd.vm_name,
-            jit_config: &cmd.jit_config,
-            forgejo: cmd.forgejo.as_deref(),
-        };
-        let result = if self.debug_keep_vms {
-            self.vm_manager
-                .run_lifecycle_debug(&cmd.vm_name, template_vmid, &params)
-                .await
-        } else {
-            self.vm_manager
-                .run_complete_lifecycle(&cmd.vm_name, template_vmid, &params)
-                .await
-        };
-
-        match result {
-            Ok((vmid, ip)) => {
-                info!("Runner {} completed successfully", cmd.vm_name);
-                if let Err(e) = events
-                    .runner_event(
-                        cmd.vm_name.clone(),
-                        vmid.to_string(),
-                        RunnerEventType::Completed,
-                        String::new(),
-                    )
-                    .await
-                {
-                    error!("Failed to send runner event: {}", e);
-                }
-                info!("Runner completed at IP {}", ip);
-            }
-            Err(e) => {
-                error!("Runner {} failed: {}", cmd.vm_name, e);
-
-                if self.debug_keep_vms {
-                    error!("Debug mode: VMs left running for inspection. Exiting agent.");
-                    std::process::exit(1);
-                }
-
-                if let Err(e2) = events
-                    .runner_event(
-                        cmd.vm_name.clone(),
-                        cmd.vm_name.clone(),
-                        RunnerEventType::Failed,
-                        e.to_string(),
-                    )
-                    .await
-                {
-                    error!("Failed to send runner event: {}", e2);
-                }
-            }
-        }
-    }
-
-    /// Destroy a runner VM, reporting the result.
-    async fn handle_destroy_runner(&self, cmd: DestroyRunnerCommand, events: runtime::EventSender) {
-        let vm_id = cmd.vm_id.clone();
-        // the coordinator names runners by VM name; report the event under that name so it
-        // finds the runner, whether it sent the name or the VMID
-        let runner_name = match vm_id.parse::<u32>() {
-            Ok(vmid) => self
-                .vm_manager
-                .list_vms()
-                .await
-                .into_iter()
-                .find(|vm| vm.vmid == vmid)
-                .map(|vm| vm.name)
-                .unwrap_or_else(|| vm_id.clone()),
-            Err(_) => vm_id.clone(),
-        };
-        info!(
-            "DestroyRunner received for {} (runner {})",
-            vm_id, runner_name
-        );
-
-        match self.vm_manager.force_destroy(&vm_id).await {
-            Ok(()) => {
-                info!("VM {} destroyed successfully", vm_id);
-                if let Err(e) = events
-                    .runner_event(
-                        runner_name,
-                        vm_id,
-                        RunnerEventType::Destroyed,
-                        String::new(),
-                    )
-                    .await
-                {
-                    error!("Failed to send runner event: {}", e);
-                }
-            }
-            Err(e) => {
-                error!("Failed to destroy VM {}: {}", vm_id, e);
-                if let Err(e2) = events
-                    .runner_event(runner_name, vm_id, RunnerEventType::Failed, e.to_string())
-                    .await
-                {
-                    error!("Failed to send runner event: {}", e2);
-                }
-            }
-        }
-    }
-
-    /// Build current agent status.
-    async fn build_status(&self) -> AgentStatus {
-        let vms = self.vm_manager.list_vms().await;
-        let active_count = vms.len() as u32;
-        let available = self.config.vm.concurrent_vms.saturating_sub(active_count);
-        let hostname = gethostname::gethostname().to_string_lossy().to_string();
-
-        // Advertise one capability set per template mapping (base agent.labels
-        // plus the mapping's labels), so the coordinator can route jobs for each
-        // mapped template here. With no mappings this is a single set: agent.labels.
-        let labels = self.config.agent.labels.clone();
-        let label_sets: Vec<LabelSet> = kuiper_agent_lib::labels::capabilities(
-            &labels,
-            &self.config.vm.template_vmid.to_string(),
-            &self.config.vm.template_mappings,
-        )
-        .into_iter()
-        .map(|c| LabelSet {
-            labels: c.labels,
-            limits: Vec::new(),
-            pool_size: c.pool,
-            id: c.id,
-            is_default: c.is_default,
-        })
-        .collect();
-
-        AgentStatus {
-            active_vms: active_count,
-            available_slots: available,
-            vms: vms
-                .into_iter()
-                .map(|vm| VmInfo {
-                    vm_id: vm.vmid.to_string(),
-                    name: vm.name,
-                    state: vm.state.as_str().to_string(),
-                    ip_address: vm.ip_address.unwrap_or_default(),
-                })
-                .collect(),
-            // Identity fields - required for first message
-            agent_id: self.cert_store.get_agent_id().unwrap_or_default(),
-            hostname,
-            agent_type: "proxmox".to_string(),
-            labels,
-            max_vms: self.config.vm.concurrent_vms,
-            label_sets,
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
-            limits: Vec::new(),
-            // forgejo-runner one-job on Linux and Windows VMs
-            runner_kinds: vec!["forgejo".to_string()],
-        }
-    }
 }
 
 /// Initialize logging with file output and stdout.

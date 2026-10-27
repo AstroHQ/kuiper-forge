@@ -1943,8 +1943,10 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dirs",
+ "gethostname",
  "kuiper-agent-proto",
  "libc",
+ "russh",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -2021,13 +2023,13 @@ name = "kuiper-proxmox-agent"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "dirs",
  "gethostname",
  "kuiper-agent-lib",
  "kuiper-agent-proto",
  "kuiper-proxmox-api",
- "russh",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -2060,6 +2062,7 @@ name = "kuiper-tart-agent"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "dialoguer",
@@ -2069,7 +2072,6 @@ dependencies = [
  "kuiper-agent-lib",
  "kuiper-agent-proto",
  "reqwest",
- "russh",
  "semver",
  "serde",
  "serde_json",

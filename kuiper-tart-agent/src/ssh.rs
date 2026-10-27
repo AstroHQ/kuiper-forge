@@ -1,25 +1,23 @@
-//! SSH client for configuring GitHub runners on VMs.
+//! SSH client for configuring GitHub runners on VMs, over the shared transport in
+//! [`kuiper_agent_lib::ssh`].
 //!
-//! Supports both password and key-based authentication using the russh library.
+//! Each command opens its own connection, so a VM that reboots or drops a session mid-job
+//! only fails the one poll.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Local;
-use russh::ChannelMsg;
-use russh::client::{self, Config, Handle, Handler};
-use russh::keys::PublicKeyOrCertificate;
-use russh::keys::key::PrivateKeyWithHashAlg;
-use russh::keys::{HashAlg, PrivateKey};
+use kuiper_agent_lib::forgejo_runner;
+use kuiper_agent_lib::github_runner::{self, Arch, RunnerConfigBuilder};
+use kuiper_agent_lib::ssh::{CommandOutput, SshClient, SshSession};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
+use crate::backend::GuestOs;
 use crate::error::{Error, Result};
-use crate::vm_manager::GuestOs;
 
 /// SSH authentication method.
 #[derive(Debug, Clone, Default)]
@@ -28,7 +26,7 @@ pub enum SshAuth {
     Password(String),
     /// Key-based authentication with path to private key file
     KeyFile(PathBuf),
-    /// No explicit auth - will try agent or default keys
+    /// No explicit auth - will try default keys
     #[default]
     None,
 }
@@ -97,155 +95,39 @@ impl SshConfig {
             timeout: Duration::from_secs(config.timeout_secs),
         }
     }
-}
 
-/// Client handler for russh.
-struct SshHandler;
-
-impl Handler for SshHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        _server_public_key: &PublicKeyOrCertificate,
-    ) -> std::result::Result<bool, Self::Error> {
-        // Accept all host keys for ephemeral VMs
-        // In production, you might want to verify against known hosts
-        Ok(true)
+    /// The SSH client for this config. Keys are read here, so a key fixed on disk is picked up
+    /// by the next command.
+    fn client(&self) -> Result<SshClient> {
+        let auth = match &self.auth {
+            SshAuth::Password(password) => {
+                kuiper_agent_lib::ssh::SshAuth::Password(password.clone())
+            }
+            SshAuth::KeyFile(path) => kuiper_agent_lib::ssh::SshAuth::key_file(path)?,
+            SshAuth::None => kuiper_agent_lib::ssh::SshAuth::default_key()?,
+        };
+        Ok(SshClient::new(&self.username, auth).with_timeout(self.timeout))
     }
 }
 
 /// Wait for SSH port to become available.
 pub async fn wait_for_ssh(ip: Ipv4Addr, timeout: Duration) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let addr = format!("{ip}:22");
-
-    debug!("Waiting for SSH on {}", addr);
-
-    while tokio::time::Instant::now() < deadline {
-        let connect_result = TcpStream::connect(&addr).await;
-        match connect_result {
-            Ok(_) => {
-                info!("SSH port available on {}", ip);
-                return Ok(());
-            }
-            Err(_) => {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
-
-    Err(Error::Timeout("waiting for SSH"))
+    kuiper_agent_lib::ssh::wait_for_port(SocketAddr::new(ip.into(), 22), timeout).await?;
+    Ok(())
 }
 
-/// Load a private key from a file.
-fn load_key(path: &PathBuf) -> Result<PrivateKey> {
-    let key_data = std::fs::read_to_string(path)
-        .map_err(|e| Error::Ssh(format!("Failed to read key: {e}")))?;
-    PrivateKey::from_openssh(&key_data).map_err(|e| Error::Ssh(format!("Failed to parse key: {e}")))
+async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<SshSession> {
+    Ok(config.client()?.connect(ip.into()).await?)
 }
 
-/// RSA keys need a SHA-2 signature: OpenSSH 8.8+ turned off `ssh-rsa` (SHA-1) by default, and russh uses SHA-1 when
-/// the hash is `None`. Other key types ignore the hash.
-async fn rsa_hash<H: Handler>(session: &Handle<H>, key: &PrivateKey) -> Option<HashAlg> {
-    if !key.algorithm().is_rsa() {
-        return None;
-    }
-    match session.best_supported_rsa_hash().await {
-        Ok(Some(hash)) => hash,
-
-        // server didn't list its algorithms, assume a modern one
-        _ => Some(HashAlg::Sha256),
-    }
-}
-
-/// Establish an SSH connection to a remote host.
-async fn connect(ip: Ipv4Addr, config: &SshConfig) -> Result<Handle<SshHandler>> {
-    let ssh_config = Config::default();
-
-    let addr = format!("{ip}:22");
-    debug!("Connecting to SSH at {}", addr);
-
-    let timeout_result = tokio::time::timeout(
-        config.timeout,
-        client::connect(Arc::new(ssh_config), &addr, SshHandler),
-    )
-    .await;
-
-    let mut session = match timeout_result {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(Error::Ssh(format!("Failed to connect: {e}"))),
-        Err(_) => return Err(Error::Timeout("SSH connection")),
-    };
-
-    // Authenticate based on config
-    let auth_result = match &config.auth {
-        SshAuth::Password(password) => {
-            debug!("Authenticating with password for user {}", config.username);
-            session
-                .authenticate_password(&config.username, password)
-                .await
-                .map_err(|e| Error::Ssh(format!("Password auth failed: {e}")))?
-        }
-        SshAuth::KeyFile(key_path) => {
-            debug!(
-                "Authenticating with key file {:?} for user {}",
-                key_path, config.username
-            );
-            let key = load_key(key_path)?;
-            let hash = rsa_hash(&session, &key).await;
-            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
-            session
-                .authenticate_publickey(&config.username, key_with_hash)
-                .await
-                .map_err(|e| Error::Ssh(format!("Key auth failed: {e}")))?
-        }
-        SshAuth::None => {
-            // Try to find default SSH key
-            let default_key_path = dirs::home_dir()
-                .map(|h| h.join(".ssh").join("id_ed25519"))
-                .filter(|p| p.exists())
-                .or_else(|| {
-                    dirs::home_dir()
-                        .map(|h| h.join(".ssh").join("id_rsa"))
-                        .filter(|p| p.exists())
-                });
-
-            if let Some(key_path) = default_key_path {
-                debug!(
-                    "Authenticating with default key {:?} for user {}",
-                    key_path, config.username
-                );
-                let key = load_key(&key_path)?;
-                let hash = rsa_hash(&session, &key).await;
-                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
-                session
-                    .authenticate_publickey(&config.username, key_with_hash)
-                    .await
-                    .map_err(|e| Error::Ssh(format!("Key auth failed: {e}")))?
-            } else {
-                return Err(Error::Ssh(
-                    "No authentication method specified and no default SSH key found".to_string(),
-                ));
-            }
-        }
-    };
-
-    if auth_result.success() {
-        debug!("SSH authentication successful");
-        Ok(session)
-    } else {
-        Err(Error::Ssh("Authentication failed".to_string()))
-    }
+/// stdout of a command that exited 0, else [`Error::SshCommand`].
+fn stdout(output: CommandOutput) -> Result<String> {
+    Ok(output.into_stdout()?)
 }
 
 /// Execute a command on a remote host via SSH.
 pub async fn ssh_exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result<String> {
-    debug!(
-        local_only = tracing::field::Empty,
-        "SSH exec on {}: {}", ip, command
-    );
-    exec(ip, config, command).await
+    stdout(connect(ip, config).await?.execute(command).await?)
 }
 
 /// Execute a command that carries a secret (a runner token, a JIT config), logging only
@@ -256,64 +138,12 @@ pub async fn ssh_exec_secret(
     command: &str,
     what: &str,
 ) -> Result<String> {
-    debug!(
-        "SSH exec on {}: {} ({} bytes, redacted)",
-        ip,
-        what,
-        command.len()
-    );
-    exec(ip, config, command).await
-}
-
-async fn exec(ip: Ipv4Addr, config: &SshConfig, command: &str) -> Result<String> {
-    let session = connect(ip, config).await?;
-
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to open channel: {e}")))?;
-
-    channel
-        .exec(true, command)
-        .await
-        .map_err(|e| Error::Ssh(format!("Failed to exec command: {e}")))?;
-
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut exit_status = None;
-
-    loop {
-        let msg = channel.wait().await;
-        match msg {
-            Some(ChannelMsg::Data { data }) => {
-                stdout.extend_from_slice(&data);
-            }
-            Some(ChannelMsg::ExtendedData { data, ext }) => {
-                if ext == 1 {
-                    // stderr
-                    stderr.extend_from_slice(&data);
-                }
-            }
-            Some(ChannelMsg::ExitStatus {
-                exit_status: status,
-            }) => {
-                exit_status = Some(status);
-            }
-            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-            Some(_) => {}
-        }
-    }
-
-    let exit_code = exit_status.unwrap_or(0);
-
-    if exit_code == 0 {
-        Ok(String::from_utf8_lossy(&stdout).to_string())
-    } else {
-        Err(Error::SshCommand {
-            exit_code,
-            stderr: String::from_utf8_lossy(&stderr).to_string(),
-        })
-    }
+    stdout(
+        connect(ip, config)
+            .await?
+            .execute_secret(command, what)
+            .await?,
+    )
 }
 
 /// Log a failed command's stderr locally, it's kept out of the error message.
@@ -329,9 +159,13 @@ fn log_command_stderr(e: &Error) {
     }
 }
 
-use kuiper_agent_lib::forgejo_runner;
-use kuiper_agent_lib::github_runner::{self, Arch, Platform};
-use kuiper_agent_lib::shell::escape_posix;
+/// GitHub runner commands for a VM. The runner lives in `~/actions-runner`.
+fn runner_commands(os: GuestOs) -> RunnerConfigBuilder {
+    match os {
+        GuestOs::MacOS => RunnerConfigBuilder::macos("~/actions-runner"),
+        GuestOs::Linux => RunnerConfigBuilder::linux("~/actions-runner"),
+    }
+}
 
 /// Ensure the GitHub Actions runner is installed on the VM.
 /// Downloads and extracts the runner if not present.
@@ -342,10 +176,10 @@ pub async fn ensure_runner_installed(
     runner_version: &str,
     os: GuestOs,
 ) -> Result<()> {
+    let commands = runner_commands(os);
+
     // Check if runner is already installed
-    let check_cmd =
-        "test -d ~/actions-runner && test -f ~/actions-runner/run.sh && echo 'installed'";
-    match ssh_exec(ip, config, check_cmd).await {
+    match ssh_exec(ip, config, &commands.check_installed_command()).await {
         Ok(output) if output.trim() == "installed" => {
             debug!("GitHub Actions runner already installed on {}", ip);
             return Ok(());
@@ -355,22 +189,7 @@ pub async fn ensure_runner_installed(
         }
     }
 
-    // Determine which version to install
-    let version = if runner_version.is_empty() || runner_version == "latest" {
-        // Fetch latest version from GitHub API
-        match github_runner::fetch_latest_version().await {
-            Some(v) => v,
-            None => {
-                info!(
-                    "Could not fetch latest runner version, using fallback v{}",
-                    github_runner::FALLBACK_VERSION
-                );
-                github_runner::FALLBACK_VERSION.to_string()
-            }
-        }
-    } else {
-        runner_version.to_string()
-    };
+    let version = github_runner::resolve_version(runner_version).await;
 
     // Detect architecture
     let arch_output = ssh_exec(ip, config, "uname -m").await?;
@@ -381,22 +200,15 @@ pub async fn ensure_runner_installed(
         ))
     })?;
 
-    let platform = match os {
-        GuestOs::MacOS => Platform::MacOS,
-        GuestOs::Linux => Platform::Linux,
-    };
     info!(
-        "Installing GitHub Actions runner v{} for {}-{} on {}",
+        "Installing GitHub Actions runner v{} for {:?}-{} on {}",
         version,
-        platform.as_str(),
+        os,
         arch.as_str(),
         ip
     );
 
-    // Generate install script from template
-    let install_cmd = github_runner::install_command("~/actions-runner", &version, platform, arch);
-
-    match ssh_exec(ip, config, &install_cmd).await {
+    match ssh_exec(ip, config, &commands.install_command(&version, arch)).await {
         Ok(output) => {
             info!("GitHub Actions runner installed on {}", ip);
             debug!(
@@ -450,12 +262,11 @@ pub async fn configure_runner(
     );
 
     // Configure the runner
-    let config_cmd = format!(
-        "cd ~/actions-runner && ./config.sh --url {} --token {} --name {} --labels {} --ephemeral --unattended",
-        escape_posix(runner_scope_url),
-        escape_posix(registration_token),
-        escape_posix(runner_name),
-        escape_posix(&labels_str),
+    let config_cmd = runner_commands(os).config_command(
+        runner_scope_url,
+        registration_token,
+        labels,
+        runner_name,
     );
 
     match ssh_exec_secret(ip, config, &config_cmd, "config.sh (registration token)").await {

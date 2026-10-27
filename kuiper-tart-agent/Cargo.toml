@@ -16,6 +16,7 @@ kuiper-agent-proto = { version = "0.4.0", path = "../kuiper-agent-proto" }
 kuiper-agent-lib = { version = "0.5.1", path = "../kuiper-agent-lib" }
 
 tokio = { workspace = true }
+async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
@@ -33,7 +34,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 gethostname = { workspace = true }
 url = { workspace = true }
-russh = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }

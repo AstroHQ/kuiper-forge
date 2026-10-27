@@ -9,17 +9,9 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     Config(String),
 
-    /// Capacity exceeded - cannot create more VMs.
-    #[error("Capacity exceeded: {0}")]
-    CapacityExceeded(String),
-
     /// VM clone failed.
     #[error("Clone failed: {0}")]
     CloneFailed(String),
-
-    /// VM not found.
-    #[error("VM not found: {0}")]
-    VmNotFound(String),
 
     /// Operation timed out.
     #[error("Timeout: {0}")]
@@ -54,13 +46,20 @@ pub enum Error {
     #[error("Agent error: {0}")]
     AgentLib(#[from] kuiper_agent_lib::Error),
 
-    /// VM is already running.
-    #[error("VM already running: {0}")]
-    VmAlreadyRunning(String),
-
     /// Installation error.
     #[error("Install error: {0}")]
     Install(String),
+}
+
+impl From<kuiper_agent_lib::ssh::SshError> for Error {
+    fn from(e: kuiper_agent_lib::ssh::SshError) -> Self {
+        use kuiper_agent_lib::ssh::SshError;
+        match e {
+            SshError::Timeout(what) => Error::Timeout(what),
+            SshError::Command { exit_code, stderr } => Error::SshCommand { exit_code, stderr },
+            e => Error::Ssh(e.to_string()),
+        }
+    }
 }
 
 /// Result type alias for kuiper-tart-agent.

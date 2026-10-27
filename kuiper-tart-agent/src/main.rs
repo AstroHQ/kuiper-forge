@@ -19,6 +19,7 @@
 //! kuiper-tart-agent
 //! ```
 
+mod backend;
 mod config;
 mod error;
 mod host_checks;
@@ -26,27 +27,21 @@ mod install;
 mod setup;
 mod ssh;
 mod update;
-mod vm_manager;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use kuiper_agent_lib::labels::Capability;
-use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture, runtime};
-use kuiper_agent_proto::{
-    AgentStatus, CreateRunnerCommand, DestroyRunnerCommand, LabelSet, RunnerEventType,
-};
-use tokio::signal;
+use kuiper_agent_lib::vm_agent::{AgentInfo, RunOptions, VmAgent, VmBackend};
+use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture};
 use tracing::{error, info, warn};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use backend::TartBackend;
 use config::Config;
-use error::Error;
 use ssh::SshConfig;
-use vm_manager::{GuestOs, VmManager};
 
 /// Tart VM Agent for CI Runner Coordination
 #[derive(Parser, Debug)]
@@ -218,23 +213,6 @@ async fn main() -> anyhow::Result<()> {
         config.tart.max_macos_vms, config.tart.max_total_vms
     );
 
-    // Build capabilities: base_labels + one image_mapping's labels each, then base_image alone (shared with the
-    // proxmox agent via kuiper_agent_lib::labels so the two can't drift).
-    let base_labels: Vec<String> = config
-        .agent
-        .labels
-        .iter()
-        .map(|l| l.to_lowercase())
-        .collect();
-
-    let capabilities = kuiper_agent_lib::labels::capabilities(
-        &base_labels,
-        &config.tart.base_image,
-        &config.tart.image_mappings,
-    );
-
-    info!("Capabilities: {:?}", capabilities);
-
     let pooled: u32 = config
         .tart
         .image_mappings
@@ -248,118 +226,74 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Initialize VM manager with SSH config from file
-    let tart_config = config.tart.clone();
-    let ssh_config = SshConfig::from_config(&config.tart.ssh);
-    let log_dir = data_dir.join("logs");
-    let vm_manager = Arc::new(VmManager::new(tart_config, ssh_config, log_dir));
-
-    // Initialize certificate store
-    let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
-
-    // Connection-only config. The advertised labels, label_sets, and max_vms
-    // travel in the first AgentStatus stream message (built by TartAgent), not
-    // here — so the coordinator always sees the current values from config.
-    let agent_config = AgentConfig {
-        coordinator_url: config.coordinator.url.clone(),
-        coordinator_hostname: config.coordinator.hostname.clone(),
-        registration_token: None, // Already registered, using stored certificates
-        agent_type: "tart".to_string(),
-    };
+    let backend = Arc::new(TartBackend::new(
+        config.tart.clone(),
+        config.agent.labels.clone(),
+        SshConfig::from_config(&config.tart.ssh),
+        data_dir.join("logs"),
+    ));
+    info!("Capabilities: {:?}", backend.capabilities());
 
     // an unpulled OCI image's OS is unknown and counts as macOS, which can block linux jobs on the macOS limit.
     // Pulling finds out
-    let images: Vec<String> = capabilities.iter().map(|c| c.id.clone()).collect();
-    let pull_vm_manager = vm_manager.clone();
+    let pull_backend = backend.clone();
     tokio::spawn(async move {
-        while !pull_vm_manager.resolve_image_os(&images).await {
-            tokio::time::sleep(vm_manager::IMAGE_OS_RETRY_INTERVAL).await;
-        }
-    });
-
-    // Create agent instance. Pass the agent-level metadata (labels, capabilities)
-    // through; max_vms and limits come from vm_manager in build_status.
-    let agent = TartAgent::new(
-        agent_config,
-        cert_store,
-        vm_manager.clone(),
-        config.clone(),
-        base_labels,
-        capabilities,
-    );
-
-    // Spawn cleanup task
-    let cleanup_vm_manager = vm_manager.clone();
-    let cleanup_config = config.cleanup.clone();
-    let log_retention_days = config.logging.retention_days;
-    let cleanup_log_dir = data_dir.join("logs");
-    tokio::spawn(async move {
-        let interval = Duration::from_secs(cleanup_config.cleanup_interval_mins as u64 * 60);
-        let max_age = Duration::from_secs(cleanup_config.max_vm_age_hours as u64 * 3600);
-        let mut ticker = tokio::time::interval(interval);
-
-        loop {
-            ticker.tick().await;
-            info!("Running stale VM cleanup");
-            cleanup_vm_manager.cleanup_stale_vms(max_age).await;
-            cleanup_old_logs(&cleanup_log_dir, log_retention_days);
+        while !pull_backend.resolve_image_os().await {
+            tokio::time::sleep(backend::IMAGE_OS_RETRY_INTERVAL).await;
         }
     });
 
     // count external VMs before the first status so the coordinator never sees too many free slots
-    vm_manager.refresh_external().await;
-    let external_vm_manager = vm_manager.clone();
+    backend.refresh_external().await;
+    let external_backend = backend.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(vm_manager::EXTERNAL_POLL_INTERVAL);
+        let mut ticker = tokio::time::interval(backend::EXTERNAL_POLL_INTERVAL);
         loop {
             ticker.tick().await;
-            external_vm_manager.refresh_external().await;
+            external_backend.refresh_external().await;
         }
     });
 
-    // Clone vm_manager for shutdown cleanup
-    let shutdown_vm_manager = vm_manager.clone();
-
-    // Live status: the agent updates this watch as its VM set changes; the runtime
-    // pushes the latest value to the coordinator (on change and on a timer).
-    let (status_tx, status_rx) = tokio::sync::watch::channel(agent.build_status().await);
-
-    // Bridge vm_manager state changes -> status watch.
-    let state_changes = agent.vm_manager.state_changes();
-    let bridge_agent = agent.clone();
+    let log_retention_days = config.logging.retention_days;
+    let cleanup_log_dir = data_dir.join("logs");
+    let cleanup_interval = Duration::from_secs(config.cleanup.cleanup_interval_mins as u64 * 60);
     tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(cleanup_interval);
         loop {
-            state_changes.notified().await;
-            if status_tx.send(bridge_agent.build_status().await).is_err() {
-                break;
-            }
+            ticker.tick().await;
+            cleanup_old_logs(&cleanup_log_dir, log_retention_days);
         }
     });
 
-    // Hand the connection off to the runtime, which drives the coordinator loop.
+    let agent = Arc::new(VmAgent::new(
+        backend,
+        cert_store,
+        AgentInfo {
+            agent_type: "tart".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    ));
+
     if !config.logging.upload {
         log_capture.disable();
     }
-    let connection = runtime::connect_with_logs(
-        agent.agent_config.clone(),
-        agent.cert_store.clone(),
-        status_rx,
-        Duration::from_secs(config.reconnect.initial_delay_secs),
-        Duration::from_secs(config.reconnect.max_delay_secs),
-        config.logging.upload.then_some(log_capture),
-    );
-
-    // Run the command loop with graceful shutdown handling.
-    tokio::select! {
-        _ = agent.clone().serve(connection) => {
-            info!("Command stream ended");
-        }
-        _ = shutdown_signal() => {
-            info!("Shutdown signal received, cleaning up VMs...");
-            shutdown_vm_manager.destroy_all_vms().await;
-            info!("Graceful shutdown complete");
-        }
-    }
+    agent
+        .run(RunOptions {
+            // the advertised labels, label sets and max_vms go in AgentStatus, not here, so the
+            // coordinator always sees the current values from config
+            agent_config: AgentConfig {
+                coordinator_url: config.coordinator.url.clone(),
+                coordinator_hostname: config.coordinator.hostname.clone(),
+                registration_token: None, // Already registered, using stored certificates
+                agent_type: "tart".to_string(),
+            },
+            initial_reconnect_delay: Duration::from_secs(config.reconnect.initial_delay_secs),
+            max_reconnect_delay: Duration::from_secs(config.reconnect.max_delay_secs),
+            log_capture: config.logging.upload.then_some(log_capture),
+            cleanup_interval,
+            max_vm_age: Duration::from_secs(config.cleanup.max_vm_age_hours as u64 * 3600),
+        })
+        .await;
 
     Ok(())
 }
@@ -529,348 +463,6 @@ async fn cmd_uninstall(purge: bool, config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The main Tart agent that manages the connection to the coordinator.
-struct TartAgent {
-    agent_config: AgentConfig,
-    cert_store: AgentCertStore,
-    vm_manager: Arc<VmManager>,
-    config: Config,
-    /// Base labels this agent advertises (flat list; sent in AgentStatus).
-    labels: Vec<String>,
-    /// Label sets derived from image_mappings plus base_image (sent in AgentStatus).
-    capabilities: Vec<Capability>,
-}
-
-impl TartAgent {
-    fn new(
-        agent_config: AgentConfig,
-        cert_store: AgentCertStore,
-        vm_manager: Arc<VmManager>,
-        config: Config,
-        labels: Vec<String>,
-        capabilities: Vec<Capability>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            agent_config,
-            cert_store,
-            vm_manager,
-            config,
-            labels,
-            capabilities,
-        })
-    }
-
-    /// Select the VM image for a create command.
-    ///
-    /// A fixed-capacity pool command names its capability's image. Otherwise it's the image of the first mapping whose
-    /// capability set (agent labels plus that mapping's labels) covers the job's labels, mirroring how the coordinator
-    /// routes, or `base_image` if none does. See [`kuiper_agent_lib::labels::mapping_for`].
-    fn select_image(&self, cmd: &CreateRunnerCommand) -> String {
-        let tart = &self.config.tart;
-        match kuiper_agent_lib::labels::mapping_for(
-            &self.config.agent.labels,
-            &tart.base_image,
-            &tart.image_mappings,
-            &cmd.label_set_id,
-            &cmd.labels,
-        ) {
-            Some(mapping) => {
-                info!(
-                    "Selected image '{}' for labels {:?} (matched mapping labels {:?})",
-                    mapping.image, cmd.labels, mapping.labels
-                );
-                mapping.image.clone()
-            }
-            None => {
-                info!(
-                    "No image mapping for labels {:?}, using default '{}'",
-                    cmd.labels, tart.base_image
-                );
-                tart.base_image.clone()
-            }
-        }
-    }
-}
-
-impl TartAgent {
-    async fn has_capacity(&self, os: GuestOs) -> bool {
-        // an external VM may have started since the last poll
-        self.vm_manager.refresh_external().await;
-        self.vm_manager.available_slots(os).await > 0
-    }
-
-    /// Read commands from the coordinator and act on them: check capacity, ack,
-    /// and spawn the (long-running) lifecycle so the loop keeps draining.
-    async fn serve(self: Arc<Self>, mut connection: runtime::Connection) {
-        while let Some(command) = connection.commands.recv().await {
-            match command {
-                runtime::RunnerCommand::Create(cmd) => {
-                    let image = self.select_image(&cmd);
-                    let os = self.vm_manager.image_os(&image).await;
-                    if !self.has_capacity(os).await {
-                        let summary = self.vm_manager.capacity_summary().await;
-                        warn!(
-                            "Rejecting CreateRunner for vm={}: at capacity ({})",
-                            cmd.vm_name, summary
-                        );
-                        let _ = connection
-                            .events
-                            .command_ack(
-                                cmd.command_id,
-                                false,
-                                format!("Capacity exceeded: {summary}"),
-                            )
-                            .await;
-                        continue;
-                    }
-                    let _ = connection
-                        .events
-                        .command_ack(cmd.command_id.clone(), true, String::new())
-                        .await;
-                    let agent = self.clone();
-                    let events = connection.events.clone();
-                    tokio::spawn(
-                        async move { agent.handle_create_runner(cmd, image, events).await },
-                    );
-                }
-                runtime::RunnerCommand::Destroy(cmd) => {
-                    let _ = connection
-                        .events
-                        .command_ack(cmd.command_id.clone(), true, String::new())
-                        .await;
-                    let agent = self.clone();
-                    let events = connection.events.clone();
-                    tokio::spawn(async move { agent.handle_destroy_runner(cmd, events).await });
-                }
-            }
-        }
-    }
-
-    /// Run a runner VM's full lifecycle to completion, reporting runner events.
-    /// Status updates are emitted automatically as the VM set changes (see the
-    /// status bridge in `main`), so this only sends lifecycle events.
-    async fn handle_create_runner(
-        &self,
-        cmd: CreateRunnerCommand,
-        selected_image: String,
-        events: runtime::EventSender,
-    ) {
-        let vm_name = cmd.vm_name.clone();
-
-        // Validate inputs early and warn about suspicious values
-        if cmd.registration_token.is_empty() && cmd.jit_config.is_empty() && cmd.forgejo.is_none() {
-            warn!(
-                "CreateRunner called with empty registration token and no JIT config - \
-                 runner configuration will fail. Is the coordinator in dry-run mode?"
-            );
-        }
-        if cmd.runner_scope_url.is_empty() {
-            warn!("CreateRunner called with empty runner_scope_url");
-        }
-
-        info!(
-            "CreateRunner starting: vm={}, labels={:?}, scope={}",
-            vm_name,
-            cmd.labels,
-            if cmd.runner_scope_url.is_empty() {
-                "(empty)"
-            } else {
-                &cmd.runner_scope_url
-            }
-        );
-
-        let result: std::result::Result<(String, String), Error> = async {
-            // 1. Clone and start VM from selected image
-            info!(
-                "[{}] Step 1/5: Creating VM from template '{}'...",
-                vm_name, selected_image
-            );
-            let vm_id = self
-                .vm_manager
-                .create_vm(&vm_name, &selected_image)
-                .await
-                .map_err(|e| {
-                    error!("[{}] VM creation failed: {}", vm_name, e);
-                    e
-                })?;
-
-            // 2. Wait for IP and SSH
-            info!("[{}] Step 2/5: Waiting for VM to be ready...", vm_name);
-            let ip = self
-                .vm_manager
-                .wait_for_ready(&vm_id, Duration::from_secs(120))
-                .await
-                .map_err(|e| {
-                    error!("[{}] VM failed to become ready: {}", vm_name, e);
-                    e
-                })?;
-            info!("[{}] VM ready at IP {}", vm_name, ip);
-
-            // 3. Configure the runner
-            let program = if let Some(forgejo) = cmd.forgejo.as_deref() {
-                info!(
-                    "[{}] Step 3/5: Preparing forgejo-runner for handle {}...",
-                    vm_name, forgejo.handle
-                );
-                self.vm_manager
-                    .configure_forgejo_runner(&vm_id, forgejo, &cmd.labels)
-                    .await
-                    .map_err(|e| {
-                        error!("[{}] forgejo-runner setup failed: {}", vm_name, e);
-                        e
-                    })?;
-                ssh::RunnerProgram::Forgejo
-            } else {
-                info!("[{}] Step 3/5: Configuring GitHub runner...", vm_name);
-                self.vm_manager
-                    .configure_runner(
-                        &vm_id,
-                        &cmd.registration_token,
-                        &cmd.labels,
-                        &cmd.runner_scope_url,
-                        &cmd.jit_config,
-                    )
-                    .await
-                    .map_err(|e| {
-                        error!(
-                            "[{}] Runner configuration failed: {}. \
-                             This typically indicates an invalid GitHub registration token.",
-                            vm_name, e
-                        );
-                        e
-                    })?;
-                ssh::RunnerProgram::GitHub
-            };
-
-            let _ = events
-                .runner_event(
-                    vm_name.clone(),
-                    vm_id.clone(),
-                    RunnerEventType::Started,
-                    String::new(),
-                )
-                .await;
-
-            // 4. Wait for runner to complete (this blocks until the job finishes)
-            info!(
-                "[{}] Step 4/5: Runner configured, waiting for job completion...",
-                vm_name
-            );
-            self.vm_manager
-                .wait_for_runner_exit(&vm_id, &cmd.jit_config, program)
-                .await
-                .map_err(|e| {
-                    error!("[{}] Runner execution failed: {}", vm_name, e);
-                    e
-                })?;
-
-            // 5. Cleanup
-            info!("[{}] Step 5/5: Cleaning up VM...", vm_name);
-            self.vm_manager.destroy_vm(&vm_id).await?;
-
-            Ok((vm_id, ip.to_string()))
-        }
-        .await;
-
-        match result {
-            Ok((vm_id, ip)) => {
-                info!(
-                    "CreateRunner completed successfully: vm={}, ip={}",
-                    vm_id, ip
-                );
-                let _ = events
-                    .runner_event(vm_name, vm_id, RunnerEventType::Completed, String::new())
-                    .await;
-            }
-            Err(e) => {
-                error!("CreateRunner FAILED for vm={}: {}", vm_name, e);
-                // Attempt cleanup on failure
-                info!("[{}] Attempting cleanup after failure...", vm_name);
-                if let Err(cleanup_err) = self.vm_manager.destroy_vm(&vm_name).await {
-                    warn!(
-                        "[{}] Cleanup after failure also failed: {}",
-                        vm_name, cleanup_err
-                    );
-                }
-                let _ = events
-                    .runner_event(
-                        vm_name.clone(),
-                        vm_name,
-                        RunnerEventType::Failed,
-                        e.to_string(),
-                    )
-                    .await;
-            }
-        }
-    }
-
-    /// Destroy a runner VM, reporting the result.
-    async fn handle_destroy_runner(&self, cmd: DestroyRunnerCommand, events: runtime::EventSender) {
-        let vm_id = cmd.vm_id.clone();
-
-        match self.vm_manager.destroy_vm(&vm_id).await {
-            Ok(()) => {
-                info!("DestroyRunner completed: vm={}", vm_id);
-                let _ = events
-                    .runner_event(
-                        vm_id.clone(),
-                        vm_id,
-                        RunnerEventType::Destroyed,
-                        String::new(),
-                    )
-                    .await;
-            }
-            Err(e) => {
-                error!("DestroyRunner failed: {}", e);
-                let _ = events
-                    .runner_event(vm_id.clone(), vm_id, RunnerEventType::Failed, e.to_string())
-                    .await;
-            }
-        }
-    }
-
-    /// Build current agent status.
-    async fn build_status(&self) -> AgentStatus {
-        let hostname = gethostname::gethostname().to_string_lossy().to_string();
-
-        // each set also says which limits its VMs use, so the coordinator doesn't hold linux jobs to the macOS limit
-        let mut label_sets = Vec::with_capacity(self.capabilities.len());
-        let mut available_slots = 0;
-
-        // fixed-capacity pools use max_vms as their target, so a macOS-only agent mustn't claim the total limit
-        let mut max_vms = 0;
-        for capability in &self.capabilities {
-            let os = self.vm_manager.image_os(&capability.id).await;
-            available_slots = available_slots.max(self.vm_manager.available_slots(os).await);
-            max_vms = max_vms.max(self.vm_manager.max_vms(os));
-            label_sets.push(LabelSet {
-                labels: capability.labels.clone(),
-                limits: os.limit_names().iter().map(|l| l.to_string()).collect(),
-                pool_size: capability.pool,
-                id: capability.id.clone(),
-                is_default: capability.is_default,
-            });
-        }
-
-        AgentStatus {
-            active_vms: self.vm_manager.active_count().await as u32,
-            available_slots,
-            vms: self.vm_manager.get_vms().await,
-            // Identity fields - required for first message
-            agent_id: self.cert_store.get_agent_id().unwrap_or_default(),
-            hostname,
-            agent_type: self.agent_config.agent_type.clone(),
-            labels: self.labels.clone(),
-            max_vms,
-            label_sets,
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
-            limits: self.vm_manager.limits().await,
-            // forgejo-runner one-job, from kuiper-forge's forgejo-runner releases
-            runner_kinds: vec!["forgejo".to_string()],
-        }
-    }
-}
-
 /// Initialize logging with file output and stdout.
 fn init_logging(data_dir: &Path, retention_days: usize) -> anyhow::Result<LogCapture> {
     let log_dir = data_dir.join("logs");
@@ -950,34 +542,5 @@ fn cleanup_old_logs(log_dir: &Path, retention_days: u32) {
     }
     if removed > 0 {
         info!("Cleaned up {removed} runner log file(s) older than {retention_days} days");
-    }
-}
-
-/// Wait for a shutdown signal (SIGTERM or SIGINT/Ctrl-C).
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl-C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {
-            info!("Received Ctrl-C");
-        }
-        _ = terminate => {
-            info!("Received SIGTERM");
-        }
     }
 }
