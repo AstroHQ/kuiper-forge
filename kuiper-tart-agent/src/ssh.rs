@@ -16,8 +16,8 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info};
 
+use crate::backend::GuestOs;
 use crate::error::{Error, Result};
-use crate::vm_manager::GuestOs;
 
 /// SSH authentication method.
 #[derive(Debug, Clone, Default)]

@@ -9,17 +9,9 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     Config(String),
 
-    /// Capacity exceeded - cannot create more VMs.
-    #[error("Capacity exceeded: {0}")]
-    CapacityExceeded(String),
-
     /// VM clone failed.
     #[error("Clone failed: {0}")]
     CloneFailed(String),
-
-    /// VM not found.
-    #[error("VM not found: {0}")]
-    VmNotFound(String),
 
     /// Operation timed out.
     #[error("Timeout: {0}")]
@@ -53,10 +45,6 @@ pub enum Error {
     /// Agent library error.
     #[error("Agent error: {0}")]
     AgentLib(#[from] kuiper_agent_lib::Error),
-
-    /// VM is already running.
-    #[error("VM already running: {0}")]
-    VmAlreadyRunning(String),
 
     /// Installation error.
     #[error("Install error: {0}")]

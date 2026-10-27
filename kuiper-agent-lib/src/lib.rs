@@ -13,6 +13,7 @@
 //! - GitHub Actions runner version fetching and download URL construction
 //! - SSH to runner VMs and the runner install/config commands run over it ([`ssh`], [`github_runner`])
 //! - Setting up and running one job's runner on a VM over SSH ([`guest`])
+//! - A generic agent that runs runner VMs on any [`vm_agent::VmBackend`] ([`vm_agent`])
 
 pub mod bundle;
 mod certs;
@@ -26,6 +27,7 @@ pub mod log_upload;
 pub mod runtime;
 pub mod shell;
 pub mod ssh;
+pub mod vm_agent;
 
 pub use bundle::RegistrationBundle;
 pub use certs::AgentCertStore;

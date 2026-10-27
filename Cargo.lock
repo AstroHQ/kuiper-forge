@@ -1943,6 +1943,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "dirs",
+ "gethostname",
  "kuiper-agent-proto",
  "libc",
  "russh",
@@ -2022,6 +2023,7 @@ name = "kuiper-proxmox-agent"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "dirs",
  "gethostname",
@@ -2060,6 +2062,7 @@ name = "kuiper-tart-agent"
 version = "0.5.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "dialoguer",

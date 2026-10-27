@@ -17,6 +17,7 @@ kuiper-agent-lib = { version = "0.5.1", path = "../kuiper-agent-lib" }
 kuiper-proxmox-api = { version = "0.1.2", path = "../kuiper-proxmox-api" }
 
 tokio = { workspace = true }
+async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
