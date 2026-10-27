@@ -9,7 +9,7 @@
 
 mod tracker;
 
-pub use tracker::{Limit, LimitNames, ReserveError, Tracker, Usage, VmState};
+pub use tracker::{Claim, Limit, LimitNames, Removal, ReserveError, Tracker, Usage, VmState};
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -338,7 +338,8 @@ impl<B: VmBackend> VmAgent<B> {
             Ok(vm) => vm,
             Err(e) => {
                 error!("[{}] VM creation failed: {}", name, e);
-                self.tracker.untrack(name).await;
+                // nothing was created, so a destroy waiting on it is done
+                self.tracker.untrack(name, Ok(())).await;
                 return Err(e);
             }
         };
@@ -354,7 +355,7 @@ impl<B: VmBackend> VmAgent<B> {
         {
             warn!("[{}] VM was destroyed while being created", name);
             let result = self.backend.destroy(&vm, name).await;
-            self.tracker.untrack(name).await;
+            self.tracker.untrack(name, outcome(&result)).await;
             result?;
             return Err(format!("VM {name} was destroyed while being created").into());
         }
@@ -450,23 +451,21 @@ impl<B: VmBackend> VmAgent<B> {
         }
     }
 
-    /// Destroy the VM for runner `name`. A no-op if it's untracked or already being destroyed. A VM
-    /// still being created is destroyed by its lifecycle once the create finishes.
+    /// Destroy the VM for runner `name`. A no-op if it's untracked. If it's still being created, or another
+    /// destroy has it, waits for that to finish, so a VM is really gone when this returns (shutdown relies on it).
     pub async fn destroy(&self, name: &str) -> BackendResult<()> {
-        let Some(vm) = self.tracker.claim_for_destroy(name).await else {
-            return Ok(());
-        };
-        let Some(vm) = vm else {
-            info!(
-                "VM {} is still being created, destroying it once it is",
-                name
-            );
-            return Ok(());
+        let vm = match self.tracker.claim_for_destroy(name).await {
+            Claim::Untracked => return Ok(()),
+            Claim::Wait(removal) => {
+                info!("Waiting for VM {} to be destroyed", name);
+                return Ok(removal.wait().await?);
+            }
+            Claim::Destroy(vm) => vm,
         };
         info!("Destroying VM {}", name);
         let started = Instant::now();
         let result = self.backend.destroy(&vm, name).await;
-        self.tracker.untrack(name).await;
+        self.tracker.untrack(name, outcome(&result)).await;
         info!(
             "VM {} destroyed in {:.1}s",
             name,
@@ -541,6 +540,11 @@ impl<B: VmBackend> VmAgent<B> {
     }
 }
 
+/// A destroy's result, for anyone waiting on it.
+fn outcome(result: &BackendResult<()>) -> Result<(), String> {
+    result.as_ref().map(|_| ()).map_err(|e| e.to_string())
+}
+
 async fn send_event(
     events: &EventSender,
     runner_name: String,
@@ -578,5 +582,112 @@ pub async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => info!("Received Ctrl-C"),
         () = terminate => info!("Received SIGTERM"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::sync::Semaphore;
+
+    /// A backend whose creates block until `clones` hands out a permit.
+    struct SlowCloneBackend {
+        clones: Semaphore,
+        destroyed: AtomicU32,
+    }
+
+    #[async_trait]
+    impl VmBackend for SlowCloneBackend {
+        type Vm = u32;
+
+        fn labels(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn capabilities(&self) -> Vec<Capability> {
+            Vec::new()
+        }
+        fn select_image(&self, _cmd: &CreateRunnerCommand) -> String {
+            "image".into()
+        }
+        fn limits(&self) -> Vec<Limit> {
+            vec![Limit {
+                name: "total",
+                max: 4,
+            }]
+        }
+        async fn image_limits(&self, _image: &str) -> LimitNames {
+            &["total"]
+        }
+        async fn create(&self, _name: &str, _image: &str) -> BackendResult<u32> {
+            self.clones.acquire().await.unwrap().forget();
+            Ok(7)
+        }
+        fn vm_id(&self, vm: &u32) -> String {
+            vm.to_string()
+        }
+        async fn start(&self, _vm: &u32) -> BackendResult<IpAddr> {
+            unreachable!("destroyed before it starts")
+        }
+        async fn run_job(
+            &self,
+            _vm: &u32,
+            _ip: IpAddr,
+            _job: &Job<'_>,
+            _ctx: &JobContext,
+        ) -> BackendResult<()> {
+            unreachable!("destroyed before it starts")
+        }
+        async fn destroy(&self, _vm: &u32, _name: &str) -> BackendResult<()> {
+            self.destroyed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_destroy_waits_for_create_in_flight() {
+        let backend = Arc::new(SlowCloneBackend {
+            clones: Semaphore::new(0),
+            destroyed: AtomicU32::new(0),
+        });
+        let dir = std::env::temp_dir().join("kuiper-vm-agent-test-certs");
+        let agent = Arc::new(VmAgent::new(
+            backend.clone(),
+            AgentCertStore::new(dir),
+            AgentInfo {
+                agent_type: "test".into(),
+                version: "0".into(),
+            },
+        ));
+        let (events, _rx) = EventSender::for_test();
+        let cmd = CreateRunnerCommand {
+            vm_name: "runner-1".into(),
+            ..Default::default()
+        };
+        agent
+            .tracker
+            .reserve("runner-1", &["total"], &Usage::new())
+            .await
+            .unwrap();
+        let lifecycle = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.lifecycle(&cmd, "image", &events).await })
+        };
+
+        // a DestroyRunner (or shutdown) arrives mid-clone
+        let destroy = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.destroy("runner-1").await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!destroy.is_finished(), "destroy must wait for the clone");
+        assert_eq!(backend.destroyed.load(Ordering::SeqCst), 0);
+
+        // the clone finishes: the lifecycle destroys the new VM, then the destroy returns
+        backend.clones.add_permits(1);
+        destroy.await.unwrap().unwrap();
+        assert_eq!(backend.destroyed.load(Ordering::SeqCst), 1);
+        assert_eq!(agent.tracker.count().await, 0);
+        assert!(lifecycle.await.unwrap().is_err());
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kuiper_agent_proto::{CapacityLimit, VmInfo};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, RwLock, watch};
 use tokio::time::Instant;
 use tracing::debug;
 
@@ -58,6 +58,29 @@ pub type LimitNames = &'static [&'static str];
 pub type Usage = HashMap<&'static str, u32>;
 
 /// Why a VM couldn't be reserved.
+/// What a destroy should do with a VM, from [`Tracker::claim_for_destroy`].
+pub enum Claim<V> {
+    /// It isn't tracked: already destroyed, or never was
+    Untracked,
+    /// The caller has it and must destroy it, then [`Tracker::untrack`] it
+    Destroy(V),
+    /// Something else will destroy it: its lifecycle once the create finishes, or a destroy already under way.
+    /// Wait for that
+    Wait(Removal),
+}
+
+/// Resolves when a VM someone else is destroying is untracked.
+pub struct Removal(watch::Receiver<Outcome>);
+
+impl Removal {
+    /// Wait for the VM to be untracked. Returns how its destroy went.
+    pub async fn wait(mut self) -> Result<(), String> {
+        // the sender is dropped with the tracked VM, which ends this
+        while self.0.changed().await.is_ok() {}
+        self.0.borrow().clone().unwrap_or(Ok(()))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ReserveError {
     #[error("Capacity exceeded: {0}")]
@@ -67,9 +90,14 @@ pub enum ReserveError {
     AlreadyRunning(String),
 }
 
+/// How a VM's destroy went, once it's untracked: `Err` holds the backend's error.
+type Outcome = Option<Result<(), String>>;
+
 struct Tracked<V> {
     /// The backend's VM, once created
     vm: Option<V>,
+    /// Dropped (closing the channel) when the VM is untracked, after the destroy's outcome is set
+    removed: watch::Sender<Outcome>,
     /// The backend's ID for it, the runner name until it's created
     vm_id: String,
     state: VmState,
@@ -120,6 +148,7 @@ impl<V: Clone> Tracker<V> {
             name.to_string(),
             Tracked {
                 vm: None,
+                removed: watch::Sender::new(None),
                 vm_id: name.to_string(),
                 state: VmState::Creating,
                 ip: None,
@@ -171,38 +200,34 @@ impl<V: Clone> Tracker<V> {
         self.set_state(name, VmState::Running).await;
     }
 
-    /// Mark `name` as being destroyed. Returns `None` (and logs why) when the destroy should be skipped:
-    /// it isn't tracked, or another destroy has it. Otherwise returns its backend VM, `None` inside if it's
-    /// still being created.
-    pub async fn claim_for_destroy(&self, name: &str) -> Option<Option<V>> {
+    /// Mark `name` as being destroyed, and say who destroys it. A VM still being created, or already being
+    /// destroyed, is destroyed by whoever has it; the caller waits for that.
+    pub async fn claim_for_destroy(&self, name: &str) -> Claim<V> {
         let mut vms = self.vms.write().await;
-        let claimed = match vms.get_mut(name) {
-            None => {
-                debug!(
-                    "Skipping destroy of {}: not tracked (already destroyed)",
-                    name
-                );
-                None
-            }
-            Some(tracked) if tracked.state == VmState::Destroying => {
-                debug!("Skipping destroy of {}: already being destroyed", name);
-                None
-            }
-            Some(tracked) => {
-                tracked.state = VmState::Destroying;
-                Some(tracked.vm.clone())
-            }
+        let Some(tracked) = vms.get_mut(name) else {
+            debug!("{} isn't tracked (already destroyed)", name);
+            return Claim::Untracked;
+        };
+        if tracked.state == VmState::Destroying {
+            debug!("{} is already being destroyed, waiting for that", name);
+            return Claim::Wait(Removal(tracked.removed.subscribe()));
+        }
+        tracked.state = VmState::Destroying;
+        let claim = match &tracked.vm {
+            Some(vm) => Claim::Destroy(vm.clone()),
+            // the lifecycle sees it's being destroyed once the create finishes, and destroys it
+            None => Claim::Wait(Removal(tracked.removed.subscribe())),
         };
         drop(vms);
-        if claimed.is_some() {
-            self.changed.notify_one();
-        }
-        claimed
+        self.changed.notify_one();
+        claim
     }
 
-    /// Stop tracking `name`.
-    pub async fn untrack(&self, name: &str) {
-        if self.vms.write().await.remove(name).is_some() {
+    /// Stop tracking `name`, telling anyone waiting on its destroy how it went.
+    pub async fn untrack(&self, name: &str, outcome: Result<(), String>) {
+        let removed = self.vms.write().await.remove(name);
+        if let Some(tracked) = removed {
+            tracked.removed.send_replace(Some(outcome));
             self.changed.notify_one();
         }
     }
@@ -435,17 +460,26 @@ mod tests {
         t.reserve("runner-a", LINUX, &Usage::new()).await.unwrap();
         t.set_created("runner-a", 120, "120".into(), LINUX).await;
 
-        assert_eq!(t.claim_for_destroy("runner-a").await, Some(Some(120)));
-        // a second destroy while the first is in flight does nothing
-        assert_eq!(t.claim_for_destroy("runner-a").await, None);
-        t.untrack("runner-a").await;
+        assert!(matches!(
+            t.claim_for_destroy("runner-a").await,
+            Claim::Destroy(120)
+        ));
+        // a second destroy while the first is in flight waits for it
+        let Claim::Wait(second) = t.claim_for_destroy("runner-a").await else {
+            panic!("second destroy should wait");
+        };
+        t.untrack("runner-a", Err("delete failed".into())).await;
+        assert_eq!(second.wait().await, Err("delete failed".to_string()));
 
         // the backend hands 120 to another runner's VM
         t.reserve("runner-b", LINUX, &Usage::new()).await.unwrap();
         t.set_created("runner-b", 120, "120".into(), LINUX).await;
 
         // runner-a's late cleanup leaves runner-b alone
-        assert_eq!(t.claim_for_destroy("runner-a").await, None);
+        assert!(matches!(
+            t.claim_for_destroy("runner-a").await,
+            Claim::Untracked
+        ));
         assert_eq!(t.find("120").await.as_deref(), Some("runner-b"));
     }
 
@@ -453,9 +487,17 @@ mod tests {
     async fn test_destroy_while_creating() {
         let t = tracker(2, 2);
         t.reserve("runner-c", LINUX, &Usage::new()).await.unwrap();
-        assert_eq!(t.claim_for_destroy("runner-c").await, Some(None));
+        let Claim::Wait(removal) = t.claim_for_destroy("runner-c").await else {
+            panic!("a VM being created is destroyed by its lifecycle");
+        };
+        let waiter = tokio::spawn(removal.wait());
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "the destroy waits for the create");
+
         // the create finishing finds it destroyed, and keeps the VM to destroy itself
         assert!(!t.set_created("runner-c", 7, "7".into(), LINUX).await);
+        t.untrack("runner-c", Ok(())).await;
+        assert_eq!(waiter.await.unwrap(), Ok(()));
     }
 
     #[tokio::test(start_paused = true)]
@@ -471,7 +513,7 @@ mod tests {
             .await
             .expect("a VM being destroyed counts as torn down");
 
-        t.untrack("runner-d").await;
+        t.untrack("runner-d", Ok(())).await;
         tokio::time::timeout(Duration::from_secs(10), t.torn_down("runner-d"))
             .await
             .expect("an untracked VM counts as torn down");

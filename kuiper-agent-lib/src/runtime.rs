@@ -59,6 +59,13 @@ pub struct EventSender {
 }
 
 impl EventSender {
+    /// A sender whose events land in the returned receiver, for tests.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (Self, mpsc::Receiver<AgentMessage>) {
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        (Self { tx }, rx)
+    }
+
     /// Acknowledge (accept or reject) a command from the coordinator.
     pub async fn command_ack(
         &self,
