@@ -9,9 +9,8 @@
 
 use crate::config::{SshConfig, VmConfig};
 use crate::error::{Error, Result};
-use crate::ssh::{self, RunnerConfigBuilder, SshSession};
-use kuiper_agent_lib::forgejo_runner;
-use kuiper_agent_proto::ForgejoRunner;
+use crate::ssh;
+use kuiper_agent_lib::guest::{Guest, RunnerError, RunnerVersions};
 use kuiper_proxmox_api::ProxmoxVEAPI;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,16 +18,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, warn};
 
-/// Parameters for configuring a GitHub Actions runner on a VM.
-pub struct RunnerParams<'a> {
-    pub registration_token: &'a str,
-    pub labels: &'a [String],
-    pub runner_scope_url: &'a str,
-    pub runner_name: &'a str,
-    pub jit_config: &'a str,
-    /// Set for Forgejo jobs: run `forgejo-runner one-job` instead of the GitHub runner
-    pub forgejo: Option<&'a ForgejoRunner>,
-}
+/// What to run on a VM for one job.
+pub use kuiper_agent_lib::guest::Job as RunnerParams;
 
 /// Information about a running VM.
 #[derive(Debug, Clone)]
@@ -249,537 +240,32 @@ impl VmManager {
         Ok(())
     }
 
-    /// Configure the GitHub runner on a VM.
-    ///
-    /// Returns `(is_windows, shell_is_powershell)`:
-    /// - `is_windows`: true if the VM is running Windows
-    /// - `shell_is_powershell`: true if Windows SSH shell is PowerShell (vs cmd.exe)
+    /// Set up and run the job's runner on a VM, blocking until the job is done.
     pub async fn configure_runner(
         &self,
         vmid: u32,
         ip: &str,
         params: &RunnerParams<'_>,
-    ) -> Result<(bool, bool)> {
-        let RunnerParams {
-            registration_token,
-            labels,
-            runner_scope_url,
-            runner_name,
-            jit_config,
-            forgejo,
-        } = params;
-        // Update state
-        if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
-            vm.state = VmState::Configuring;
-        }
-
+    ) -> Result<()> {
+        self.set_state(vmid, VmState::Configuring).await;
         info!("Configuring runner on VM {} at {}", vmid, ip);
 
-        // Connect via SSH
         let mut session = ssh::client(&self.ssh_config)?
             .connect_with_retries(ssh::parse_ip(ip)?, self.ssh_config.retries)
             .await?;
+        let mut guest = Guest::detect(&mut session, format!("VM {vmid}")).await?;
+        guest.sync_clock().await;
 
-        // Detect OS type and shell type
-        let (is_windows, shell_is_powershell) = self.detect_os_type(&mut session).await?;
-        info!(
-            "VM {} detected as {} (shell: {})",
-            vmid,
-            if is_windows { "Windows" } else { "Linux" },
-            if is_windows {
-                if shell_is_powershell {
-                    "PowerShell"
-                } else {
-                    "cmd.exe"
-                }
-            } else {
-                "bash/sh"
-            }
-        );
-
-        // Force time sync on Windows — cloned VMs often have stale clocks
-        // which causes JIT token validation to fail ("token is not valid until ...")
-        if is_windows {
-            info!("Syncing Windows clock on VM {}", vmid);
-            let sync_cmd = if shell_is_powershell {
-                "net start w32time; w32tm /resync /force"
-            } else {
-                "powershell -Command \"net start w32time; w32tm /resync /force\""
-            };
-            match session.execute(sync_cmd).await {
-                Ok(output) if output.exit_code == 0 => {
-                    debug!("Time sync output (VM {}): {}", vmid, output.stdout.trim());
-                }
-                Ok(output) => {
-                    warn!(
-                        "Time sync failed on VM {} (exit {}): {}",
-                        vmid,
-                        output.exit_code,
-                        output.stderr.trim()
-                    );
-                }
-                Err(e) => {
-                    warn!("Time sync command failed on VM {}: {}", vmid, e);
-                }
-            }
-        }
-
-        if let Some(forgejo) = forgejo {
-            self.run_forgejo_job(vmid, &mut session, forgejo, labels, is_windows)
-                .await?;
-            session.close().await?;
-            return Ok((is_windows, shell_is_powershell));
-        }
-
-        // Build runner commands
-        let runner_dir = if is_windows {
-            r"C:\actions-runner"
-        } else {
-            "~/actions-runner"
+        let versions = RunnerVersions {
+            github: &self.vm_config.runner_version,
+            forgejo: &self.vm_config.forgejo_runner_version,
+            forgejo_url: &self.vm_config.forgejo_runner_url,
         };
-
-        let builder = if is_windows {
-            if shell_is_powershell {
-                RunnerConfigBuilder::windows_powershell(runner_dir)
-            } else {
-                RunnerConfigBuilder::windows(runner_dir)
-            }
-        } else {
-            RunnerConfigBuilder::linux(runner_dir)
-        };
-
-        // Check if runner is installed
-        let check_cmd = builder.check_installed_command();
-        let check_output = session.execute(&check_cmd).await?;
-        if check_output.stdout.trim() != "installed" {
-            // Determine version to install
-            let version = if self.vm_config.runner_version.is_empty()
-                || self.vm_config.runner_version == "latest"
-            {
-                match crate::ssh::github_runner::fetch_latest_version().await {
-                    Some(v) => v,
-                    None => {
-                        info!(
-                            "Could not fetch latest runner version, using fallback v{}",
-                            crate::ssh::github_runner::FALLBACK_VERSION
-                        );
-                        crate::ssh::github_runner::FALLBACK_VERSION.to_string()
-                    }
-                }
-            } else {
-                self.vm_config.runner_version.clone()
-            };
-
-            // Detect architecture - for Windows, default to x64; for Linux, detect via uname
-            let arch = if is_windows {
-                crate::ssh::github_runner::Arch::X64
-            } else {
-                let uname_output = session.execute("uname -m").await?;
-                crate::ssh::github_runner::Arch::from_uname(&uname_output.stdout)
-                    .unwrap_or(crate::ssh::github_runner::Arch::X64)
-            };
-
-            info!(
-                "GitHub Actions runner not installed on VM {}, installing v{} ({})...",
-                vmid,
-                version,
-                arch.as_str()
-            );
-            let install_cmd = builder.install_command(&version, arch);
-            let install_output = session.execute(&install_cmd).await?;
-            if install_output.exit_code != 0 {
-                error!(
-                    local_only = tracing::field::Empty,
-                    "Runner installation failed: stdout={}, stderr={}",
-                    install_output.stdout,
-                    install_output.stderr
-                );
-                return Err(Error::runner(format!(
-                    "Failed to install runner (exit code {})",
-                    install_output.exit_code
-                )));
-            }
-            info!(
-                local_only = tracing::field::Empty,
-                "Runner installed successfully: {}",
-                install_output.stdout.trim()
-            );
-        } else {
-            debug!("GitHub Actions runner already installed on VM {}", vmid);
-        }
-
-        // Choose between JIT path (skip config, run with --jitconfig) and legacy path (config + run)
-        let run_cmd = if !jit_config.is_empty() {
-            info!("Using JIT config on VM {} (skipping config.sh)", vmid);
-
-            // Write JIT config to a file on the VM to avoid shell escaping/length issues
-            let write_cmd = builder.write_jit_config_command(jit_config);
-            info!(
-                "Writing JIT config file on VM {} ({} bytes)",
-                vmid,
-                jit_config.len()
-            );
-            let write_output = session
-                .execute_secret(&write_cmd, "write JIT config")
-                .await?;
-            if write_output.exit_code != 0 {
-                error!(
-                    local_only = tracing::field::Empty,
-                    "JIT config write failed on VM {}: {}",
-                    vmid,
-                    write_output.stderr.trim()
-                );
-                return Err(Error::runner(format!(
-                    "Failed to write JIT config to VM (exit code {})",
-                    write_output.exit_code
-                )));
-            }
-            if !write_output.stdout.is_empty() {
-                info!(
-                    local_only = tracing::field::Empty,
-                    "JIT config write stdout (VM {}): {}",
-                    vmid,
-                    write_output.stdout.trim()
-                );
-            }
-            if !write_output.stderr.is_empty() {
-                warn!(
-                    local_only = tracing::field::Empty,
-                    "JIT config write stderr (VM {}): {}",
-                    vmid,
-                    write_output.stderr.trim()
-                );
-            }
-
-            // Update state — no config step needed for JIT
-            if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
-                vm.state = VmState::RunnerActive;
-            }
-
-            builder.run_command_jit_from_file()
-        } else {
-            // Legacy path: config.sh + run.sh
-            let config_cmd =
-                builder.config_command(runner_scope_url, registration_token, labels, runner_name);
-
-            info!("Running configuration command on VM {}", vmid);
-            let output = session
-                .execute_secret(&config_cmd, "config.sh (registration token)")
-                .await?;
-            if output.exit_code != 0 {
-                error!(
-                    local_only = tracing::field::Empty,
-                    "Runner configuration failed (exit {}): stdout={}, stderr={}",
-                    output.exit_code,
-                    output.stdout,
-                    output.stderr
-                );
-                return Err(Error::runner(format!(
-                    "Configuration failed with exit code {}",
-                    output.exit_code
-                )));
-            }
-            if !output.stdout.is_empty() {
-                info!(
-                    local_only = tracing::field::Empty,
-                    "Config output: {}",
-                    output.stdout.trim()
-                );
-            }
-
-            // Update state
-            if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
-                vm.state = VmState::RunnerActive;
-            }
-
-            builder.run_command_direct()
-        };
-
-        // Run the runner and wait for it to complete
-        info!(
-            "Running runner on VM {} (will block until job completes)",
-            vmid
-        );
-        let run_start = Instant::now();
-        let output = self.execute_runner(&mut session, &run_cmd, vmid).await?;
-        let run_elapsed = run_start.elapsed();
-
-        info!(
-            "Runner completed on VM {} with exit code {} in {:.1}s",
-            vmid,
-            output.exit_code,
-            run_elapsed.as_secs_f64()
-        );
-        if !output.stdout.is_empty() {
-            info!(
-                local_only = tracing::field::Empty,
-                "Runner stdout (VM {}): {}",
-                vmid,
-                output.stdout.trim()
-            );
-        }
-        if !output.stderr.is_empty() {
-            info!(
-                local_only = tracing::field::Empty,
-                "Runner stderr (VM {}): {}",
-                vmid,
-                output.stderr.trim()
-            );
-        }
-
-        // If the runner exited suspiciously fast, grab as much diagnostic info as possible
-        // before the VM is destroyed
-        if run_elapsed < Duration::from_secs(30) {
-            if !jit_config.is_empty() {
-                warn!(
-                    "JIT runner on VM {} exited in {:.1}s — runner was pre-assigned a job, \
-                     this likely means the runner binary failed to start",
-                    vmid,
-                    run_elapsed.as_secs_f64()
-                );
-            } else {
-                warn!(
-                    "Runner on VM {} exited in {:.1}s — may not have picked up a job",
-                    vmid,
-                    run_elapsed.as_secs_f64()
-                );
-            }
-
-            // Always log stdout/stderr at WARN level for fast exits (even if empty)
-            warn!(
-                local_only = tracing::field::Empty,
-                "Early exit diagnostics (VM {}): exit_code={}, stdout_len={}, stderr_len={}, \
-                 stdout={:?}, stderr={:?}",
-                vmid,
-                output.exit_code,
-                output.stdout.len(),
-                output.stderr.len(),
-                output.stdout.chars().take(2000).collect::<String>(),
-                output.stderr.chars().take(2000).collect::<String>(),
-            );
-
-            // Try to grab runner diagnostic logs
-            let diag_cmd = builder.diag_log_command(100);
-            match session.execute(&diag_cmd).await {
-                Ok(diag) => {
-                    if diag.stdout.trim().is_empty() {
-                        warn!(
-                            "Runner _diag (VM {}): no diagnostic logs found \
-                             (runner may not have started at all)",
-                            vmid
-                        );
-                    } else {
-                        warn!(
-                            local_only = tracing::field::Empty,
-                            "Runner _diag (VM {}): {}",
-                            vmid,
-                            diag.stdout.trim()
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Runner _diag (VM {}): failed to fetch diagnostic logs: {}",
-                        vmid, e
-                    );
-                }
-            }
-
-            // On Windows, also check if the runner binary exists and .NET is available
-            if is_windows {
-                let check_cmd = builder.check_installed_command();
-                if let Ok(check) = session.execute(&check_cmd).await {
-                    warn!(
-                        "Runner install check (VM {}): {}",
-                        vmid,
-                        if check.stdout.trim() == "installed" {
-                            "runner binary present"
-                        } else {
-                            "runner binary NOT FOUND"
-                        }
-                    );
-                }
-            }
-        }
-
-        if output.exit_code != 0 {
-            return Err(Error::runner(format!(
-                "Runner exited with code {}",
-                output.exit_code
-            )));
-        }
+        let runner = guest.prepare(params, &versions).await?;
+        self.set_state(vmid, VmState::RunnerActive).await;
+        self.until_torn_down(vmid, guest.run(runner)).await?;
 
         session.close().await?;
-        Ok((is_windows, shell_is_powershell))
-    }
-
-    /// Install forgejo-runner if needed, then run one Forgejo job attempt and wait for it.
-    ///
-    /// Linux VMs use `~/forgejo-runner` and bash; Windows VMs use `C:\forgejo-runner` and
-    /// PowerShell scripts sent with `-EncodedCommand`, which work from cmd.exe and
-    /// PowerShell SSH shells alike.
-    async fn run_forgejo_job(
-        &self,
-        vmid: u32,
-        session: &mut SshSession,
-        forgejo: &ForgejoRunner,
-        labels: &[String],
-        is_windows: bool,
-    ) -> Result<()> {
-        let win_dir = forgejo_runner::WINDOWS_RUNNER_DIR;
-        let check_cmd = if is_windows {
-            forgejo_runner::windows_check_installed_command(win_dir)
-        } else {
-            forgejo_runner::check_installed_command()
-        };
-        let check = session.execute(&check_cmd).await?;
-        if check.stdout.trim() != "installed" {
-            let version =
-                forgejo_runner::resolve_version(&self.vm_config.forgejo_runner_version).to_string();
-            let (os, arch) = if is_windows {
-                // like the GitHub runner path: x64 Windows only for now
-                (
-                    forgejo_runner::Os::Windows,
-                    crate::ssh::github_runner::Arch::X64,
-                )
-            } else {
-                let uname = session.execute("uname -m").await?;
-                let arch = crate::ssh::github_runner::Arch::from_uname(&uname.stdout).ok_or_else(
-                    || {
-                        Error::runner(format!(
-                            "forgejo-runner has no release for architecture '{}'",
-                            uname.stdout.trim()
-                        ))
-                    },
-                )?;
-                (forgejo_runner::Os::Linux, arch)
-            };
-            let url = forgejo_runner::download_url(
-                &self.vm_config.forgejo_runner_url,
-                &version,
-                os,
-                arch,
-            );
-            info!(
-                "forgejo-runner not installed on VM {}, installing v{} ({}) from {}...",
-                vmid,
-                version,
-                arch.as_str(),
-                url
-            );
-            let install_cmd = if is_windows {
-                forgejo_runner::windows_install_command(&url, win_dir)
-            } else {
-                forgejo_runner::install_command(&url, &version, os, arch)
-            };
-            let install = session.execute(&install_cmd).await?;
-            if install.exit_code != 0 {
-                error!(
-                    local_only = tracing::field::Empty,
-                    "forgejo-runner installation failed on VM {}: stdout={}, stderr={}",
-                    vmid,
-                    install.stdout,
-                    install.stderr
-                );
-                return Err(Error::runner(format!(
-                    "Failed to install forgejo-runner v{version} (exit code {})",
-                    install.exit_code
-                )));
-            }
-            info!(
-                local_only = tracing::field::Empty,
-                "forgejo-runner installed on VM {}: {}",
-                vmid,
-                install.stdout.trim()
-            );
-        } else {
-            debug!("forgejo-runner already installed on VM {}", vmid);
-        }
-
-        let job = forgejo_runner::OneJob {
-            instance_url: &forgejo.instance_url,
-            uuid: &forgejo.uuid,
-            token: &forgejo.token,
-            handle: &forgejo.handle,
-            labels,
-        };
-        let prepare = if is_windows {
-            forgejo_runner::windows_prepare_command(&job, win_dir)
-        } else {
-            forgejo_runner::prepare_command(&job)
-        }
-        .map_err(Error::runner)?;
-        let prepared = session
-            .execute_secret(&prepare, "write forgejo-runner job files (runner token)")
-            .await?;
-        if prepared.exit_code != 0 {
-            error!(
-                local_only = tracing::field::Empty,
-                "Writing forgejo-runner job files failed on VM {}: {}",
-                vmid,
-                prepared.stderr.trim()
-            );
-            return Err(Error::runner(format!(
-                "Failed to write forgejo-runner job files (exit code {})",
-                prepared.exit_code
-            )));
-        }
-
-        if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
-            vm.state = VmState::RunnerActive;
-        }
-        info!(
-            "Running forgejo-runner one-job on VM {} for handle {} (will block until the job completes)",
-            vmid, forgejo.handle
-        );
-        let started = Instant::now();
-        let run_cmd = if is_windows {
-            forgejo_runner::windows_run_command(win_dir)
-        } else {
-            forgejo_runner::run_command()
-        };
-        let output = self.execute_runner(session, &run_cmd, vmid).await?;
-        let elapsed = started.elapsed();
-        info!(
-            "forgejo-runner on VM {} exited with code {} in {:.1}s",
-            vmid,
-            output.exit_code,
-            elapsed.as_secs_f64()
-        );
-        // forgejo-runner logs to stderr; keep the tail of both for diagnosis
-        let tail = |s: &str| {
-            let skip = s.chars().count().saturating_sub(4000);
-            s.chars().skip(skip).collect::<String>()
-        };
-        if !output.stdout.is_empty() {
-            info!(
-                local_only = tracing::field::Empty,
-                "forgejo-runner stdout (VM {}): {}",
-                vmid,
-                tail(output.stdout.trim())
-            );
-        }
-        if !output.stderr.is_empty() {
-            info!(
-                local_only = tracing::field::Empty,
-                "forgejo-runner stderr (VM {}): {}",
-                vmid,
-                tail(output.stderr.trim())
-            );
-        }
-        if output.exit_code != 0 {
-            warn!(
-                "forgejo-runner on VM {} failed after {:.1}s (exit {}) for handle {}",
-                vmid,
-                elapsed.as_secs_f64(),
-                output.exit_code,
-                forgejo.handle
-            );
-            return Err(Error::runner(format!(
-                "forgejo-runner exited with code {}",
-                output.exit_code
-            )));
-        }
         Ok(())
     }
 
@@ -907,14 +393,13 @@ impl VmManager {
         }
     }
 
-    /// Run the runner's blocking command, giving up if the VM is torn down meanwhile (an idle
-    /// teardown or DestroyRunner), so the lifecycle always ends and reports Completed/Failed.
-    async fn execute_runner(
+    /// Run the job's runner, giving up if the VM is torn down meanwhile (an idle teardown or
+    /// DestroyRunner), so the lifecycle always ends and reports Completed/Failed.
+    async fn until_torn_down(
         &self,
-        session: &mut SshSession,
-        command: &str,
         vmid: u32,
-    ) -> Result<crate::ssh::CommandOutput> {
+        run: impl Future<Output = std::result::Result<(), RunnerError>>,
+    ) -> Result<()> {
         let Some(name) = self
             .active_vms
             .read()
@@ -927,13 +412,20 @@ impl VmManager {
             )));
         };
         tokio::select! {
-            output = session.execute(command) => Ok(output?),
+            result = run => Ok(result?),
             () = self.torn_down(vmid, &name) => {
                 warn!("VM {} ({}) was destroyed while its runner was running", vmid, name);
                 Err(Error::vm(format!(
                     "VM {vmid} ({name}) was destroyed while its runner was running"
                 )))
             }
+        }
+    }
+
+    /// Update a tracked VM's state.
+    async fn set_state(&self, vmid: u32, state: VmState) {
+        if let Some(vm) = self.active_vms.write().await.get_mut(&vmid) {
+            vm.state = state;
         }
     }
 
@@ -1014,61 +506,6 @@ impl VmManager {
         }
     }
 
-    /// Detect OS type and shell type by running commands via SSH.
-    ///
-    /// Returns `(is_windows, shell_is_powershell)`:
-    /// - `is_windows`: true if the VM is running Windows
-    /// - `shell_is_powershell`: true if the SSH default shell is PowerShell (only relevant for Windows)
-    async fn detect_os_type(&self, session: &mut SshSession) -> Result<(bool, bool)> {
-        // First, try to detect if the shell is PowerShell by checking $PSVersionTable
-        // This only exists in PowerShell, not in cmd.exe
-        let ps_check = session.execute("echo $PSVersionTable").await?;
-        let shell_is_powershell = ps_check.stdout.contains("PSVersion");
-
-        if shell_is_powershell {
-            // Shell is PowerShell - we're on Windows and can use PS commands directly
-            info!("Detected PowerShell as SSH default shell (Windows)");
-            return Ok((true, true));
-        }
-
-        // Try to detect Windows via cmd.exe environment variable
-        let output = session.execute("echo %OS%").await?;
-        if output.stdout.trim() == "Windows_NT" || output.stdout.contains("Windows_NT") {
-            info!("Detected Windows OS via %OS% (cmd.exe shell)");
-            return Ok((true, false));
-        }
-
-        // Try PowerShell-specific detection (for Windows with cmd.exe shell)
-        let output = session
-            .execute("powershell -Command \"Write-Output $env:OS\"")
-            .await?;
-        if output.stdout.contains("Windows") {
-            info!("Detected Windows OS via PowerShell probe (cmd.exe shell)");
-            return Ok((true, false));
-        }
-
-        // Check for Linux/Unix
-        let output = session.execute("uname -s").await?;
-        if output.stdout.contains("Linux") {
-            info!("Detected Linux OS");
-            return Ok((false, false));
-        }
-        if output.stdout.contains("Darwin") {
-            info!("Detected macOS");
-            return Ok((false, false));
-        }
-
-        // If uname works but returns something else, it's Unix-like
-        if output.exit_code == 0 && !output.stdout.trim().is_empty() {
-            info!("Detected Unix-like OS: {}", output.stdout.trim());
-            return Ok((false, false));
-        }
-
-        // Default to Windows with cmd.exe if nothing else matches (since uname failed)
-        info!("Could not detect OS, defaulting to Windows with cmd.exe shell");
-        Ok((true, false))
-    }
-
     /// Run the complete runner lifecycle for a create command.
     ///
     /// This method:
@@ -1145,7 +582,7 @@ impl VmManager {
         self.wait_for_ssh(&ip).await?;
 
         // 4. Configure and run the runner (blocks until job completes for ephemeral runners)
-        let _os_info = self.configure_runner(vmid, &ip, params).await?;
+        self.configure_runner(vmid, &ip, params).await?;
 
         // Runner has completed - VM will be cleaned up by caller
         Ok((vmid, ip))

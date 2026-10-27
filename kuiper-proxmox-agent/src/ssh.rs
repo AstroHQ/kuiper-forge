@@ -7,11 +7,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-// Re-exported for vm_manager
-pub use kuiper_agent_lib::github_runner;
-pub use kuiper_agent_lib::github_runner::RunnerConfigBuilder;
-pub use kuiper_agent_lib::ssh::{CommandOutput, SshSession};
-
 /// Build the SSH client from config. With both a key and a password, the key is tried first.
 pub fn client(config: &SshConfig) -> Result<SshClient> {
     let auth = match (&config.private_key_path, &config.password) {

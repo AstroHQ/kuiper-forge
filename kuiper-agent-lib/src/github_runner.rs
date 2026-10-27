@@ -177,6 +177,21 @@ pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch
     }
 }
 
+/// The runner version to install: `configured`, or the latest release when it's empty or
+/// "latest" ([`FALLBACK_VERSION`] if GitHub can't be reached).
+pub async fn resolve_version(configured: &str) -> String {
+    if !configured.is_empty() && configured != "latest" {
+        return configured.to_string();
+    }
+    match fetch_latest_version().await {
+        Some(v) => v,
+        None => {
+            info!("Could not fetch latest runner version, using fallback v{FALLBACK_VERSION}");
+            FALLBACK_VERSION.to_string()
+        }
+    }
+}
+
 /// Builds the shell commands that install, configure and run the GitHub runner on a VM over SSH.
 pub struct RunnerConfigBuilder {
     runner_dir: String,

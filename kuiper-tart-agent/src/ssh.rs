@@ -189,22 +189,7 @@ pub async fn ensure_runner_installed(
         }
     }
 
-    // Determine which version to install
-    let version = if runner_version.is_empty() || runner_version == "latest" {
-        // Fetch latest version from GitHub API
-        match github_runner::fetch_latest_version().await {
-            Some(v) => v,
-            None => {
-                info!(
-                    "Could not fetch latest runner version, using fallback v{}",
-                    github_runner::FALLBACK_VERSION
-                );
-                github_runner::FALLBACK_VERSION.to_string()
-            }
-        }
-    } else {
-        runner_version.to_string()
-    };
+    let version = github_runner::resolve_version(runner_version).await;
 
     // Detect architecture
     let arch_output = ssh_exec(ip, config, "uname -m").await?;
