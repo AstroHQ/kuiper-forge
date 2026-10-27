@@ -15,11 +15,12 @@ use tracing::{debug, info, warn};
 
 use crate::forge::RunnerKind;
 
-/// Type of agent (Tart for macOS, Proxmox for Windows/Linux)
+/// Type of agent (Tart for macOS, Proxmox for Windows/Linux, libvirt for VMs on a local Linux host)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentType {
     Tart,
     Proxmox,
+    Libvirt,
 }
 
 impl std::fmt::Display for AgentType {
@@ -27,6 +28,7 @@ impl std::fmt::Display for AgentType {
         match self {
             AgentType::Tart => write!(f, "tart"),
             AgentType::Proxmox => write!(f, "proxmox"),
+            AgentType::Libvirt => write!(f, "libvirt"),
         }
     }
 }
@@ -38,6 +40,7 @@ impl std::str::FromStr for AgentType {
         match s.to_lowercase().as_str() {
             "tart" => Ok(AgentType::Tart),
             "proxmox" => Ok(AgentType::Proxmox),
+            "libvirt" => Ok(AgentType::Libvirt),
             _ => Err(anyhow!("Unknown agent type: {s}")),
         }
     }
@@ -1235,6 +1238,7 @@ mod tests {
         assert_eq!("tart".parse::<AgentType>().unwrap(), AgentType::Tart);
         assert_eq!("Tart".parse::<AgentType>().unwrap(), AgentType::Tart);
         assert_eq!("PROXMOX".parse::<AgentType>().unwrap(), AgentType::Proxmox);
+        assert_eq!("libvirt".parse::<AgentType>().unwrap(), AgentType::Libvirt);
         assert!("unknown".parse::<AgentType>().is_err());
     }
 

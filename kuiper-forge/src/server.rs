@@ -430,16 +430,10 @@ impl AgentService for AgentServiceImpl {
             capacity,
         ) = match &first_msg.payload {
             Some(AgentPayload::Status(status)) => {
-                let agent_type = match status.agent_type.to_lowercase().as_str() {
-                    "tart" => AgentType::Tart,
-                    "proxmox" => AgentType::Proxmox,
-                    _ => {
-                        return Err(Status::invalid_argument(format!(
-                            "Unknown agent type: {}",
-                            status.agent_type
-                        )));
-                    }
-                };
+                let agent_type: AgentType = status
+                    .agent_type
+                    .parse()
+                    .map_err(|e: anyhow::Error| Status::invalid_argument(e.to_string()))?;
 
                 // Extract VM names for recovery
                 let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();

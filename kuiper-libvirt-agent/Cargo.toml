@@ -1,0 +1,30 @@
+[package]
+name = "kuiper-libvirt-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "libvirt/KVM agent for CI runner coordination (local Linux host)"
+
+[[bin]]
+name = "kuiper-libvirt-agent"
+path = "src/main.rs"
+
+[dependencies]
+kuiper-agent-proto = { version = "0.4.0", path = "../kuiper-agent-proto" }
+kuiper-agent-lib = { version = "0.5.1", path = "../kuiper-agent-lib" }
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
+url = { workspace = true }
