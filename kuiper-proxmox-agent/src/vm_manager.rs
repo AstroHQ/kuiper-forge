@@ -9,7 +9,7 @@
 
 use crate::config::{SshConfig, VmConfig};
 use crate::error::{Error, Result};
-use crate::ssh::{RunnerConfigBuilder, SshClient, SshSession};
+use crate::ssh::{self, RunnerConfigBuilder, SshSession};
 use kuiper_agent_lib::forgejo_runner;
 use kuiper_agent_proto::ForgejoRunner;
 use kuiper_proxmox_api::ProxmoxVEAPI;
@@ -242,9 +242,11 @@ impl VmManager {
 
     /// Wait for SSH to be available on a VM.
     pub async fn wait_for_ssh(&self, ip: &str) -> Result<()> {
-        let ssh_client = SshClient::new(self.ssh_config.clone()).await?;
         let ssh_timeout = Duration::from_secs(self.ssh_config.timeout_secs);
-        ssh_client.wait_for_ssh(ip, ssh_timeout).await
+        ssh::client(&self.ssh_config)?
+            .wait_for_port(ssh::parse_ip(ip)?, ssh_timeout)
+            .await?;
+        Ok(())
     }
 
     /// Configure the GitHub runner on a VM.
@@ -274,8 +276,9 @@ impl VmManager {
         info!("Configuring runner on VM {} at {}", vmid, ip);
 
         // Connect via SSH
-        let ssh_client = SshClient::new(self.ssh_config.clone()).await?;
-        let mut session = ssh_client.connect(ip).await?;
+        let mut session = ssh::client(&self.ssh_config)?
+            .connect_with_retries(ssh::parse_ip(ip)?, self.ssh_config.retries)
+            .await?;
 
         // Detect OS type and shell type
         let (is_windows, shell_is_powershell) = self.detect_os_type(&mut session).await?;
@@ -924,7 +927,7 @@ impl VmManager {
             )));
         };
         tokio::select! {
-            output = session.execute(command) => output,
+            output = session.execute(command) => Ok(output?),
             () = self.torn_down(vmid, &name) => {
                 warn!("VM {} ({}) was destroyed while its runner was running", vmid, name);
                 Err(Error::vm(format!(

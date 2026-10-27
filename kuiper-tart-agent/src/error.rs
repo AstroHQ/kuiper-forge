@@ -63,5 +63,16 @@ pub enum Error {
     Install(String),
 }
 
+impl From<kuiper_agent_lib::ssh::SshError> for Error {
+    fn from(e: kuiper_agent_lib::ssh::SshError) -> Self {
+        use kuiper_agent_lib::ssh::SshError;
+        match e {
+            SshError::Timeout(what) => Error::Timeout(what),
+            SshError::Command { exit_code, stderr } => Error::SshCommand { exit_code, stderr },
+            e => Error::Ssh(e.to_string()),
+        }
+    }
+}
+
 /// Result type alias for kuiper-tart-agent.
 pub type Result<T, E = Error> = std::result::Result<T, E>;

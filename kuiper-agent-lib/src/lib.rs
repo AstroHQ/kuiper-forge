@@ -11,6 +11,7 @@
 //! - Automatic reconnection with backoff
 //! - Batched upload of the agent's own logs to the coordinator ([`log_upload`])
 //! - GitHub Actions runner version fetching and download URL construction
+//! - SSH to runner VMs and the runner install/config commands run over it ([`ssh`], [`github_runner`])
 
 pub mod bundle;
 mod certs;
@@ -22,6 +23,7 @@ pub mod labels;
 pub mod log_upload;
 pub mod runtime;
 pub mod shell;
+pub mod ssh;
 
 pub use bundle::RegistrationBundle;
 pub use certs::AgentCertStore;

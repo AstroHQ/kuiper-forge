@@ -42,6 +42,15 @@ pub enum Error {
     Runner(String),
 }
 
+impl From<kuiper_agent_lib::ssh::SshError> for Error {
+    fn from(e: kuiper_agent_lib::ssh::SshError) -> Self {
+        match e {
+            kuiper_agent_lib::ssh::SshError::Timeout(_) => Error::Timeout(e.to_string()),
+            e => Error::Ssh(e.to_string()),
+        }
+    }
+}
+
 impl Error {
     /// Create a new SSH error.
     pub fn ssh(msg: impl Into<String>) -> Self {
@@ -51,11 +60,6 @@ impl Error {
     /// Create a new VM error.
     pub fn vm(msg: impl Into<String>) -> Self {
         Error::Vm(msg.into())
-    }
-
-    /// Create a new timeout error.
-    pub fn timeout(msg: impl Into<String>) -> Self {
-        Error::Timeout(msg.into())
     }
 
     /// Create a new runner error.

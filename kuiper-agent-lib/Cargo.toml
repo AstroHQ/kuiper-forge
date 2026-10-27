@@ -23,6 +23,10 @@ base64 = { workspace = true }
 url = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
+russh = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
