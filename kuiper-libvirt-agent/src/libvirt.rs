@@ -153,6 +153,23 @@ pub fn domain_template(hardware: &Hardware) -> String {
     )
 }
 
+/// Whether a custom domain template puts `{metadata}` inside `<metadata>`. Without it a VM runs fine, but the
+/// agent can't tell it's its own and won't destroy it.
+pub fn check_template(template: &str) -> std::result::Result<(), String> {
+    let inside = template.find("{metadata}").is_some_and(|at| {
+        let (before, after) = template.split_at(at);
+        before
+            .rfind("<metadata>")
+            .is_some_and(|open| !before[open..].contains("</metadata>"))
+            && after.contains("</metadata>")
+    });
+    if inside {
+        Ok(())
+    } else {
+        Err("it needs {metadata} inside <metadata>...</metadata>, that's how the agent knows its VMs".to_string())
+    }
+}
+
 /// `vars` without the zeros it was padded with. A Proxmox EFI disk is a whole LVM extent or more, of which OVMF
 /// uses the first 128 or 528 KiB (Proxmox tells QEMU the size), and QEMU sizes the flash from the file.
 fn trim_vars(mut vars: Vec<u8>) -> Vec<u8> {
@@ -258,6 +275,17 @@ impl Libvirt {
         tokio::fs::write(&xml_path, self.domain_xml(spec)).await?;
         let output = self.virsh(&["create"], Some(&xml_path)).await?;
         check("virsh create", output)?;
+
+        // without its marker the agent would take the domain for someone else's and never stop it. It was
+        // created just now under a name libvirt didn't have, so it's this agent's to stop regardless
+        if self.owns_domain(spec.name).await? != Some(true) {
+            let output = self.virsh(&["destroy", spec.name], None).await?;
+            check("virsh destroy", output)?;
+            return Err(Error::Libvirt(format!(
+                "domain {} came up without the agent's marker in <metadata>, stopped it",
+                spec.name
+            )));
+        }
         info!("Started domain {}", spec.name);
         Ok(())
     }
@@ -331,8 +359,10 @@ impl Libvirt {
                 || xml.contains(&format!("disk-dir=\"{dir}\"")))
     }
 
-    /// Stop VM `name` if it's one of this agent's, and delete its files. A domain with that name that isn't the
-    /// agent's is left alone and reported as an error, the files (in the agent's disk directory) still go.
+    /// Stop VM `name` if it's one of this agent's, and delete its files. The files only go once the domain is
+    /// gone: if it couldn't be destroyed, or can't be checked, QEMU may still be running on them. A domain with
+    /// that name that isn't the agent's is left alone and reported as an error, and the files stay too; the
+    /// startup sweep removes files with no domain of the agent's.
     pub async fn destroy(&self, name: &str) -> Result<()> {
         let result = match self.owns_domain(name).await {
             Ok(Some(true)) => {
@@ -361,6 +391,13 @@ impl Libvirt {
             }
             Err(e) => Err(e),
         };
+        if let Err(e) = &result {
+            warn!(
+                "Keeping the files of VM {}, it may still be running: {}",
+                name, e
+            );
+            return result;
+        }
 
         for path in [
             self.disk_path(name),
@@ -373,7 +410,7 @@ impl Libvirt {
                 Err(e) => warn!("Failed to remove {}: {}", path.display(), e),
             }
         }
-        result
+        Ok(())
     }
 
     /// Destroy this agent's domains and files left over from an earlier run (it crashed, or the host rebooted).
@@ -633,6 +670,20 @@ mod tests {
     }
 
     #[test]
+    fn test_check_template() {
+        assert!(check_template(&domain_template(&Hardware::default())).is_ok());
+        assert!(check_template("<domain><metadata>{metadata}</metadata></domain>").is_ok());
+        for bad in [
+            "<domain><name>{name}</name></domain>",
+            "<domain>{metadata}<metadata></metadata></domain>",
+            "<domain><metadata></metadata>{metadata}</domain>",
+            "<domain><metadata>{metadata}</domain>",
+        ] {
+            assert!(check_template(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn test_trim_vars() {
         // a 4 MB build's store padded out to a 4 MiB Proxmox EFI disk
         let mut vars = vec![0xff; 528 * 1024];
@@ -679,6 +730,32 @@ mod tests {
     #[test]
     fn test_xml_escape() {
         assert_eq!(xml_escape("a<b>&'\""), "a&lt;b&gt;&amp;&apos;&quot;");
+    }
+
+    /// A domain that can't be destroyed, or checked, may still be running on its files.
+    #[tokio::test]
+    #[ignore = "needs virsh on the host"]
+    async fn test_destroy_failure_keeps_files() {
+        let dir = std::env::temp_dir().join(format!("kuiper-libvirt-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // virsh can't connect, so it can't tell whether the domain is gone
+        let libvirt = Libvirt::new("bogus:///kuiper".to_string(), dir.clone());
+        let name = "kuiper-runner-1";
+        let files = [
+            libvirt.disk_path(name),
+            libvirt.xml_path(name),
+            libvirt.nvram_path(name),
+        ];
+        for file in &files {
+            std::fs::write(file, b"").unwrap();
+        }
+
+        assert!(libvirt.destroy(name).await.is_err());
+        for file in &files {
+            assert!(file.exists(), "{} was removed", file.display());
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Runs the real virsh/qemu-img sequence against `qemu:///session` (your user's libvirt, not the system's): a
@@ -767,6 +844,19 @@ mod tests {
         assert!(!disk.exists());
         assert!(!nvram.exists());
         assert!(base.exists());
+
+        // a template that loses the marker: the VM is stopped rather than left running unclaimed
+        let unmarked = template.replace("{metadata}", "");
+        let spec = DomainSpec {
+            template: Some(&unmarked),
+            ..spec
+        };
+        libvirt.create_overlay(&name, &base).await.unwrap();
+        let err = libvirt.start_domain(&spec).await.unwrap_err().to_string();
+        assert!(err.contains("marker"), "{err}");
+        assert_eq!(libvirt.owns_domain(&name).await.unwrap(), None);
+        libvirt.destroy(&name).await.unwrap();
+        assert!(!disk.exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

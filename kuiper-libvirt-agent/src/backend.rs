@@ -3,7 +3,7 @@
 
 use crate::config::{Config, Hardware, IpSource, SshConfig, VmConfig};
 use crate::error::{Error, Result};
-use crate::libvirt::{DomainSpec, Libvirt};
+use crate::libvirt::{self, DomainSpec, Libvirt};
 use crate::ssh;
 use async_trait::async_trait;
 use kuiper_agent_lib::guest::{Guest, Job, RunnerVersions};
@@ -66,12 +66,18 @@ impl LibvirtBackend {
             std::iter::once((&vm.image, vm.vcpus, vm.memory_mib, &vm.hardware)).chain(mappings)
         {
             let template = match &hardware.domain_template {
-                Some(path) => Some(std::fs::read_to_string(path).map_err(|e| {
-                    Error::Vm(format!(
-                        "failed to read domain template {}: {e}",
-                        path.display()
-                    ))
-                })?),
+                Some(path) => {
+                    let template = std::fs::read_to_string(path).map_err(|e| {
+                        Error::Vm(format!(
+                            "failed to read domain template {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                    libvirt::check_template(&template).map_err(|e| {
+                        Error::Vm(format!("domain template {}: {e}", path.display()))
+                    })?;
+                    Some(template)
+                }
                 None => None,
             };
             // first one wins, like the mapping lookup
