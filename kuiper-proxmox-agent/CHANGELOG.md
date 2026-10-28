@@ -2,6 +2,17 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-proxmox-agent-v0.4.3 - 2026-10-28
+#### Bug Fixes
+- apply logging.retention_days in the agents - (71b0d49) - *jfro*
+- **(agent-lib)** destroy VMs in parallel on shutdown and allow longer for it - (08c09b3) - *jfro*
+
+#### Refactoring
+- **(agent-lib)** generic VmAgent over a VmBackend trait - (9b9b760) - *jfro*
+- **(agent-lib)** share the guest-side runner lifecycle - (38b0c25) - *jfro*
+- **(agent-lib)** share the SSH transport and runner commands - (5bc5db9) - *jfro*
+
+- - -
 ## kuiper-proxmox-agent-v0.4.2 - 2026-10-21
 #### Features
 - Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*

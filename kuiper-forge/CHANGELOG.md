@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.7.6 - 2026-10-28
+#### Features
+- **(libvirt-agent)** agent for ephemeral runner VMs on a local libvirt host - (f1dd9e5) - *jfro*
+
+#### Bug Fixes
+- **(coordinator)** accept any agent type - (b90354c) - *jfro*
+
+- - -
 ## kuiper-forge-v0.7.5 - 2026-10-22
 #### Bug Fixes
 - **(tls)** rustls-webpki 0.103.16, fresh ca-certificates in the image - (519d2a6) - *jfro*
