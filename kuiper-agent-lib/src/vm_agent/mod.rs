@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use kuiper_agent_proto::{AgentStatus, CreateRunnerCommand, LabelSet, RunnerEventType};
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tracing::{error, info, warn};
 
@@ -484,19 +485,25 @@ impl<B: VmBackend> VmAgent<B> {
         }
     }
 
-    /// Destroy every VM (used during shutdown).
-    pub async fn destroy_all(&self) {
+    /// Destroy every VM (used during shutdown). They go in parallel, so shutdown takes as long as the slowest
+    /// one (a create still in flight, say) rather than all of them added up.
+    pub async fn destroy_all(self: &Arc<Self>) {
         let names = self.tracker.names().await;
         if names.is_empty() {
             info!("No active VMs to clean up");
             return;
         }
         info!("Destroying {} active VM(s)...", names.len());
+        let mut destroys = JoinSet::new();
         for name in names {
-            if let Err(e) = self.destroy(&name).await {
-                error!("Failed to destroy VM {}: {}", name, e);
-            }
+            let agent = self.clone();
+            destroys.spawn(async move {
+                if let Err(e) = agent.destroy(&name).await {
+                    error!("Failed to destroy VM {}: {}", name, e);
+                }
+            });
         }
+        destroys.join_all().await;
     }
 
     /// The agent's current status.

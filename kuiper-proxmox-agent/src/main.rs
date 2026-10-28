@@ -449,8 +449,9 @@ Type=simple
 ExecStart={binary}{exec_args}
 Restart=on-failure
 RestartSec=5
-# The agent destroys all managed VMs on SIGTERM; give cleanup time to finish.
-TimeoutStopSec=120
+# The agent destroys all managed VMs on SIGTERM, first waiting out any clone still in progress
+# (vm.clone_timeout_secs, 300 by default); give cleanup time to finish.
+TimeoutStopSec=420
 {runtime_dirs}# Recommended: run as a dedicated, non-root user with access to the config and
 # certificates. Create one (e.g. `useradd --system --no-create-home kuiper`) and
 # uncomment the lines below.
