@@ -59,8 +59,8 @@ network = "default"
 # bridge = "br0"
 
 # Where VM disk overlays (and their domain XML) go. Default: <data dir>/vms, i.e.
-# /var/lib/kuiper-libvirt-agent/vms with --system. The agent's files end in .kuiper.qcow2/.kuiper.xml, it never
-# touches anything else here
+# /var/lib/kuiper-libvirt-agent/vms with --system. The agent's files end in .kuiper.qcow2/.kuiper.xml/.kuiper.VARS.fd,
+# it never touches anything else here
 # disk_dir = "/var/lib/kuiper-libvirt-agent/vms"
 
 # How to find a VM's IP: "lease" (libvirt network DHCP), "agent" (qemu-guest-agent), or "any" (lease, then agent)
@@ -83,11 +83,22 @@ memory_mib = 8192
 # Seconds for a VM to get an IP and accept SSH
 ip_timeout_secs = 180
 
-# Domain XML to use instead of the built-in one (virtio disk + NIC, guest agent channel, serial console, BIOS),
-# e.g. for UEFI, TPM or Windows guests. Placeholders: {name} {disk} {nvram} {vcpus} {memory_mib} {interface}
-# {metadata}. {metadata} must be inside <metadata>, it's how the agent recognizes its own VMs. {nvram} is a per-VM
-# UEFI variable store the agent deletes with the VM: <nvram template='/path/to/VARS.fd'>{nvram}</nvram>.
-# See kuiper-libvirt-domain-win11.xml for a Windows 11 UEFI template.
+# The image's VM hardware; the agent writes the domain XML from these. The defaults suit a Linux image: BIOS,
+# virtio disk, libvirt's default machine. Image mappings take the same settings for their own image, they don't
+# inherit these. See the Windows mapping below for an image exported from Proxmox.
+# os = "linux"            # or "windows": Hyper-V enlightenments, clock in local time
+# firmware = "bios"       # or "uefi": OVMF, libvirt picks the build
+# uefi_vars = "/var/lib/libvirt/images/runner_VARS.fd"  # UEFI only: variable store each VM starts from (e.g. a
+#                         # Proxmox EFI disk, copied with dd). Default: the firmware's own. The agent must read it
+# secure_boot = false     # UEFI on q35 only; without uefi_vars, VMs start with Microsoft's keys enrolled
+# machine = "q35"         # or "pc" (i440fx, Proxmox's default). Default: libvirt's, "pc" on x86
+# disk_bus = "virtio"     # or "scsi" (virtio-scsi). Windows only boots from a bus it has the driver for
+# tpm = false             # emulated TPM 2.0, fresh for each VM
+
+# Escape hatch: domain XML to use instead of generating it (none of the settings above apply then).
+# Placeholders: {name} {disk} {nvram} {vcpus} {memory_mib} {interface} {metadata}. {metadata} must be inside
+# <metadata>, it's how the agent recognizes its own VMs. {nvram} is a per-VM UEFI variable store path the agent
+# deletes with the VM
 # domain_template = "/etc/kuiper-libvirt-agent/domain.xml"
 
 # GitHub Actions runner version to install when the image doesn't have it ("latest" or e.g. "2.321.0")
@@ -102,6 +113,20 @@ forgejo_runner_version = "latest"
 # labels = ["ubuntu-22.04"]
 # image = "/var/lib/libvirt/images/ubuntu-22.04-runner.qcow2"
 # pool = 1   # fixed-capacity mode: keep this many runners of this image
+#
+# A Windows 11 VM template exported from Proxmox (bios: ovmf, machine: i440fx, scsihw: virtio-scsi-single). Take
+# the disk and the efidisk0 volume:
+#   qemu-img convert -p -O qcow2 nbd://proxmox:10809 /var/lib/libvirt/images/win11-ci.qcow2   (qemu-nbd on proxmox)
+#   ssh root@proxmox dd if=/dev/pve/base-<vmid>-disk-<n> bs=1M > /var/lib/libvirt/images/win11-ci_VARS.fd
+# [[vm.image_mappings]]
+# labels = ["windows"]
+# image = "/var/lib/libvirt/images/win11-ci.qcow2"
+# os = "windows"
+# firmware = "uefi"
+# uefi_vars = "/var/lib/libvirt/images/win11-ci_VARS.fd"
+# machine = "pc"
+# disk_bus = "scsi"
+# memory_mib = 16384   # per-mapping sizing, vm.vcpus / vm.memory_mib if unset
 
 # =============================================================================
 # SSH Configuration (agent -> VM)

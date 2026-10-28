@@ -102,6 +102,109 @@ pub enum IpSource {
     Any,
 }
 
+/// What the VM for an image looks like, so the agent can write its domain XML. Set on `[vm]` for `vm.image` and on
+/// each image mapping for its image. A mapping doesn't inherit these from `[vm]`, they describe the image.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Hardware {
+    /// Guest OS: "linux", or "windows" (Hyper-V enlightenments, clock in local time)
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub os: GuestOs,
+    /// "bios", or "uefi" (OVMF, libvirt picks the build)
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub firmware: Firmware,
+    /// UEFI variable store each VM starts from, e.g. a copy of a Proxmox VM's EFI disk to keep its Secure Boot keys
+    /// and boot entries. The agent needs to be able to read it. Defaults to the firmware's own
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uefi_vars: Option<PathBuf>,
+    /// UEFI Secure Boot, q35 only. Without `uefi_vars` the VM starts with Microsoft's keys enrolled
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub secure_boot: bool,
+    /// Machine type: "pc" (i440fx, Proxmox's default) or "q35". Defaults to libvirt's, "pc" on x86
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<Machine>,
+    /// Disk bus: "virtio" (virtio-blk) or "scsi" (virtio-scsi, Proxmox's default). The image needs the driver,
+    /// Windows won't boot from a bus it has no driver for
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub disk_bus: DiskBus,
+    /// Emulated TPM 2.0, fresh for each VM
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub tpm: bool,
+    /// Domain XML template to use instead of the generated domain, for what the settings above can't do.
+    /// `{name}`, `{disk}`, `{nvram}`, `{vcpus}`, `{memory_mib}`, `{interface}` and `{metadata}` are filled in.
+    /// `{metadata}` must be inside `<metadata>`, it's how the agent knows the VM is its own. `{nvram}` is a per-VM
+    /// UEFI variable store path the agent cleans up, for `<nvram template='...'>{nvram}</nvram>`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_template: Option<PathBuf>,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestOs {
+    #[default]
+    Linux,
+    Windows,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Firmware {
+    #[default]
+    Bios,
+    Uefi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Machine {
+    Pc,
+    Q35,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskBus {
+    #[default]
+    Virtio,
+    Scsi,
+}
+
+impl Hardware {
+    /// Settings that don't go together. `what` names where they're set, for the message.
+    fn validate(&self, what: &str) -> Result<(), ConfigError> {
+        let invalid = |msg: &str| Err(ConfigError::ValidationError(format!("{what}: {msg}")));
+        if self.domain_template.is_some()
+            && *self
+                != (Hardware {
+                    domain_template: self.domain_template.clone(),
+                    ..Hardware::default()
+                })
+        {
+            return invalid(
+                "domain_template replaces the generated domain, set it or the other VM settings, not both",
+            );
+        }
+        if self.firmware != Firmware::Uefi && (self.uefi_vars.is_some() || self.secure_boot) {
+            return invalid("uefi_vars and secure_boot need firmware = \"uefi\"");
+        }
+        if self.secure_boot && self.machine != Some(Machine::Q35) {
+            return invalid("libvirt only does Secure Boot on machine = \"q35\"");
+        }
+        if let Some(vars) = &self.uefi_vars
+            && !vars.is_absolute()
+        {
+            return invalid(&format!(
+                "uefi_vars {} must be an absolute path",
+                vars.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A label-to-image mapping rule for selecting base images based on job labels.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageMapping {
@@ -112,6 +215,15 @@ pub struct ImageMapping {
     /// Runners to keep for this mapping in fixed-capacity mode. Setting it on any mapping means unset ones get none
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<u32>,
+    /// vCPUs for this image's VMs, `vm.vcpus` if unset
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u32>,
+    /// Memory in MiB for this image's VMs, `vm.memory_mib` if unset
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u32>,
+    /// This image's VM hardware
+    #[serde(flatten)]
+    pub hardware: Hardware,
 }
 
 impl kuiper_agent_lib::labels::LabelMapping for ImageMapping {
@@ -143,12 +255,9 @@ pub struct VmConfig {
     /// Memory per VM in MiB
     #[serde(default = "default_memory_mib")]
     pub memory_mib: u32,
-    /// Domain XML template to use instead of the built-in one, e.g. for UEFI or Windows guests. `{name}`, `{disk}`,
-    /// `{nvram}`, `{vcpus}`, `{memory_mib}`, `{interface}` and `{metadata}` are filled in. `{metadata}` must be
-    /// inside `<metadata>`, it's how the agent knows the VM is its own. `{nvram}` is a per-VM UEFI variable store
-    /// path the agent cleans up, for `<nvram template='...'>{nvram}</nvram>`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub domain_template: Option<PathBuf>,
+    /// `vm.image`'s VM hardware
+    #[serde(flatten)]
+    pub hardware: Hardware,
     /// Timeout in seconds for VM to get an IP address and accept SSH
     #[serde(default = "default_ip_timeout")]
     pub ip_timeout_secs: u64,
@@ -221,6 +330,18 @@ pub const IMAGE_MAPPINGS_HELP: &str = r#"
 # [[vm.image_mappings]]
 # labels = ["debian-12"]
 # image = "/var/lib/libvirt/images/debian-12-runner.qcow2"
+#
+# Each image says what its VM looks like (defaults: Linux, BIOS, virtio disk).
+# E.g. Windows exported from Proxmox, with its EFI disk copied alongside:
+#
+# [[vm.image_mappings]]
+# labels = ["windows"]
+# image = "/var/lib/libvirt/images/win11-ci.qcow2"
+# os = "windows"
+# firmware = "uefi"
+# uefi_vars = "/var/lib/libvirt/images/win11-ci_VARS.fd"
+# machine = "pc"
+# disk_bus = "scsi"
 #
 # Full reference: examples/kuiper-libvirt-agent-config.toml
 "#;
@@ -338,7 +459,12 @@ impl Config {
         config.tls.ca_cert = config.tls.ca_cert.map(|p| expand_tilde(&p));
         config.tls.certs_dir = expand_tilde(&config.tls.certs_dir);
         config.ssh.private_key_path = config.ssh.private_key_path.map(|p| expand_tilde(&p));
-        config.vm.domain_template = config.vm.domain_template.map(|p| expand_tilde(&p));
+        for hardware in std::iter::once(&mut config.vm.hardware)
+            .chain(config.vm.image_mappings.iter_mut().map(|m| &mut m.hardware))
+        {
+            hardware.domain_template = hardware.domain_template.as_deref().map(expand_tilde);
+            hardware.uefi_vars = hardware.uefi_vars.as_deref().map(expand_tilde);
+        }
         config.libvirt.disk_dir = if config.libvirt.disk_dir.as_os_str().is_empty() {
             data_dir.join("vms")
         } else {
@@ -442,7 +568,7 @@ impl Config {
                 max_vms: default_max_vms(),
                 vcpus: default_vcpus(),
                 memory_mib: default_memory_mib(),
-                domain_template: None,
+                hardware: Hardware::default(),
                 ip_timeout_secs: default_ip_timeout(),
                 image_mappings: vec![],
                 runner_version: default_runner_version(),
@@ -529,10 +655,26 @@ impl Config {
                 "vm.max_vms must be at least 1".to_string(),
             ));
         }
-        if self.vm.vcpus == 0 || self.vm.memory_mib == 0 {
+        let sizes = std::iter::once((Some(self.vm.vcpus), Some(self.vm.memory_mib))).chain(
+            self.vm
+                .image_mappings
+                .iter()
+                .map(|m| (m.vcpus, m.memory_mib)),
+        );
+        if sizes
+            .into_iter()
+            .any(|(vcpus, memory)| vcpus == Some(0) || memory == Some(0))
+        {
             return Err(ConfigError::ValidationError(
-                "vm.vcpus and vm.memory_mib must be at least 1".to_string(),
+                "vcpus and memory_mib must be at least 1".to_string(),
             ));
+        }
+
+        self.vm.hardware.validate("vm")?;
+        for mapping in &self.vm.image_mappings {
+            mapping
+                .hardware
+                .validate(&format!("image mapping {}", mapping.image.display()))?;
         }
 
         Ok(())
@@ -653,6 +795,62 @@ ip_source = \"agent\"
             .replace("# labels = ", "labels = ")
             .replace("# image = ", "image = ");
         let parsed: Config = toml::from_str(&uncommented).expect("uncommented mappings parse");
-        assert_eq!(parsed.vm.image_mappings.len(), 2);
+        assert_eq!(parsed.vm.image_mappings.len(), 3);
+    }
+
+    const WINDOWS: &str = r#"
+[[vm.image_mappings]]
+labels = ["windows"]
+image = "/var/lib/libvirt/images/win11-ci.qcow2"
+os = "windows"
+firmware = "uefi"
+uefi_vars = "/var/lib/libvirt/images/win11-ci_VARS.fd"
+machine = "pc"
+disk_bus = "scsi"
+memory_mib = 16384
+"#;
+
+    #[test]
+    fn test_parse_windows_mapping() {
+        let config = load(&format!("{MINIMAL}{WINDOWS}")).expect("windows mapping loads");
+        assert_eq!(config.vm.hardware, Hardware::default());
+        let mapping = &config.vm.image_mappings[0];
+        assert_eq!(mapping.memory_mib, Some(16384));
+        assert_eq!(mapping.vcpus, None);
+        assert_eq!(
+            mapping.hardware,
+            Hardware {
+                os: GuestOs::Windows,
+                firmware: Firmware::Uefi,
+                uefi_vars: Some(PathBuf::from("/var/lib/libvirt/images/win11-ci_VARS.fd")),
+                secure_boot: false,
+                machine: Some(Machine::Pc),
+                disk_bus: DiskBus::Scsi,
+                tpm: false,
+                domain_template: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_hardware_conflicts_rejected() {
+        let cases = [
+            (r#"uefi_vars = "/x_VARS.fd""#, "need firmware"),
+            ("firmware = \"uefi\"\nsecure_boot = true", "q35"),
+            ("firmware = \"uefi\"\nuefi_vars = \"x_VARS.fd\"", "absolute"),
+            (
+                "firmware = \"uefi\"\ndomain_template = \"/x.xml\"",
+                "not both",
+            ),
+            ("os = \"macos\"", "unknown variant"),
+        ];
+        for (settings, expected) in cases {
+            let toml = MINIMAL.replace(
+                "image = \"/var/lib/libvirt/images/runner.qcow2\"",
+                &format!("image = \"/var/lib/libvirt/images/runner.qcow2\"\n{settings}"),
+            );
+            let err = load(&toml).unwrap_err().to_string();
+            assert!(err.contains(expected), "{settings}: {err}");
+        }
     }
 }

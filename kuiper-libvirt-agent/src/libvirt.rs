@@ -10,11 +10,12 @@ use std::process::Output;
 use std::time::Duration;
 
 use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::config::IpSource;
+use crate::config::{DiskBus, Firmware, GuestOs, Hardware, IpSource, Machine};
 use crate::error::{Error, Result};
 
 /// Timeout for virsh and qemu-img commands, so a stuck libvirtd can't hang the agent.
@@ -29,45 +30,6 @@ const NVRAM_SUFFIX: &str = ".kuiper.VARS.fd";
 /// XML namespace of the ownership marker.
 const MARKER_NS: &str = "https://github.com/AstroHQ/kuiper-forge/libvirt-agent";
 
-/// The built-in domain: KVM, virtio disk and NIC, a guest agent channel, serial console.
-const DOMAIN_TEMPLATE: &str = r#"<domain type='kvm'>
-  <name>{name}</name>
-  <metadata>
-    {metadata}
-  </metadata>
-  <memory unit='MiB'>{memory_mib}</memory>
-  <vcpu>{vcpus}</vcpu>
-  <os>
-    <type>hvm</type>
-  </os>
-  <features>
-    <acpi/>
-  </features>
-  <cpu mode='host-passthrough'/>
-  <clock offset='utc'/>
-  <on_poweroff>destroy</on_poweroff>
-  <on_reboot>restart</on_reboot>
-  <on_crash>destroy</on_crash>
-  <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' discard='unmap'/>
-      <source file='{disk}'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-    {interface}
-    <channel type='unix'>
-      <target type='virtio' name='org.qemu.guest_agent.0'/>
-    </channel>
-    <serial type='pty'/>
-    <console type='pty'/>
-    <rng model='virtio'>
-      <backend model='random'>/dev/urandom</backend>
-    </rng>
-    <memballoon model='virtio'/>
-  </devices>
-</domain>
-"#;
-
 /// Domain settings for one VM.
 pub struct DomainSpec<'a> {
     pub name: &'a str,
@@ -76,23 +38,142 @@ pub struct DomainSpec<'a> {
     pub memory_mib: u32,
     pub network: &'a str,
     pub bridge: Option<&'a str>,
+    pub hardware: &'a Hardware,
+    /// The image's `domain_template`, read in. The domain is generated from `hardware` without one
+    pub template: Option<&'a str>,
+}
+
+/// Sizes of OVMF's variable store in its 2 MB and 4 MB builds.
+const VARS_SIZES: [usize; 2] = [128 * 1024, 528 * 1024];
+
+/// The domain template for `hardware`, placeholders and all: KVM, a virtio NIC, a guest agent channel, serial
+/// console, plus what `hardware` asks for.
+pub fn domain_template(hardware: &Hardware) -> String {
+    let windows = hardware.os == GuestOs::Windows;
+    let uefi = hardware.firmware == Firmware::Uefi;
+
+    let machine = match hardware.machine {
+        Some(Machine::Pc) => " machine='pc'",
+        Some(Machine::Q35) => " machine='q35'",
+        None => "",
+    };
+    let mut os = format!("    <type{machine}>hvm</type>\n");
+    if uefi {
+        let secure_boot = if hardware.secure_boot { "yes" } else { "no" };
+        os.push_str(&format!(
+            "    <firmware>\n      <feature enabled='{secure_boot}' name='secure-boot'/>\n"
+        ));
+        // with uefi_vars the agent writes the VM's variable store itself, and its keys are what they are
+        if hardware.secure_boot && hardware.uefi_vars.is_none() {
+            os.push_str("      <feature enabled='yes' name='enrolled-keys'/>\n");
+        }
+        os.push_str("    </firmware>\n    <nvram>{nvram}</nvram>\n");
+    }
+
+    let mut features = String::from("    <acpi/>\n    <apic/>\n");
+    if windows {
+        features.push_str(
+            "    <hyperv mode='custom'>
+      <relaxed state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on' retries='8191'/>
+      <vpindex state='on'/>
+      <synic state='on'/>
+      <stimer state='on'/>
+      <frequencies state='on'/>
+    </hyperv>
+",
+        );
+    }
+
+    // Windows keeps the RTC in local time
+    let clock = if windows {
+        "<clock offset='localtime'>\n    <timer name='hypervclock' present='yes'/>\n  </clock>"
+    } else {
+        "<clock offset='utc'/>"
+    };
+
+    let disk = match hardware.disk_bus {
+        DiskBus::Virtio => {
+            "    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='{disk}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+"
+        }
+        DiskBus::Scsi => {
+            "    <controller type='scsi' model='virtio-scsi'/>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='{disk}'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+"
+        }
+    };
+    let tpm = if hardware.tpm {
+        "    <tpm model='tpm-crb'>\n      <backend type='emulator' version='2.0'/>\n    </tpm>\n"
+    } else {
+        ""
+    };
+
+    let firmware = if uefi { " firmware='efi'" } else { "" };
+    format!(
+        "<domain type='kvm'>
+  <name>{{name}}</name>
+  <metadata>
+    {{metadata}}
+  </metadata>
+  <memory unit='MiB'>{{memory_mib}}</memory>
+  <vcpu>{{vcpus}}</vcpu>
+  <os{firmware}>
+{os}  </os>
+  <features>
+{features}  </features>
+  <cpu mode='host-passthrough'/>
+  {clock}
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+{disk}    {{interface}}
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <serial type='pty'/>
+    <console type='pty'/>
+{tpm}    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+    <memballoon model='virtio'/>
+  </devices>
+</domain>
+"
+    )
+}
+
+/// `vars` without the zeros it was padded with. A Proxmox EFI disk is a whole LVM extent or more, of which OVMF
+/// uses the first 128 or 528 KiB (Proxmox tells QEMU the size), and QEMU sizes the flash from the file.
+fn trim_vars(mut vars: Vec<u8>) -> Vec<u8> {
+    if let Some(&size) = VARS_SIZES
+        .iter()
+        .find(|&&size| vars.len() > size && vars[size..].iter().all(|&b| b == 0))
+    {
+        vars.truncate(size);
+    }
+    vars
 }
 
 /// libvirt connection plus where the agent keeps its VM files.
 pub struct Libvirt {
     uri: String,
     disk_dir: PathBuf,
-    /// Domain XML template, `{...}` placeholders filled in per VM
-    template: String,
 }
 
 impl Libvirt {
-    pub fn new(uri: String, disk_dir: PathBuf, template: Option<String>) -> Self {
-        Self {
-            uri,
-            disk_dir,
-            template: template.unwrap_or_else(|| DOMAIN_TEMPLATE.to_string()),
-        }
+    pub fn new(uri: String, disk_dir: PathBuf) -> Self {
+        Self { uri, disk_dir }
     }
 
     /// The overlay disk for VM `name`.
@@ -104,8 +185,8 @@ impl Libvirt {
         self.disk_dir.join(format!("{name}{XML_SUFFIX}"))
     }
 
-    /// UEFI variable store for VM `name`, for templates that use `{nvram}`. libvirt creates it from the
-    /// `<nvram template=...>` on start; transient domains don't take it with them, so the agent deletes it.
+    /// UEFI variable store for VM `name`. libvirt creates it from the firmware's template on start unless the
+    /// agent already wrote it from `uefi_vars`; transient domains don't take it with them, so the agent deletes it.
     fn nvram_path(&self, name: &str) -> PathBuf {
         self.disk_dir.join(format!("{name}{NVRAM_SUFFIX}"))
     }
@@ -131,8 +212,16 @@ impl Libvirt {
         Ok(disk)
     }
 
-    /// Fill in the domain template for `spec`.
+    /// The domain XML for `spec`: its template filled in, or the one generated from its hardware.
     pub fn domain_xml(&self, spec: &DomainSpec<'_>) -> String {
+        let generated;
+        let template = match spec.template {
+            Some(template) => template,
+            None => {
+                generated = domain_template(spec.hardware);
+                &generated
+            }
+        };
         let interface = match spec.bridge {
             Some(bridge) => format!(
                 "<interface type='bridge'><source bridge='{}'/><model type='virtio'/></interface>",
@@ -147,7 +236,7 @@ impl Libvirt {
             "<kuiper:runner xmlns:kuiper='{MARKER_NS}' disk-dir='{}'/>",
             xml_escape(&self.disk_dir.display().to_string())
         );
-        self.template
+        template
             .replace("{name}", &xml_escape(spec.name))
             .replace("{disk}", &xml_escape(&spec.disk.display().to_string()))
             .replace(
@@ -162,11 +251,31 @@ impl Libvirt {
 
     /// Start a transient domain for `spec`. It's gone from libvirt once it's destroyed or shuts down.
     pub async fn start_domain(&self, spec: &DomainSpec<'_>) -> Result<()> {
+        if let Some(vars) = &spec.hardware.uefi_vars {
+            self.write_vars(spec.name, vars).await?;
+        }
         let xml_path = self.xml_path(spec.name);
         tokio::fs::write(&xml_path, self.domain_xml(spec)).await?;
         let output = self.virsh(&["create"], Some(&xml_path)).await?;
         check("virsh create", output)?;
         info!("Started domain {}", spec.name);
+        Ok(())
+    }
+
+    /// Start VM `name`'s UEFI variable store as a copy of `vars`. Never overwrites, like the overlay.
+    async fn write_vars(&self, name: &str, vars: &Path) -> Result<()> {
+        let contents = tokio::fs::read(vars).await.map_err(|e| {
+            Error::Libvirt(format!("failed to read uefi_vars {}: {e}", vars.display()))
+        })?;
+        let path = self.nvram_path(name);
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await?;
+        file.write_all(&trim_vars(contents)).await?;
+        file.flush().await?;
+        debug!("Wrote {} from {}", path.display(), vars.display());
         Ok(())
     }
 
@@ -388,11 +497,10 @@ mod tests {
         Libvirt::new(
             "qemu:///system".to_string(),
             PathBuf::from("/var/lib/kuiper-libvirt-agent/vms"),
-            None,
         )
     }
 
-    fn spec<'a>(disk: &'a Path, bridge: Option<&'a str>) -> DomainSpec<'a> {
+    fn spec<'a>(disk: &'a Path, bridge: Option<&'a str>, hardware: &'a Hardware) -> DomainSpec<'a> {
         DomainSpec {
             name: "kuiper-runner-1",
             disk,
@@ -400,6 +508,20 @@ mod tests {
             memory_mib: 8192,
             network: "default",
             bridge,
+            hardware,
+            template: None,
+        }
+    }
+
+    /// Windows exported from Proxmox: i440fx, UEFI with its own variable store, virtio-scsi.
+    fn windows() -> Hardware {
+        Hardware {
+            os: GuestOs::Windows,
+            firmware: Firmware::Uefi,
+            uefi_vars: Some(PathBuf::from("/var/lib/libvirt/images/win11_VARS.fd")),
+            machine: Some(Machine::Pc),
+            disk_bus: DiskBus::Scsi,
+            ..Hardware::default()
         }
     }
 
@@ -439,7 +561,7 @@ mod tests {
     fn test_domain_xml_network() {
         let libvirt = libvirt();
         let disk = libvirt.disk_path("kuiper-runner-1");
-        let xml = libvirt.domain_xml(&spec(&disk, None));
+        let xml = libvirt.domain_xml(&spec(&disk, None, &Hardware::default()));
         assert!(xml.contains("<name>kuiper-runner-1</name>"));
         assert!(xml.contains(
             "<source file='/var/lib/kuiper-libvirt-agent/vms/kuiper-runner-1.kuiper.qcow2'/>"
@@ -452,31 +574,87 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_xml_win11_example() {
-        let template = include_str!("../../examples/kuiper-libvirt-domain-win11.xml");
-        let libvirt = Libvirt::new(
-            "qemu:///system".to_string(),
-            PathBuf::from("/var/lib/kuiper-libvirt-agent/vms"),
-            Some(template.to_string()),
-        );
+    fn test_domain_xml_default_is_bios_virtio() {
+        let xml = domain_template(&Hardware::default());
+        assert!(!xml.contains("firmware") && !xml.contains("nvram") && !xml.contains("machine="));
+        assert!(xml.contains("<target dev='vda' bus='virtio'/>"));
+        assert!(xml.contains("<clock offset='utc'/>"));
+        assert!(!xml.contains("hyperv") && !xml.contains("<tpm"));
+    }
+
+    #[test]
+    fn test_domain_xml_windows() {
+        let libvirt = libvirt();
         let disk = libvirt.disk_path("kuiper-runner-1");
-        let xml = libvirt.domain_xml(&spec(&disk, None));
-        assert!(
-            xml.contains(
-                ">/var/lib/kuiper-libvirt-agent/vms/kuiper-runner-1.kuiper.VARS.fd</nvram>"
-            )
-        );
-        assert!(
-            !xml.contains("{name}") && !xml.contains("{nvram}") && !xml.contains("{interface}")
-        );
+        let hardware = windows();
+        let xml = libvirt.domain_xml(&spec(&disk, None, &hardware));
+        assert!(xml.contains("<os firmware='efi'>"));
+        assert!(xml.contains("<type machine='pc'>hvm</type>"));
+        assert!(xml.contains("<feature enabled='no' name='secure-boot'/>"));
+        assert!(!xml.contains("enrolled-keys"));
+        assert!(xml.contains(
+            "<nvram>/var/lib/kuiper-libvirt-agent/vms/kuiper-runner-1.kuiper.VARS.fd</nvram>"
+        ));
+        assert!(xml.contains("<hyperv mode='custom'>"));
+        assert!(xml.contains("<clock offset='localtime'>"));
+        assert!(xml.contains("<controller type='scsi' model='virtio-scsi'/>"));
+        assert!(xml.contains("<target dev='sda' bus='scsi'/>"));
+        assert!(!xml.contains('{'), "unfilled placeholder:\n{xml}");
         assert!(libvirt.is_ours(&xml));
+    }
+
+    #[test]
+    fn test_domain_xml_secure_boot_tpm() {
+        let hardware = Hardware {
+            firmware: Firmware::Uefi,
+            secure_boot: true,
+            machine: Some(Machine::Q35),
+            tpm: true,
+            ..Hardware::default()
+        };
+        let xml = domain_template(&hardware);
+        assert!(xml.contains("<feature enabled='yes' name='secure-boot'/>"));
+        // no uefi_vars, so start with Microsoft's keys
+        assert!(xml.contains("<feature enabled='yes' name='enrolled-keys'/>"));
+        assert!(xml.contains("<backend type='emulator' version='2.0'/>"));
+    }
+
+    #[test]
+    fn test_domain_xml_template_wins() {
+        let libvirt = libvirt();
+        let disk = libvirt.disk_path("kuiper-runner-1");
+        let hardware = Hardware::default();
+        let mut spec = spec(&disk, None, &hardware);
+        spec.template = Some("<domain><name>{name}</name><nvram>{nvram}</nvram></domain>");
+        assert_eq!(
+            libvirt.domain_xml(&spec),
+            "<domain><name>kuiper-runner-1</name><nvram>/var/lib/kuiper-libvirt-agent/vms/kuiper-runner-1.kuiper.VARS.fd</nvram></domain>"
+        );
+    }
+
+    #[test]
+    fn test_trim_vars() {
+        // a 4 MB build's store padded out to a 4 MiB Proxmox EFI disk
+        let mut vars = vec![0xff; 528 * 1024];
+        vars.resize(4 * 1024 * 1024, 0);
+        assert_eq!(trim_vars(vars).len(), 528 * 1024);
+        // a 2 MB build's
+        let mut vars = vec![0xff; 128 * 1024];
+        vars.resize(4 * 1024 * 1024, 0);
+        assert_eq!(trim_vars(vars).len(), 128 * 1024);
+        // already the right size, or not padding, stays as is
+        assert_eq!(trim_vars(vec![0xff; 528 * 1024]).len(), 528 * 1024);
+        assert_eq!(
+            trim_vars(vec![0xff; 4 * 1024 * 1024]).len(),
+            4 * 1024 * 1024
+        );
     }
 
     #[test]
     fn test_domain_xml_bridge() {
         let libvirt = libvirt();
         let disk = libvirt.disk_path("kuiper-runner-1");
-        let xml = libvirt.domain_xml(&spec(&disk, Some("br0")));
+        let xml = libvirt.domain_xml(&spec(&disk, Some("br0"), &Hardware::default()));
         assert!(xml.contains("<interface type='bridge'><source bridge='br0'/>"));
         assert!(!xml.contains("type='network'"));
     }
@@ -504,7 +682,8 @@ mod tests {
     }
 
     /// Runs the real virsh/qemu-img sequence against `qemu:///session` (your user's libvirt, not the system's): a
-    /// blank base image, an overlay, a transient domain with user-mode networking and TCG, then destroy and sweep.
+    /// blank base image, an overlay, a transient UEFI domain with its own variable store and a TPM, user-mode
+    /// networking and TCG, then destroy and sweep. Needs OVMF and swtpm.
     /// `cargo test -p kuiper-libvirt-agent -- --ignored`
     #[tokio::test]
     #[ignore = "needs libvirt and qemu-img on the host"]
@@ -520,15 +699,27 @@ mod tests {
             .unwrap();
         assert!(status.success());
 
+        // a Proxmox-style EFI disk: the firmware's store padded out with zeros
+        let vars = dir.join("base_VARS.fd");
+        let mut contents = std::fs::read("/usr/share/OVMF/OVMF_VARS_4M.ms.fd").unwrap();
+        let size = contents.len();
+        contents.resize(4 * 1024 * 1024, 0);
+        std::fs::write(&vars, contents).unwrap();
+        let hardware = Hardware {
+            uefi_vars: Some(vars),
+            tpm: true,
+            ..windows()
+        };
+
         // no libvirt network in a session, and maybe no /dev/kvm
-        let template = DOMAIN_TEMPLATE
+        let template = domain_template(&hardware)
             .replace("<domain type='kvm'>", "<domain type='qemu'>")
             .replace("<cpu mode='host-passthrough'/>", "")
             .replace(
                 "{interface}",
                 "<interface type='user'><model type='virtio'/></interface>",
             );
-        let libvirt = Libvirt::new("qemu:///session".to_string(), dir.clone(), Some(template));
+        let libvirt = Libvirt::new("qemu:///session".to_string(), dir.clone());
         let name = format!("kuiper-it-{}", std::process::id());
         let disk = libvirt.create_overlay(&name, &base).await.unwrap();
         assert!(disk.exists());
@@ -542,9 +733,13 @@ mod tests {
             memory_mib: 128,
             network: "unused",
             bridge: None,
+            hardware: &hardware,
+            template: Some(&template),
         };
         libvirt.start_domain(&spec).await.unwrap();
         assert_eq!(libvirt.owns_domain(&name).await.unwrap(), Some(true));
+        let nvram = libvirt.nvram_path(&name);
+        assert_eq!(std::fs::metadata(&nvram).unwrap().len() as usize, size);
         // no OS, so no address
         assert_eq!(
             libvirt.domain_ip(&name, IpSource::Lease).await.unwrap(),
@@ -552,7 +747,7 @@ mod tests {
         );
 
         // another agent (different disk dir) won't touch it
-        let other = Libvirt::new("qemu:///session".to_string(), dir.join("other"), None);
+        let other = Libvirt::new("qemu:///session".to_string(), dir.join("other"));
         assert_eq!(other.owns_domain(&name).await.unwrap(), Some(false));
         assert!(other.destroy(&name).await.is_err());
         assert_eq!(libvirt.owns_domain(&name).await.unwrap(), Some(true));
@@ -560,6 +755,7 @@ mod tests {
         libvirt.destroy(&name).await.unwrap();
         assert_eq!(libvirt.owns_domain(&name).await.unwrap(), None);
         assert!(!disk.exists());
+        assert!(!nvram.exists());
         // destroying again is fine
         libvirt.destroy(&name).await.unwrap();
 
@@ -569,6 +765,7 @@ mod tests {
         libvirt.sweep_leftovers().await.unwrap();
         assert_eq!(libvirt.owns_domain(&name).await.unwrap(), None);
         assert!(!disk.exists());
+        assert!(!nvram.exists());
         assert!(base.exists());
 
         std::fs::remove_dir_all(&dir).unwrap();

@@ -180,14 +180,8 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let domain_template = match &config.vm.domain_template {
-        Some(path) => Some(std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!("Failed to read domain template {}: {e}", path.display())
-        })?),
-        None => None,
-    };
     std::fs::create_dir_all(&config.libvirt.disk_dir)?;
-    let backend = Arc::new(LibvirtBackend::new(&config, domain_template));
+    let backend = Arc::new(LibvirtBackend::new(&config)?);
 
     // VMs from an earlier run that crashed (or a host reboot) would otherwise use up disk forever
     backend.libvirt().sweep_leftovers().await.map_err(|e| {
