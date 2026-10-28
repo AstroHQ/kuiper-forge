@@ -322,7 +322,7 @@ mod tests {
     fn agent(base: &[&str], sets: &[&[&str]]) -> AgentInfo {
         AgentInfo {
             agent_id: "agent_1".to_string(),
-            agent_type: AgentType::Proxmox,
+            agent_type: AgentType::PROXMOX,
             hostname: "pve".to_string(),
             labels: strings(base),
             label_sets: vec![],

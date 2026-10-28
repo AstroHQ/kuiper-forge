@@ -7,6 +7,7 @@
 
 use anyhow::{Result, anyhow};
 use kuiper_agent_proto::{AgentMessage, CoordinatorMessage};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,21 +16,26 @@ use tracing::{debug, info, warn};
 
 use crate::forge::RunnerKind;
 
-/// Type of agent (Tart for macOS, Proxmox for Windows/Linux, libvirt for VMs on a local Linux host)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentType {
-    Tart,
-    Proxmox,
-    Libvirt,
+/// What kind of agent this is: "tart", "proxmox", "libvirt", or whatever a third-party agent calls itself. It's
+/// only shown and logged, nothing depends on it, so any short plain name is accepted. It also goes into the agent
+/// ID (and so its certificate), hence lowercase letters, digits and '-' only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentType(Cow<'static, str>);
+
+impl AgentType {
+    #[cfg(test)]
+    pub const TART: AgentType = AgentType(Cow::Borrowed("tart"));
+    #[cfg(test)]
+    pub const PROXMOX: AgentType = AgentType(Cow::Borrowed("proxmox"));
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for AgentType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentType::Tart => write!(f, "tart"),
-            AgentType::Proxmox => write!(f, "proxmox"),
-            AgentType::Libvirt => write!(f, "libvirt"),
-        }
+        f.write_str(&self.0)
     }
 }
 
@@ -37,11 +43,18 @@ impl std::str::FromStr for AgentType {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "tart" => Ok(AgentType::Tart),
-            "proxmox" => Ok(AgentType::Proxmox),
-            "libvirt" => Ok(AgentType::Libvirt),
-            _ => Err(anyhow!("Unknown agent type: {s}")),
+        let name = s.to_lowercase();
+        let ok = !name.is_empty()
+            && name.len() <= 32
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if ok {
+            Ok(AgentType(Cow::Owned(name)))
+        } else {
+            Err(anyhow!(
+                "Invalid agent type {s:?}: up to 32 letters, digits and '-'"
+            ))
         }
     }
 }
@@ -124,7 +137,7 @@ pub struct ConnectedAgent {
     /// Unique agent identifier (from certificate CN)
     pub agent_id: String,
 
-    /// Type of agent (Tart or Proxmox)
+    /// Kind of agent, e.g. "tart"
     pub agent_type: AgentType,
 
     /// Hostname where the agent is running
@@ -494,7 +507,7 @@ impl AgentRegistry {
     ) -> Arc<RwLock<ConnectedAgent>> {
         let agent = Arc::new(RwLock::new(ConnectedAgent::new(
             agent_id.clone(),
-            agent_type,
+            agent_type.clone(),
             hostname.clone(),
             max_vms,
             active_vms,
@@ -1043,7 +1056,7 @@ impl AgentRegistry {
             let agent = agent.read().await;
             result.push(AgentInfo {
                 agent_id: agent.agent_id.clone(),
-                agent_type: agent.agent_type,
+                agent_type: agent.agent_type.clone(),
                 hostname: agent.hostname.clone(),
                 labels: agent.labels.clone(),
                 label_sets: agent.label_sets.clone(),
@@ -1235,11 +1248,19 @@ mod tests {
 
     #[test]
     fn test_agent_type_parsing() {
-        assert_eq!("tart".parse::<AgentType>().unwrap(), AgentType::Tart);
-        assert_eq!("Tart".parse::<AgentType>().unwrap(), AgentType::Tart);
-        assert_eq!("PROXMOX".parse::<AgentType>().unwrap(), AgentType::Proxmox);
-        assert_eq!("libvirt".parse::<AgentType>().unwrap(), AgentType::Libvirt);
-        assert!("unknown".parse::<AgentType>().is_err());
+        assert_eq!("tart".parse::<AgentType>().unwrap(), AgentType::TART);
+        assert_eq!("Tart".parse::<AgentType>().unwrap(), AgentType::TART);
+        assert_eq!("PROXMOX".parse::<AgentType>().unwrap(), AgentType::PROXMOX);
+        // any agent, ours or not
+        assert_eq!("libvirt".parse::<AgentType>().unwrap().as_str(), "libvirt");
+        assert_eq!(
+            "acme-vm-2".parse::<AgentType>().unwrap().as_str(),
+            "acme-vm-2"
+        );
+        // goes into the agent ID and certificate
+        for bad in ["", "a b", "a_b", "a/b", "a\n", &"a".repeat(33)] {
+            assert!(bad.parse::<AgentType>().is_err(), "{bad:?}");
+        }
     }
 
     #[tokio::test]
@@ -1251,7 +1272,7 @@ mod tests {
         let _agent = registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 2,
                 0, // active_vms
@@ -1285,7 +1306,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 2,
                 0, // active_vms
@@ -1343,7 +1364,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 4,
                 2, // active_vms: both macOS
@@ -1441,7 +1462,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 5,
                 0,
@@ -1497,7 +1518,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 5,
                 0,
@@ -1548,7 +1569,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Proxmox,
+                AgentType::PROXMOX,
                 "pve".to_string(),
                 3,
                 0,
@@ -1596,7 +1617,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 2,
                 0, // active_vms
@@ -1627,7 +1648,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 max_vms,
                 active,
@@ -1707,7 +1728,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 2,
                 0, // active_vms
@@ -1724,7 +1745,7 @@ mod tests {
         registry
             .register(
                 "agent_2".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-2".to_string(),
                 3,
                 0, // active_vms
@@ -1742,7 +1763,7 @@ mod tests {
         registry
             .register(
                 "agent_3".to_string(),
-                AgentType::Proxmox,
+                AgentType::PROXMOX,
                 "proxmox-1".to_string(),
                 5,
                 0, // active_vms
@@ -1785,7 +1806,7 @@ mod tests {
         registry
             .register(
                 "explicit".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 4,
                 0,
@@ -1811,7 +1832,7 @@ mod tests {
         registry
             .register(
                 "legacy".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-2".to_string(),
                 2,
                 0,
@@ -1860,7 +1881,7 @@ mod tests {
         registry
             .register(
                 "explicit".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 4,
                 0,
@@ -1881,7 +1902,7 @@ mod tests {
         registry
             .register(
                 "legacy".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-2".to_string(),
                 1,
                 0,
@@ -1911,7 +1932,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 5,
                 0,
@@ -1984,7 +2005,7 @@ mod tests {
         registry
             .register(
                 "agent_1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "mac-mini-1".to_string(),
                 2,
                 0,                                                    // active_vms
@@ -2052,7 +2073,7 @@ mod tests {
             registry
                 .register(
                     id.to_string(),
-                    AgentType::Tart,
+                    AgentType::TART,
                     format!("{id}.local"),
                     2,
                     active,
@@ -2086,7 +2107,7 @@ mod tests {
             registry
                 .register(
                     id.to_string(),
-                    AgentType::Proxmox,
+                    AgentType::PROXMOX,
                     format!("{id}.local"),
                     2,
                     0,
@@ -2138,7 +2159,7 @@ mod tests {
             registry
                 .register(
                     id.to_string(),
-                    AgentType::Tart,
+                    AgentType::TART,
                     format!("{id}.local"),
                     2,
                     0,
@@ -2187,7 +2208,7 @@ mod tests {
         let register = || {
             registry.register(
                 "a1".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "a1.local".to_string(),
                 2,
                 0,
@@ -2224,7 +2245,7 @@ mod tests {
             registry
                 .register(
                     id.to_string(),
-                    AgentType::Tart,
+                    AgentType::TART,
                     format!("{id}.local"),
                     2,
                     0,
@@ -2268,7 +2289,7 @@ mod tests {
         let reg = || {
             registry.register(
                 "a".to_string(),
-                AgentType::Tart,
+                AgentType::TART,
                 "a.local".to_string(),
                 1,
                 0,
