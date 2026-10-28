@@ -124,14 +124,12 @@ async fn main() -> anyhow::Result<()> {
         return cmd_generate_service(args.config.as_deref(), args.system);
     }
 
-    // Initialize logging with file output (retention applied after config load)
-    let log_capture = init_logging(
-        &args.resolve_log_dir(),
-        config::LoggingConfig::default().retention_days as usize,
-    )?;
-
-    // Handle subcommands
+    // Handle subcommands. They run before there's a config, so their logs keep the default retention
     if let Some(command) = &args.command {
+        init_logging(
+            &args.resolve_log_dir(),
+            config::LoggingConfig::default().retention_days as usize,
+        )?;
         match command {
             Commands::Register { bundle } => {
                 let config_path = args.config.clone().unwrap_or_else(|| {
@@ -147,13 +145,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    info!("Starting kuiper-proxmox-agent");
-
-    // Normal agent mode - load existing config
+    // Normal agent mode - load existing config. Before logging starts, it sets the log retention
     let config = match args.resolve_config_path() {
         Some(path) => Config::load(&path)?,
         None => Config::load_default()?,
     };
+    let log_capture = init_logging(
+        &args.resolve_log_dir(),
+        config.logging.retention_days as usize,
+    )?;
+    info!("Starting kuiper-proxmox-agent");
 
     info!("Loaded configuration");
     debug!("Coordinator URL: {}", config.coordinator.url);

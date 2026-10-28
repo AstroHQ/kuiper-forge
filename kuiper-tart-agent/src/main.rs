@@ -103,14 +103,12 @@ async fn main() -> anyhow::Result<()> {
     let config_path = args.config.clone().unwrap_or_else(Config::default_path);
     let data_dir = Config::default_data_dir();
 
-    // Initialize logging with file output (retention applied after config load)
-    let log_capture = init_logging(
-        &data_dir,
-        config::LoggingConfig::default().retention_days as usize,
-    )?;
-
-    // Handle subcommands
+    // Handle subcommands. They run before there's a config, so their logs keep the default retention
     if let Some(command) = args.command {
+        init_logging(
+            &data_dir,
+            config::LoggingConfig::default().retention_days as usize,
+        )?;
         match command {
             Commands::Setup => {
                 return setup::run_setup(&config_path).await;
@@ -144,8 +142,10 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    info!("Loading config from: {}", config_path.display());
+    // loaded before logging starts, it sets the log retention
     let config = Config::load(&config_path)?;
+    let log_capture = init_logging(&data_dir, config.logging.retention_days as usize)?;
+    info!("Loaded config from: {}", config_path.display());
 
     // Seed server trust from config if provided
     let cert_store = AgentCertStore::new(config.tls.certs_dir.clone());
