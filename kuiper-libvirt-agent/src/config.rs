@@ -144,8 +144,9 @@ pub struct VmConfig {
     #[serde(default = "default_memory_mib")]
     pub memory_mib: u32,
     /// Domain XML template to use instead of the built-in one, e.g. for UEFI or Windows guests. `{name}`, `{disk}`,
-    /// `{vcpus}`, `{memory_mib}`, `{interface}` and `{metadata}` are filled in. `{metadata}` must be inside
-    /// `<metadata>`, it's how the agent knows the VM is its own
+    /// `{nvram}`, `{vcpus}`, `{memory_mib}`, `{interface}` and `{metadata}` are filled in. `{metadata}` must be
+    /// inside `<metadata>`, it's how the agent knows the VM is its own. `{nvram}` is a per-VM UEFI variable store
+    /// path the agent cleans up, for `<nvram template='...'>{nvram}</nvram>`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain_template: Option<PathBuf>,
     /// Timeout in seconds for VM to get an IP address and accept SSH

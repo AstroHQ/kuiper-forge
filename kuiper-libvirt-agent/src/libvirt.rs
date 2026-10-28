@@ -24,6 +24,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// may hold other things, base images even.
 const DISK_SUFFIX: &str = ".kuiper.qcow2";
 const XML_SUFFIX: &str = ".kuiper.xml";
+const NVRAM_SUFFIX: &str = ".kuiper.VARS.fd";
 
 /// XML namespace of the ownership marker.
 const MARKER_NS: &str = "https://github.com/AstroHQ/kuiper-forge/libvirt-agent";
@@ -103,6 +104,12 @@ impl Libvirt {
         self.disk_dir.join(format!("{name}{XML_SUFFIX}"))
     }
 
+    /// UEFI variable store for VM `name`, for templates that use `{nvram}`. libvirt creates it from the
+    /// `<nvram template=...>` on start; transient domains don't take it with them, so the agent deletes it.
+    fn nvram_path(&self, name: &str) -> PathBuf {
+        self.disk_dir.join(format!("{name}{NVRAM_SUFFIX}"))
+    }
+
     /// Create a copy-on-write overlay of `image` for VM `name`. Fails if the overlay already exists, qemu-img
     /// would otherwise overwrite it.
     pub async fn create_overlay(&self, name: &str, image: &Path) -> Result<PathBuf> {
@@ -143,6 +150,10 @@ impl Libvirt {
         self.template
             .replace("{name}", &xml_escape(spec.name))
             .replace("{disk}", &xml_escape(&spec.disk.display().to_string()))
+            .replace(
+                "{nvram}",
+                &xml_escape(&self.nvram_path(spec.name).display().to_string()),
+            )
             .replace("{vcpus}", &spec.vcpus.to_string())
             .replace("{memory_mib}", &spec.memory_mib.to_string())
             .replace("{interface}", &interface)
@@ -242,7 +253,11 @@ impl Libvirt {
             Err(e) => Err(e),
         };
 
-        for path in [self.disk_path(name), self.xml_path(name)] {
+        for path in [
+            self.disk_path(name),
+            self.xml_path(name),
+            self.nvram_path(name),
+        ] {
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => debug!("Removed {}", path.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -269,7 +284,10 @@ impl Libvirt {
             let path = entry.path();
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            if file_name.ends_with(DISK_SUFFIX) || file_name.ends_with(XML_SUFFIX) {
+            if [DISK_SUFFIX, XML_SUFFIX, NVRAM_SUFFIX]
+                .iter()
+                .any(|suffix| file_name.ends_with(suffix))
+            {
                 warn!("Removing leftover VM file {}", path.display());
                 if let Err(e) = tokio::fs::remove_file(&path).await {
                     warn!("Failed to remove {}: {}", path.display(), e);
@@ -430,6 +448,27 @@ mod tests {
         assert!(xml.contains("<memory unit='MiB'>8192</memory>"));
         assert!(!xml.contains('{'), "unfilled placeholder:\n{xml}");
         // the agent recognizes its own domain
+        assert!(libvirt.is_ours(&xml));
+    }
+
+    #[test]
+    fn test_domain_xml_win11_example() {
+        let template = include_str!("../../examples/kuiper-libvirt-domain-win11.xml");
+        let libvirt = Libvirt::new(
+            "qemu:///system".to_string(),
+            PathBuf::from("/var/lib/kuiper-libvirt-agent/vms"),
+            Some(template.to_string()),
+        );
+        let disk = libvirt.disk_path("kuiper-runner-1");
+        let xml = libvirt.domain_xml(&spec(&disk, None));
+        assert!(
+            xml.contains(
+                ">/var/lib/kuiper-libvirt-agent/vms/kuiper-runner-1.kuiper.VARS.fd</nvram>"
+            )
+        );
+        assert!(
+            !xml.contains("{name}") && !xml.contains("{nvram}") && !xml.contains("{interface}")
+        );
         assert!(libvirt.is_ours(&xml));
     }
 

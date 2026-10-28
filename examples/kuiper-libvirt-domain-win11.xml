@@ -1,0 +1,68 @@
+<!--
+  Windows 11 UEFI domain for kuiper-libvirt-agent, set as [vm] domain_template. Fits a Windows VM installed on
+  Proxmox (bios: ovmf, machine: i440fx, scsihw: virtio-scsi*, virtio NIC); for one installed on q35 change
+  machine='pc' to machine='q35'.
+
+  The nvram template is the VM's UEFI variable store. Copy it from the Proxmox efidisk to keep its Secure Boot
+  keys and boot entries:
+    ssh root@proxmox dd if=/dev/pve/base-<vmid>-disk-<n> bs=1M > /var/lib/libvirt/images/win11-ci_VARS.fd
+  or start from /usr/share/OVMF/OVMF_VARS_4M.ms.fd. Each VM gets its own copy at {nvram}, deleted with the VM.
+
+  libvirt only allows Secure Boot loaders (secure='yes', OVMF_CODE_4M.secboot.fd) on q35, so this uses the plain
+  loader; Secure Boot is still enforced by the keys in the variable store.
+
+  For a template that needs a TPM (BitLocker, an image that checks for one) add to <devices>:
+    <tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>
+  libvirt deletes a transient domain's TPM state when it goes away.
+-->
+<domain type='kvm'>
+  <name>{name}</name>
+  <metadata>
+    {metadata}
+  </metadata>
+  <memory unit='MiB'>{memory_mib}</memory>
+  <vcpu>{vcpus}</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>
+    <nvram template='/var/lib/libvirt/images/win11-ci_VARS.fd'>{nvram}</nvram>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode='custom'>
+      <relaxed state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on' retries='8191'/>
+      <vpindex state='on'/>
+      <synic state='on'/>
+      <stimer state='on'/>
+      <frequencies state='on'/>
+    </hyperv>
+  </features>
+  <cpu mode='host-passthrough'/>
+  <!-- Windows keeps the RTC in local time -->
+  <clock offset='localtime'>
+    <timer name='hypervclock' present='yes'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <!-- virtio-scsi like Proxmox, so Windows boots with the vioscsi driver it already has -->
+    <controller type='scsi' model='virtio-scsi'/>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='{disk}'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+    {interface}
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
+    <memballoon model='virtio'/>
+  </devices>
+</domain>

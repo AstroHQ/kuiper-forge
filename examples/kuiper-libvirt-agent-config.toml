@@ -84,8 +84,10 @@ memory_mib = 8192
 ip_timeout_secs = 180
 
 # Domain XML to use instead of the built-in one (virtio disk + NIC, guest agent channel, serial console, BIOS),
-# e.g. for UEFI, TPM or Windows guests. Placeholders: {name} {disk} {vcpus} {memory_mib} {interface} {metadata}.
-# {metadata} must be inside <metadata>, it's how the agent recognizes its own VMs
+# e.g. for UEFI, TPM or Windows guests. Placeholders: {name} {disk} {nvram} {vcpus} {memory_mib} {interface}
+# {metadata}. {metadata} must be inside <metadata>, it's how the agent recognizes its own VMs. {nvram} is a per-VM
+# UEFI variable store the agent deletes with the VM: <nvram template='/path/to/VARS.fd'>{nvram}</nvram>.
+# See kuiper-libvirt-domain-win11.xml for a Windows 11 UEFI template.
 # domain_template = "/etc/kuiper-libvirt-agent/domain.xml"
 
 # GitHub Actions runner version to install when the image doesn't have it ("latest" or e.g. "2.321.0")
