@@ -1,0 +1,155 @@
+# Example kuiper-libvirt-agent configuration
+#
+# kuiper-libvirt-agent runs ephemeral CI runner VMs on the Linux host it runs on, through libvirt/KVM. Each job
+# gets a copy-on-write qcow2 overlay of a base image and a transient domain on it; both are gone after the job.
+#
+# Register first, with a bundle token from the coordinator:
+#   kuiper-libvirt-agent --system register kfr1_BUNDLE_TOKEN
+# then edit /etc/kuiper-libvirt-agent/config.toml and run:
+#   kuiper-libvirt-agent --system
+#
+# Host setup:
+#   - libvirt + QEMU/KVM installed, and the agent's user in the `libvirt` group (for qemu:///system)
+#   - a libvirt network for the VMs (the stock "default" NAT network works), or a host bridge
+#   - a base image: a qcow2 of a Linux (or Windows) install with an SSH server and a user the agent can log in as.
+#     Cloud images work once they have that user baked in (virt-customize --ssh-inject, say). Installing
+#     qemu-guest-agent lets the agent find the VM's IP on a bridge. The GitHub/Forgejo runner is installed on
+#     first use if the image doesn't have it, baking it in saves that time on every job
+#   - the libvirt QEMU user (libvirt-qemu or qemu) must be able to read the base images and reach `disk_dir`
+
+# =============================================================================
+# Coordinator Connection Configuration
+# =============================================================================
+[coordinator]
+# gRPC endpoint URL (must use https://)
+url = "https://coordinator.example.com:9443"
+
+# Hostname for TLS verification (must match coordinator's server certificate)
+hostname = "coordinator.example.com"
+
+# =============================================================================
+# TLS/Certificate Configuration
+# =============================================================================
+[tls]
+# Path to server CA certificate from coordinator (optional - use native roots if omitted)
+ca_cert = "/var/lib/kuiper-libvirt-agent/certs/ca.crt"
+
+# Directory for client certificates (populated by `register`)
+certs_dir = "/var/lib/kuiper-libvirt-agent/certs"
+
+# =============================================================================
+# Agent Configuration
+# =============================================================================
+[agent]
+# Labels this agent advertises. Jobs whose labels are all in this set (plus a mapping's, below) can run here
+labels = ["self-hosted", "linux", "x64", "libvirt"]
+
+# =============================================================================
+# libvirt
+# =============================================================================
+[libvirt]
+# libvirt connection URI. qemu:///session runs VMs as the agent's user, but has no libvirt networks
+uri = "qemu:///system"
+
+# libvirt network for the VMs' NIC
+network = "default"
+
+# Or a host bridge instead (overrides `network`). libvirt doesn't see DHCP leases on a bridge, so the image needs
+# qemu-guest-agent and ip_source should be "agent"
+# bridge = "br0"
+
+# Where VM disk overlays (and their domain XML) go. Default: <data dir>/vms, i.e.
+# /var/lib/kuiper-libvirt-agent/vms with --system. The agent's files end in .kuiper.qcow2/.kuiper.xml/.kuiper.VARS.fd,
+# it never touches anything else here
+# disk_dir = "/var/lib/kuiper-libvirt-agent/vms"
+
+# How to find a VM's IP: "lease" (libvirt network DHCP), "agent" (qemu-guest-agent), or "any" (lease, then agent)
+ip_source = "any"
+
+# =============================================================================
+# VM Configuration
+# =============================================================================
+[vm]
+# Default base image (absolute path), used when no image mapping matches. Never written to
+image = "/var/lib/libvirt/images/ubuntu-24.04-runner.qcow2"
+
+# Maximum concurrent VMs. Mind the host's RAM: max_vms * memory_mib
+max_vms = 2
+
+# Resources per VM
+vcpus = 4
+memory_mib = 8192
+
+# Seconds for a VM to get an IP and accept SSH
+ip_timeout_secs = 180
+
+# The image's VM hardware; the agent writes the domain XML from these. The defaults suit a Linux image: BIOS,
+# virtio disk, libvirt's default machine. Image mappings take the same settings for their own image, they don't
+# inherit these. See the Windows mapping below for an image exported from Proxmox.
+# os = "linux"            # or "windows": Hyper-V enlightenments, clock in local time
+# firmware = "bios"       # or "uefi": OVMF, libvirt picks the build
+# uefi_vars = "/var/lib/libvirt/images/runner_VARS.fd"  # UEFI only: variable store each VM starts from (e.g. a
+#                         # Proxmox EFI disk, copied with dd). Default: the firmware's own. The agent must read it
+# secure_boot = false     # UEFI on q35 only; without uefi_vars, VMs start with Microsoft's keys enrolled
+# machine = "q35"         # or "pc" (i440fx, Proxmox's default). Default: libvirt's, "pc" on x86
+# disk_bus = "virtio"     # or "scsi" (virtio-scsi). Windows only boots from a bus it has the driver for
+# tpm = false             # emulated TPM 2.0, fresh for each VM
+
+# Escape hatch: domain XML to use instead of generating it (none of the settings above apply then).
+# Placeholders: {name} {disk} {nvram} {vcpus} {memory_mib} {interface} {metadata}. {metadata} must be inside
+# <metadata>, it's how the agent recognizes its own VMs. {nvram} is a per-VM UEFI variable store path the agent
+# deletes with the VM
+# domain_template = "/etc/kuiper-libvirt-agent/domain.xml"
+
+# GitHub Actions runner version to install when the image doesn't have it ("latest" or e.g. "2.321.0")
+runner_version = "latest"
+
+# forgejo-runner version for Forgejo jobs ("latest" = the version this agent release pins)
+forgejo_runner_version = "latest"
+
+# Image mappings: pick a base image by job labels (first match wins). Each is also advertised as its own
+# capability: agent.labels plus the mapping's labels
+# [[vm.image_mappings]]
+# labels = ["ubuntu-22.04"]
+# image = "/var/lib/libvirt/images/ubuntu-22.04-runner.qcow2"
+# pool = 1   # fixed-capacity mode: keep this many runners of this image
+#
+# A Windows 11 VM template exported from Proxmox (bios: ovmf, machine: i440fx, scsihw: virtio-scsi-single). Take
+# the disk and the efidisk0 volume:
+#   qemu-img convert -p -O qcow2 nbd://proxmox:10809 /var/lib/libvirt/images/win11-ci.qcow2   (qemu-nbd on proxmox)
+#   ssh root@proxmox dd if=/dev/pve/base-<vmid>-disk-<n> bs=1M > /var/lib/libvirt/images/win11-ci_VARS.fd
+# [[vm.image_mappings]]
+# labels = ["windows"]
+# image = "/var/lib/libvirt/images/win11-ci.qcow2"
+# os = "windows"
+# firmware = "uefi"
+# uefi_vars = "/var/lib/libvirt/images/win11-ci_VARS.fd"
+# machine = "pc"
+# disk_bus = "scsi"
+# memory_mib = 16384   # per-mapping sizing, vm.vcpus / vm.memory_mib if unset
+
+# =============================================================================
+# SSH Configuration (agent -> VM)
+# =============================================================================
+[ssh]
+# Key and/or password. With both, the key is tried first
+private_key_path = "/etc/kuiper-libvirt-agent/id_ed25519"
+# password = "..."
+
+username = "ci"
+port = 22
+timeout_secs = 30
+retries = 10
+
+# =============================================================================
+# Cleanup / Logging (optional)
+# =============================================================================
+[cleanup]
+# VMs older than this are destroyed as stale
+max_vm_age_hours = 2
+cleanup_interval_mins = 15
+
+[logging]
+retention_days = 14
+# Upload the agent's own log lines to the coordinator (runner logs are never sent)
+upload = true

@@ -6,6 +6,7 @@ members = [
     "kuiper-agent-lib",
     "kuiper-tart-agent",
     "kuiper-proxmox-agent",
+    "kuiper-libvirt-agent",
 ]
 resolver = "2"
 

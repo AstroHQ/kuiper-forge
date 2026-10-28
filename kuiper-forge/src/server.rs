@@ -231,12 +231,22 @@ impl RegistrationService for RegistrationServiceImpl {
             "Agent registration request"
         );
 
+        // any kind of agent can register, as long as its name is fit for the agent ID and certificate
+        let agent_type: AgentType = req
+            .agent_type
+            .parse()
+            .map_err(|e: anyhow::Error| Status::invalid_argument(e.to_string()))?;
+
         // Exchange token for certificate. labels/max_vms are no longer carried in
         // RegisterRequest — they come from the first AgentStatus stream message
         // and the coordinator syncs its persisted record from that live value.
         let cert = self
             .auth_manager
-            .exchange_token_for_certificate(&req.registration_token, &req.hostname, &req.agent_type)
+            .exchange_token_for_certificate(
+                &req.registration_token,
+                &req.hostname,
+                agent_type.as_str(),
+            )
             .await
             .map_err(|e| {
                 warn!(error = %e, "Registration failed");
@@ -430,16 +440,10 @@ impl AgentService for AgentServiceImpl {
             capacity,
         ) = match &first_msg.payload {
             Some(AgentPayload::Status(status)) => {
-                let agent_type = match status.agent_type.to_lowercase().as_str() {
-                    "tart" => AgentType::Tart,
-                    "proxmox" => AgentType::Proxmox,
-                    _ => {
-                        return Err(Status::invalid_argument(format!(
-                            "Unknown agent type: {}",
-                            status.agent_type
-                        )));
-                    }
-                };
+                let agent_type: AgentType = status
+                    .agent_type
+                    .parse()
+                    .map_err(|e: anyhow::Error| Status::invalid_argument(e.to_string()))?;
 
                 // Extract VM names for recovery
                 let vm_names: Vec<String> = status.vms.iter().map(|vm| vm.name.clone()).collect();

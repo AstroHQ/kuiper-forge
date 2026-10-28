@@ -10,8 +10,9 @@ Type=simple
 ExecStart=/usr/bin/kuiper-proxmox-agent --system
 Restart=on-failure
 RestartSec=5
-# The agent destroys all managed VMs on SIGTERM; give cleanup time to finish.
-TimeoutStopSec=120
+# The agent destroys all managed VMs on SIGTERM, first waiting out any clone still in progress
+# (vm.clone_timeout_secs, 300 by default); give cleanup time to finish.
+TimeoutStopSec=420
 
 # Run as the dedicated system user created by the package's postinstall script.
 User=kuiper
