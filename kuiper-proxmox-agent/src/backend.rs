@@ -111,7 +111,7 @@ impl ProxmoxBackend {
             forgejo: &self.vm_config.forgejo_runner_version,
             forgejo_url: &self.vm_config.forgejo_runner_url,
         };
-        let runner = guest.prepare(job, &versions).await?;
+        let runner = guest.prepare(job, &versions, ctx).await?;
         ctx.runner_started().await;
         guest.run(runner).await?;
 

@@ -18,7 +18,7 @@ pub use proto::{
     AgentMessage, AgentStatus, CapacityLimit, CommandAck, CommandResult, CoordinatorMessage,
     CreateRunnerCommand, CreateRunnerResult, DestroyRunnerCommand, DestroyRunnerResult,
     ForgejoRunner, LabelSet, LogBatch, LogRecord, Ping, Pong, RegisterRequest, RegisterResponse,
-    RunnerEvent, UploadLogsResponse, VmInfo,
+    RunnerEvent, RunnerTimings, UploadLogsResponse, VmInfo,
 };
 
 // Re-export the payload enums for pattern matching

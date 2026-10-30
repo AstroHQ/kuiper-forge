@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use kuiper_agent_proto::{AgentStatus, CreateRunnerCommand, LabelSet, RunnerEventType};
+use kuiper_agent_proto::{
+    AgentStatus, CreateRunnerCommand, LabelSet, RunnerEventType, RunnerTimings,
+};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -99,6 +101,7 @@ pub struct JobContext {
     vm_id: String,
     events: EventSender,
     states: Arc<dyn StateSink>,
+    clock: Arc<PhaseClock>,
 }
 
 impl JobContext {
@@ -113,6 +116,7 @@ impl JobContext {
         self.states
             .set_state(&self.name, VmState::RunnerActive)
             .await;
+        self.clock.next(Some(step::JOB));
         if let Err(e) = self
             .events
             .runner_event(
@@ -120,11 +124,104 @@ impl JobContext {
                 self.vm_id.clone(),
                 RunnerEventType::Started,
                 String::new(),
+                Some(self.clock.timings()),
             )
             .await
         {
             warn!("Failed to send runner started event: {}", e);
         }
+    }
+
+    /// Time what follows as `step` until the next call or [`Self::runner_started`], say [`step::INSTALL`] around the
+    /// runner download and then [`step::SETUP`] again.
+    pub fn step(&self, step: &str) {
+        self.clock.next(Some(step));
+    }
+
+    /// `step` wasn't needed, say [`step::INSTALL`] when the image already has the runner. Shows as skipped rather than
+    /// missing.
+    pub fn skip_step(&self, step: &str) {
+        self.clock.skip(step);
+    }
+}
+
+/// Names of the steps a runner's time is split into, see `RunnerTimings` in the proto. Backends can time their own
+/// steps with [`JobContext::step`].
+pub mod step {
+    pub const CREATE: &str = "create";
+    pub const BOOT: &str = "boot";
+    /// Downloading the runner, inside setup. Skipped when the image already has it
+    pub const INSTALL: &str = "install";
+    pub const SETUP: &str = "setup";
+    pub const JOB: &str = "job";
+    pub const DESTROY: &str = "destroy";
+}
+
+/// Times a runner's steps for the coordinator's metrics. Shared with [`JobContext`], so backends can mark steps inside
+/// their run.
+struct PhaseClock {
+    state: std::sync::Mutex<ClockState>,
+}
+
+struct ClockState {
+    timings: RunnerTimings,
+    /// None once the runner is done
+    step: Option<String>,
+    since: Instant,
+    /// the current step failed, so how long it ran isn't a real duration for that step
+    failed: bool,
+}
+
+impl PhaseClock {
+    fn new(image: &str) -> Self {
+        Self {
+            state: std::sync::Mutex::new(ClockState {
+                timings: RunnerTimings {
+                    image: image.to_string(),
+                    ..Default::default()
+                },
+                step: Some(step::CREATE.to_string()),
+                since: Instant::now(),
+                failed: false,
+            }),
+        }
+    }
+
+    /// End the current step and start `next`, or stop timing for None. A step started again adds to its time.
+    fn next(&self, next: Option<&str>) {
+        let state = &mut *self.state.lock().unwrap();
+        let ms = state.since.elapsed().as_millis() as u64;
+        if !state.failed
+            && let Some(step) = &state.step
+        {
+            *state.timings.steps_ms.entry(step.clone()).or_default() += ms;
+        }
+        state.step = next.map(String::from);
+        state.since = Instant::now();
+        state.failed = false;
+    }
+
+    /// Record `step` as skipped, unless it already has a time.
+    fn skip(&self, step: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.timings.steps_ms.entry(step.to_string()).or_default();
+    }
+
+    /// The current step failed. Only the first failure is kept: the destroy after a failed boot doesn't replace it.
+    fn fail(&self) {
+        let state = &mut *self.state.lock().unwrap();
+        state.failed = true;
+        if let Some(step) = &state.step
+            && state.timings.failed_phase.is_empty()
+        {
+            // an earlier stint of a step that later failed isn't its duration either
+            state.timings.steps_ms.remove(step);
+            state.timings.failed_phase = step.clone();
+        }
+    }
+
+    fn timings(&self) -> RunnerTimings {
+        self.state.lock().unwrap().timings.clone()
     }
 }
 
@@ -297,7 +394,8 @@ impl<B: VmBackend> VmAgent<B> {
             name, image, cmd.labels
         );
 
-        match self.lifecycle(&cmd, &image, &events).await {
+        let clock = Arc::new(PhaseClock::new(&image));
+        match self.lifecycle(&cmd, &image, &events, &clock).await {
             Ok(vm_id) => {
                 info!("Runner {} completed successfully", name);
                 send_event(
@@ -306,6 +404,7 @@ impl<B: VmBackend> VmAgent<B> {
                     vm_id,
                     RunnerEventType::Completed,
                     String::new(),
+                    Some(clock.timings()),
                 )
                 .await;
             }
@@ -321,6 +420,7 @@ impl<B: VmBackend> VmAgent<B> {
                     name,
                     RunnerEventType::Failed,
                     e.to_string(),
+                    Some(clock.timings()),
                 )
                 .await;
             }
@@ -333,12 +433,14 @@ impl<B: VmBackend> VmAgent<B> {
         cmd: &CreateRunnerCommand,
         image: &str,
         events: &EventSender,
+        clock: &Arc<PhaseClock>,
     ) -> BackendResult<String> {
         let name = cmd.vm_name.as_str();
         let vm = match self.backend.create(name, image).await {
             Ok(vm) => vm,
             Err(e) => {
                 error!("[{}] VM creation failed: {}", name, e);
+                clock.fail();
                 // nothing was created, so a destroy waiting on it is done
                 self.tracker.untrack(name, Ok(())).await;
                 return Err(e);
@@ -355,27 +457,35 @@ impl<B: VmBackend> VmAgent<B> {
             .await
         {
             warn!("[{}] VM was destroyed while being created", name);
+            clock.fail();
             let result = self.backend.destroy(&vm, name).await;
             self.tracker.untrack(name, outcome(&result)).await;
             result?;
             return Err(format!("VM {name} was destroyed while being created").into());
         }
 
+        clock.next(Some(step::BOOT));
         let result = tokio::select! {
-            result = self.start_and_run(&vm, &vm_id, cmd, events) => result,
+            result = self.start_and_run(&vm, &vm_id, cmd, events, clock) => result,
             () = self.tracker.torn_down(name) => {
                 warn!("[{}] VM was destroyed while its runner was running", name);
                 Err(format!("VM {vm_id} ({name}) was destroyed while its runner was running").into())
             }
         };
-        if result.is_err() && self.keep_failed_vms {
-            return result.map(|()| vm_id);
+        if result.is_err() {
+            clock.fail();
+            if self.keep_failed_vms {
+                return result.map(|()| vm_id);
+            }
         }
 
         // a no-op if a DestroyRunner or cleanup already has it
+        clock.next(Some(step::DESTROY));
         if let Err(e) = self.destroy(name).await {
             warn!("[{}] Destroying VM failed: {}", name, e);
+            clock.fail();
         }
+        clock.next(None);
         result.map(|()| vm_id)
     }
 
@@ -385,6 +495,7 @@ impl<B: VmBackend> VmAgent<B> {
         vm_id: &str,
         cmd: &CreateRunnerCommand,
         events: &EventSender,
+        clock: &Arc<PhaseClock>,
     ) -> BackendResult<()> {
         let name = cmd.vm_name.as_str();
         self.tracker.set_state(name, VmState::Starting).await;
@@ -393,6 +504,7 @@ impl<B: VmBackend> VmAgent<B> {
         })?;
         info!("[{}] VM ready at {}", name, ip);
         self.tracker.set_running(name, ip).await;
+        clock.next(Some(step::SETUP));
 
         self.tracker.set_state(name, VmState::Configuring).await;
         let job = Job {
@@ -408,6 +520,7 @@ impl<B: VmBackend> VmAgent<B> {
             vm_id: vm_id.to_string(),
             events: events.clone(),
             states: self.tracker.clone(),
+            clock: clock.clone(),
         };
         self.backend.run_job(vm, ip, &job, &ctx).await
     }
@@ -435,6 +548,7 @@ impl<B: VmBackend> VmAgent<B> {
                     vm_id,
                     RunnerEventType::Destroyed,
                     String::new(),
+                    None,
                 )
                 .await;
             }
@@ -446,6 +560,7 @@ impl<B: VmBackend> VmAgent<B> {
                     vm_id,
                     RunnerEventType::Failed,
                     e.to_string(),
+                    None,
                 )
                 .await;
             }
@@ -558,9 +673,10 @@ async fn send_event(
     vm_id: String,
     event_type: RunnerEventType,
     error: String,
+    timings: Option<RunnerTimings>,
 ) {
     if let Err(e) = events
-        .runner_event(runner_name, vm_id, event_type, error)
+        .runner_event(runner_name, vm_id, event_type, error, timings)
         .await
     {
         error!("Failed to send runner event: {}", e);
@@ -678,7 +794,8 @@ mod tests {
             .unwrap();
         let lifecycle = {
             let agent = agent.clone();
-            tokio::spawn(async move { agent.lifecycle(&cmd, "image", &events).await })
+            let clock = Arc::new(PhaseClock::new("image"));
+            tokio::spawn(async move { agent.lifecycle(&cmd, "image", &events, &clock).await })
         };
 
         // a DestroyRunner (or shutdown) arrives mid-clone
@@ -696,5 +813,86 @@ mod tests {
         assert_eq!(backend.destroyed.load(Ordering::SeqCst), 1);
         assert_eq!(agent.tracker.count().await, 0);
         assert!(lifecycle.await.unwrap().is_err());
+    }
+
+    fn ms(t: &RunnerTimings, step: &str) -> Option<u64> {
+        t.steps_ms.get(step).copied()
+    }
+
+    #[test]
+    fn test_phase_clock_skips_the_failed_step() {
+        let clock = PhaseClock::new("macos-15");
+        clock.next(Some(step::BOOT));
+        clock.fail();
+        clock.next(Some(step::DESTROY));
+        clock.next(None);
+
+        let t = clock.timings();
+        assert_eq!(t.image, "macos-15");
+        assert_eq!(t.failed_phase, "boot");
+        assert!(ms(&t, step::CREATE).is_some());
+        assert_eq!(ms(&t, step::BOOT), None, "a failed boot isn't a boot time");
+        assert!(ms(&t, step::DESTROY).is_some());
+        assert_eq!(t.steps_ms.len(), 2);
+    }
+
+    #[test]
+    fn test_phase_clock_keeps_the_first_failure() {
+        let clock = PhaseClock::new("image");
+        clock.next(Some(step::BOOT));
+        clock.next(Some(step::SETUP));
+        clock.next(Some(step::JOB));
+        clock.fail();
+        clock.next(Some(step::DESTROY));
+        clock.fail();
+        clock.next(None);
+
+        let t = clock.timings();
+        assert_eq!(t.failed_phase, "job");
+        assert!(ms(&t, step::SETUP).is_some());
+        assert_eq!(ms(&t, step::JOB), None);
+        assert_eq!(ms(&t, step::DESTROY), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_phase_clock_install_inside_setup() {
+        let clock = PhaseClock::new("image");
+        clock.next(Some(step::SETUP));
+        tokio::time::advance(Duration::from_millis(100)).await;
+        clock.next(Some(step::INSTALL));
+        tokio::time::advance(Duration::from_millis(5_000)).await;
+        clock.next(Some(step::SETUP));
+        tokio::time::advance(Duration::from_millis(200)).await;
+        clock.next(Some(step::JOB));
+
+        let t = clock.timings();
+        assert_eq!(ms(&t, step::INSTALL), Some(5_000));
+        assert_eq!(
+            ms(&t, step::SETUP),
+            Some(300),
+            "setup adds up around the install"
+        );
+    }
+
+    #[test]
+    fn test_phase_clock_skipped_step() {
+        let clock = PhaseClock::new("image");
+        clock.next(Some(step::SETUP));
+        clock.skip(step::INSTALL);
+        clock.next(Some(step::JOB));
+        assert_eq!(ms(&clock.timings(), step::INSTALL), Some(0));
+    }
+
+    #[test]
+    fn test_phase_clock_failed_install_isnt_timed() {
+        let clock = PhaseClock::new("image");
+        clock.next(Some(step::SETUP));
+        clock.next(Some(step::INSTALL));
+        clock.fail();
+        clock.next(Some(step::DESTROY));
+        let t = clock.timings();
+        assert_eq!(t.failed_phase, "install");
+        assert_eq!(ms(&t, step::INSTALL), None);
+        assert!(ms(&t, step::SETUP).is_some());
     }
 }

@@ -28,6 +28,7 @@ use kuiper_forge::forge::{self, Forge, ForgeRegistry};
 use kuiper_forge::forgejo;
 use kuiper_forge::github;
 use kuiper_forge::management::{self, ManagementClient};
+use kuiper_forge::metrics::MetricsStore;
 use kuiper_forge::pending_jobs;
 use kuiper_forge::runner_state;
 use kuiper_forge::server::{ServerConfig, run_server};
@@ -320,6 +321,7 @@ async fn serve(
     let runner_state = Arc::new(runner_state::RunnerStateStore::new(db.pool()));
     let agent_failures = Arc::new(AgentFailureStore::new(db.pool()));
     let agent_logs = Arc::new(AgentLogStore::new(db.pool()));
+    let metrics = Arc::new(MetricsStore::new(db.pool()));
     runner_state.load_and_log().await;
 
     // Initialize persistent pending job store for webhook mode (using shared database)
@@ -408,6 +410,7 @@ async fn serve(
             runner_state.clone(),
             pending_job_store.clone(),
             agent_failures.clone(),
+            metrics.clone(),
         );
         (Some(fm), Some(notifier), wh_notifier)
     };
@@ -426,6 +429,7 @@ async fn serve(
             pending_jobs: pending_job_store.clone(),
             agent_failures: agent_failures.clone(),
             agent_logs: agent_logs.clone(),
+            metrics: metrics.clone(),
             server_trust: server_trust.clone(),
             coordinator_url: config.admin.coordinator_url.clone(),
             fleet_notifier: fleet_notifier.clone(),
@@ -474,8 +478,10 @@ async fn serve(
         tls: config.tls.clone(),
         proxy_protocol: config.grpc.proxy_protocol,
         agent_logs: Some(agent_logs.clone()),
+        metrics: metrics.clone(),
     };
 
+    let metrics_retention = config.metrics.retention();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
@@ -484,6 +490,11 @@ async fn serve(
                 Ok(0) => {}
                 Ok(n) => info!("Pruned {} agent log lines", n),
                 Err(e) => warn!("Failed to prune agent logs: {:#}", e),
+            }
+            match metrics.prune(metrics_retention).await {
+                Ok(0) => {}
+                Ok(n) => info!("Pruned {} run history rows", n),
+                Err(e) => warn!("Failed to prune run history: {:#}", e),
             }
         }
     });
@@ -592,6 +603,7 @@ async fn serve(
                                     vm_id: runner_name,
                                     event_type: RunnerEventType::Destroyed.into(),
                                     error: "agent offline".to_string(),
+                                    timings: None,
                                 },
                             )
                             .await;

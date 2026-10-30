@@ -22,6 +22,7 @@ pub mod forge;
 pub mod forgejo;
 pub mod github;
 pub mod management;
+pub mod metrics;
 pub mod pending_jobs;
 pub mod runner_state;
 pub mod server;

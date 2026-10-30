@@ -15,6 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::RunnerScope;
 use crate::db::DbPool;
 use crate::forge::JobKey;
+use crate::metrics::{JobOutcome, MetricsStore, NewJob};
 use crate::sql;
 use crate::webhook::WebhookRunnerRequest;
 
@@ -58,12 +59,17 @@ pub struct PendingJobInfo {
 /// and prevents job loss when webhooks arrive faster than they can be processed.
 pub struct PendingJobStore {
     pool: DbPool,
+    /// every job that enters or leaves the queue goes in the run history, so no exit can be missed
+    history: MetricsStore,
 }
 
 impl PendingJobStore {
     /// Create a new pending job store using the provided database pool.
     pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+        Self {
+            history: MetricsStore::new(pool.clone()),
+            pool,
+        }
     }
 
     /// Load pending jobs on startup and log what we found.
@@ -134,6 +140,16 @@ impl PendingJobStore {
         match result {
             Ok(_) => {
                 debug!("Added pending job {} to database", request.job_id);
+                self.history
+                    .job_seen(NewJob {
+                        job_id: &request.job_id,
+                        repository: request.repository.as_deref(),
+                        workflow_name: request.workflow_name.as_deref(),
+                        job_name: request.job_name.as_deref(),
+                        labels: &request.job_labels,
+                        queued_at: request.queued_at,
+                    })
+                    .await;
                 true
             }
             Err(e) => {
@@ -146,8 +162,9 @@ impl PendingJobStore {
         }
     }
 
-    /// Remove a pending job from the store.
-    pub async fn remove_job(&self, job_id: &JobKey) {
+    /// Remove a pending job from the store, recording why in the run history.
+    pub async fn remove_job(&self, job_id: &JobKey, outcome: JobOutcome) {
+        self.history.job_ended(job_id, outcome).await;
         let result = sqlx::query(sql::DELETE_PENDING_JOB)
             .bind(job_id.to_string())
             .execute(&self.pool)
@@ -305,6 +322,7 @@ impl PendingJobStore {
                     repository: info.repository,
                     job_name: info.job_name,
                     workflow_name: info.workflow_name,
+                    queued_at: None,
                 })
                 .collect(),
             Err(e) => {
@@ -428,6 +446,7 @@ mod tests {
             repository: Some("org/repo".into()),
             job_name: None,
             workflow_name: None,
+            queued_at: None,
         }
     }
 

@@ -22,6 +22,7 @@ use crate::agent_failures::{AgentFailureStore, FailureKind};
 use crate::agent_registry::{AgentRegistry, PoolDefinition, normalize_labels};
 use crate::config::{Config, ProvisioningMode, RunnerScope};
 use crate::forge::{Forge, ForgeRegistry, IdleRemoval, JobKey, RunnerKind, RunnerLaunch};
+use crate::metrics::{JobOutcome, MetricsStore, NewRunner, RunOutcome};
 use crate::pending_jobs::{PendingJobInfo, PendingJobStore};
 use crate::runner_state::RunnerStateStore;
 use crate::webhook::{WebhookEvent, WebhookNotifier};
@@ -258,6 +259,8 @@ pub struct FleetManager {
     pending_job_store: Arc<PendingJobStore>,
     /// Recent per-agent failures for the admin UI
     failures: Arc<AgentFailureStore>,
+    /// Run history for the metrics page
+    metrics: Arc<MetricsStore>,
     /// Channel for receiving reconciliation notifications
     notify_rx: mpsc::Receiver<()>,
     /// Channel for receiving recovery notifications
@@ -288,6 +291,18 @@ impl FleetManager {
         })
     }
 
+    /// The agent's hostname and type, copied into the run history since the agent may be gone by the time anyone
+    /// looks.
+    async fn agent_identity(&self, agent_id: &str) -> (String, String) {
+        match self.agent_registry.get(agent_id).await {
+            Some(agent) => {
+                let agent = agent.read().await;
+                (agent.hostname.clone(), agent.agent_type.to_string())
+            }
+            None => (String::new(), String::new()),
+        }
+    }
+
     /// Picks a unique runner/VM name that starts with the agent's short hostname, so you can tell where a runner
     /// lives from GitHub's runner list.
     async fn new_runner_name(&self, agent_id: &str) -> String {
@@ -309,6 +324,7 @@ impl FleetManager {
         runner_state: Arc<RunnerStateStore>,
         pending_job_store: Arc<PendingJobStore>,
         failures: Arc<AgentFailureStore>,
+        metrics: Arc<MetricsStore>,
     ) -> (Self, FleetNotifier, Option<WebhookNotifier>) {
         let (notify_tx, notify_rx) = mpsc::channel(64);
         let (recovery_tx, recovery_rx) = mpsc::channel(64);
@@ -330,6 +346,7 @@ impl FleetManager {
             runner_state,
             pending_job_store,
             failures,
+            metrics,
             notify_rx,
             recovery_rx,
             runner_event_rx,
@@ -743,7 +760,9 @@ impl FleetManager {
             }
             WebhookEvent::JobCompleted { job_id } => {
                 // Remove from pending queue if it was waiting
-                self.pending_job_store.remove_job(&job_id).await;
+                self.pending_job_store
+                    .remove_job(&job_id, JobOutcome::Ran)
+                    .await;
                 debug!("Cleaned up state for completed job {}", job_id);
 
                 // Job completed means an agent may be free - try pending jobs
@@ -840,7 +859,9 @@ impl FleetManager {
                     "Pending job {} has no repository info and is {}h old - removing as stale",
                     job_id, age_hours
                 );
-                self.pending_job_store.remove_job(job_id).await;
+                self.pending_job_store
+                    .remove_job(job_id, JobOutcome::Gone)
+                    .await;
             } else {
                 debug!(
                     "Skipping job {} - no repository info for forge status check ({}h old)",
@@ -854,7 +875,9 @@ impl FleetManager {
             Ok(forge) => forge,
             Err(e) => {
                 warn!("Pending job {}: {} - removing from queue", job_id, e);
-                self.pending_job_store.remove_job(job_id).await;
+                self.pending_job_store
+                    .remove_job(job_id, JobOutcome::Gone)
+                    .await;
                 return;
             }
         };
@@ -870,7 +893,9 @@ impl FleetManager {
                     "Pending job {} has status '{}' on its forge - removing from queue",
                     job_id, status
                 );
-                self.pending_job_store.remove_job(job_id).await;
+                self.pending_job_store
+                    .remove_job(job_id, JobOutcome::Gone)
+                    .await;
             }
             Ok(None) => {
                 // Job not found (404) - probably deleted or expired
@@ -878,7 +903,9 @@ impl FleetManager {
                     "Pending job {} not found on its forge - removing from queue",
                     job_id
                 );
-                self.pending_job_store.remove_job(job_id).await;
+                self.pending_job_store
+                    .remove_job(job_id, JobOutcome::Gone)
+                    .await;
             }
             Err(e) => {
                 // API error - log but don't remove (could be transient)
@@ -1005,6 +1032,7 @@ impl FleetManager {
                 repository: job.repository,
                 job_name: None,      // Not available from list_queued_jobs
                 workflow_name: None, // Not available from list_queued_jobs
+                queued_at: job.created_at,
             };
 
             if self.pending_job_store.add_job(&request).await {
@@ -1059,7 +1087,9 @@ impl FleetManager {
                     "Pending job {} has exceeded max retries ({}) - abandoning",
                     job_id, MAX_RETRIES
                 );
-                self.pending_job_store.remove_job(&job_id).await;
+                self.pending_job_store
+                    .remove_job(&job_id, JobOutcome::Abandoned)
+                    .await;
                 continue;
             }
 
@@ -1135,7 +1165,9 @@ impl FleetManager {
                                     "Job {} failed to create runner and exceeded max retries: {}",
                                     job_id, e
                                 );
-                                self.pending_job_store.remove_job(&job_id).await;
+                                self.pending_job_store
+                                    .remove_job(&job_id, JobOutcome::Abandoned)
+                                    .await;
                             } else {
                                 warn!(
                                     "Job {} failed to create runner (attempt {}/{}): {}",
@@ -1210,7 +1242,9 @@ impl FleetManager {
                     self.agent_registry
                         .release_slot(&agent_id, &runner_name)
                         .await;
-                    self.pending_job_store.remove_job(job_id).await;
+                    self.pending_job_store
+                        .remove_job(job_id, JobOutcome::Gone)
+                        .await;
                     return Ok(());
                 }
                 Ok(None) => {
@@ -1221,7 +1255,9 @@ impl FleetManager {
                     self.agent_registry
                         .release_slot(&agent_id, &runner_name)
                         .await;
-                    self.pending_job_store.remove_job(job_id).await;
+                    self.pending_job_store
+                        .remove_job(job_id, JobOutcome::Gone)
+                        .await;
                     return Ok(());
                 }
                 Err(e) => {
@@ -1271,6 +1307,23 @@ impl FleetManager {
                 None, // pool
             )
             .await;
+        let (hostname, agent_type) = self.agent_identity(&agent_id).await;
+        self.metrics
+            .runner_requested(NewRunner {
+                runner_name: &runner_name,
+                agent_id: &agent_id,
+                hostname: &hostname,
+                agent_type: &agent_type,
+                forge: Some(job_id.forge()),
+                job_id: Some(job_id),
+                repository,
+                workflow_name,
+                job_name,
+                pool: None,
+                labels,
+            })
+            .await;
+        self.metrics.job_runner_created(job_id).await;
 
         // Build CreateRunner command with the JIT config or Forgejo runner
         let (jit_config, forgejo) = match launch {
@@ -1317,6 +1370,7 @@ impl FleetManager {
         let notify_tx = self.notify_tx.clone();
         let repository_clone = repository.map(String::from);
         let failures = self.failures.clone();
+        let metrics = self.metrics.clone();
 
         // Helper to handle retry counting on command-level failures
         // (agent rejection, timeout, unexpected response)
@@ -1338,7 +1392,9 @@ impl FleetManager {
                         "Job exceeded max retries ({}) after {error_context} - abandoning",
                         MAX_RETRIES
                     );
-                    pending_job_store.remove_job(job_id).await;
+                    pending_job_store
+                        .remove_job(job_id, JobOutcome::Abandoned)
+                        .await;
                 } else {
                     warn!(
                         job_id = %job_id,
@@ -1365,6 +1421,7 @@ impl FleetManager {
                                 "CreateRunner accepted by agent {} for {} (webhook)",
                                 agent_id_clone, runner_name_clone
                             );
+                            metrics.runner_acked(&runner_name_clone).await;
                         } else {
                             warn!(
                                 "CreateRunner rejected by agent {} for {}: {}",
@@ -1376,6 +1433,13 @@ impl FleetManager {
                                     FailureKind::CommandRejected,
                                     Some(&runner_name_clone),
                                     Some(&job_id),
+                                    &ack.error,
+                                )
+                                .await;
+                            metrics
+                                .runner_finished(
+                                    &runner_name_clone,
+                                    RunOutcome::Rejected,
                                     &ack.error,
                                 )
                                 .await;
@@ -1402,6 +1466,14 @@ impl FleetManager {
                         // Legacy agents may respond with a full lifecycle result
                         agent_registry
                             .release_slot(&agent_id_clone, &runner_name_clone)
+                            .await;
+                        let outcome = if result.success {
+                            RunOutcome::Completed
+                        } else {
+                            RunOutcome::Failed
+                        };
+                        metrics
+                            .runner_finished(&runner_name_clone, outcome, &result.error)
                             .await;
                         let mut reprovision = false;
                         if result.success {
@@ -1431,7 +1503,7 @@ impl FleetManager {
                                         "Runner {} completed successfully (webhook)",
                                         runner_name_clone
                                     );
-                                    pending_job_store.remove_job(&job_id).await;
+                                    pending_job_store.remove_job(&job_id, JobOutcome::Ran).await;
                                 }
                             }
                         } else {
@@ -1481,6 +1553,13 @@ impl FleetManager {
                                 &format!("unexpected response to CreateRunner: {other:?}"),
                             )
                             .await;
+                        metrics
+                            .runner_finished(
+                                &runner_name_clone,
+                                RunOutcome::CommandFailed,
+                                &format!("unexpected response to CreateRunner: {other:?}"),
+                            )
+                            .await;
                         agent_registry
                             .release_slot(&agent_id_clone, &runner_name_clone)
                             .await;
@@ -1509,6 +1588,13 @@ impl FleetManager {
                             FailureKind::CommandFailed,
                             Some(&runner_name_clone),
                             Some(&job_id),
+                            &format!("CreateRunner: {e:#}"),
+                        )
+                        .await;
+                    metrics
+                        .runner_finished(
+                            &runner_name_clone,
+                            RunOutcome::CommandFailed,
                             &format!("CreateRunner: {e:#}"),
                         )
                         .await;
@@ -1589,6 +1675,14 @@ impl FleetManager {
                     runner_name, recovery_info.agent_id
                 );
 
+                self.metrics
+                    .runner_finished(
+                        &runner_name,
+                        RunOutcome::Lost,
+                        "VM gone while the coordinator was down",
+                    )
+                    .await;
+
                 // Clean up from the forge
                 let token_provider = self.runner_forge(runner_info.forge.as_deref());
                 let runner_scope = runner_info.runner_scope.clone();
@@ -1630,6 +1724,9 @@ impl FleetManager {
 
         let event_type = RunnerEventType::try_from(event.event.event_type)
             .unwrap_or(RunnerEventType::Unspecified);
+        if let Some(timings) = &event.event.timings {
+            self.metrics.runner_timings(&runner_name, timings).await;
+        }
 
         match event_type {
             RunnerEventType::Unspecified => {
@@ -1645,6 +1742,7 @@ impl FleetManager {
                     runner_name = %runner_name,
                     "Runner started"
                 );
+                self.metrics.runner_started(&runner_name).await;
             }
             RunnerEventType::Completed | RunnerEventType::Failed | RunnerEventType::Destroyed => {
                 let runner_info = self.runner_state.get_runner(&runner_name).await;
@@ -1669,6 +1767,9 @@ impl FleetManager {
                     return;
                 }
                 if idled {
+                    self.metrics
+                        .runner_finished(&runner_name, RunOutcome::Idled, "")
+                        .await;
                     if let Some(runner_info) = runner_info {
                         self.agent_registry
                             .release_slot(&event.agent_id, &runner_name)
@@ -1709,6 +1810,17 @@ impl FleetManager {
                         .await;
                 }
                 let Some(runner_info) = runner_info else {
+                    // a Destroyed here is the agent confirming a teardown that's already recorded
+                    let outcome = match event_type {
+                        RunnerEventType::Completed => Some(RunOutcome::Completed),
+                        RunnerEventType::Failed => Some(RunOutcome::Failed),
+                        _ => None,
+                    };
+                    if let Some(outcome) = outcome {
+                        self.metrics
+                            .runner_finished(&runner_name, outcome, &event.event.error)
+                            .await;
+                    }
                     // Runner already removed from state (e.g., by reconciliation).
                     // Reconciliation already released the slot, so don't double-release.
                     // Still try to process pending jobs in case this frees something.
@@ -1744,10 +1856,20 @@ impl FleetManager {
                 }
 
                 // a plain destroy of a fixed-capacity runner is normal, anything else means it died mid-job
-                if event_type == RunnerEventType::Destroyed
+                let lost = event_type == RunnerEventType::Destroyed
                     && !drained
-                    && (runner_info.job_id.is_some() || !event.event.error.is_empty())
-                {
+                    && (runner_info.job_id.is_some() || !event.event.error.is_empty());
+                let outcome = match event_type {
+                    RunnerEventType::Completed => RunOutcome::Completed,
+                    _ if drained => RunOutcome::Drained,
+                    RunnerEventType::Failed => RunOutcome::Failed,
+                    _ if lost => RunOutcome::Lost,
+                    _ => RunOutcome::Destroyed,
+                };
+                self.metrics
+                    .runner_finished(&runner_name, outcome, &event.event.error)
+                    .await;
+                if lost {
                     let message = if event.event.error.is_empty() {
                         "runner destroyed before finishing"
                     } else {
@@ -1807,7 +1929,9 @@ impl FleetManager {
                                     );
                                 }
                                 JobCheck::Done => {
-                                    self.pending_job_store.remove_job(&job_id).await;
+                                    self.pending_job_store
+                                        .remove_job(&job_id, JobOutcome::Ran)
+                                        .await;
                                     info!(
                                         agent_id = %event.agent_id,
                                         runner_name = %runner_name,
@@ -1833,7 +1957,9 @@ impl FleetManager {
                                         "Runner failed and job exceeded max retries ({}) - abandoning",
                                         MAX_RETRIES
                                     );
-                                    self.pending_job_store.remove_job(&job_id).await;
+                                    self.pending_job_store
+                                        .remove_job(&job_id, JobOutcome::Abandoned)
+                                        .await;
                                 } else {
                                     warn!(
                                         agent_id = %event.agent_id,
@@ -2376,6 +2502,23 @@ impl FleetManager {
                     pool_def.agent_id.as_ref().map(|_| pool_def.key()),
                 )
                 .await;
+            let (hostname, agent_type) = self.agent_identity(&agent_id).await;
+            let pool = pool_def.key();
+            self.metrics
+                .runner_requested(NewRunner {
+                    runner_name: &runner_name,
+                    agent_id: &agent_id,
+                    hostname: &hostname,
+                    agent_type: &agent_type,
+                    forge: Some(self.forges.default_name()),
+                    job_id: None,
+                    repository: None,
+                    workflow_name: None,
+                    job_name: None,
+                    pool: Some(&pool),
+                    labels: &pool_def.labels,
+                })
+                .await;
 
             // Build CreateRunner command (fixed capacity uses registration token, not JIT)
             let create_cmd = CreateRunnerCommand {
@@ -2406,6 +2549,7 @@ impl FleetManager {
             let runner_name_clone = runner_name.clone();
             let runner_state = self.runner_state.clone();
             let failures = self.failures.clone();
+            let metrics = self.metrics.clone();
 
             // Spawn task to send command and handle response
             tokio::spawn(async move {
@@ -2422,6 +2566,7 @@ impl FleetManager {
                                     "CreateRunner accepted by agent {} for {} (agent-driven)",
                                     agent_id_clone, runner_name_clone
                                 );
+                                metrics.runner_acked(&runner_name_clone).await;
                             } else {
                                 warn!(
                                     "CreateRunner rejected by agent {} for {}: {}",
@@ -2433,6 +2578,13 @@ impl FleetManager {
                                         FailureKind::CommandRejected,
                                         Some(&runner_name_clone),
                                         None,
+                                        &ack.error,
+                                    )
+                                    .await;
+                                metrics
+                                    .runner_finished(
+                                        &runner_name_clone,
+                                        RunOutcome::Rejected,
                                         &ack.error,
                                     )
                                     .await;
@@ -2454,6 +2606,14 @@ impl FleetManager {
                         Some(AgentPayload::Result(result)) => {
                             agent_registry
                                 .release_slot(&agent_id_clone, &runner_name_clone)
+                                .await;
+                            let outcome = if result.success {
+                                RunOutcome::Completed
+                            } else {
+                                RunOutcome::Failed
+                            };
+                            metrics
+                                .runner_finished(&runner_name_clone, outcome, &result.error)
                                 .await;
                             if result.success {
                                 info!("Runner {} completed successfully", runner_name_clone);
@@ -2494,6 +2654,13 @@ impl FleetManager {
                                     &format!("unexpected response to CreateRunner: {other:?}"),
                                 )
                                 .await;
+                            metrics
+                                .runner_finished(
+                                    &runner_name_clone,
+                                    RunOutcome::CommandFailed,
+                                    &format!("unexpected response to CreateRunner: {other:?}"),
+                                )
+                                .await;
                             agent_registry
                                 .release_slot(&agent_id_clone, &runner_name_clone)
                                 .await;
@@ -2517,6 +2684,13 @@ impl FleetManager {
                                 FailureKind::CommandFailed,
                                 Some(&runner_name_clone),
                                 None,
+                                &format!("CreateRunner: {e:#}"),
+                            )
+                            .await;
+                        metrics
+                            .runner_finished(
+                                &runner_name_clone,
+                                RunOutcome::CommandFailed,
                                 &format!("CreateRunner: {e:#}"),
                             )
                             .await;

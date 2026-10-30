@@ -1,0 +1,378 @@
+{% extends "admin/layout.html" %}
+
+{% block title %}Metrics{% endblock %}
+
+{% macro stat(s) -%}
+{%- if s.count == 0 -%}<span class="muted">-</span>{%- else -%}
+{{ s.p50 }}<div class="muted" title="p95, from {{ s.count }} runs">p95 {{ s.p95 }}</div>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro step_cell(s) -%}
+{%- if s.stat.count == 0 && s.skipped.is_empty() -%}<span class="muted">-</span>{%- else -%}
+{% if s.stat.count == 0 %}<span class="muted">-</span>{% else %}{% call stat(s.stat) %}{% endcall %}{% endif %}
+{%- if !s.skipped.is_empty() %}<div class="muted" title="runs that didn't need this step">{{ s.skipped }}</div>{% endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro group_table(groups, first_column) %}
+<div class="table-scroll">
+<table class="table">
+    <thead>
+        <tr>
+            <th>{{ first_column }}</th>
+            <th>Runs</th>
+            <th title="completed / (completed + failed, lost or no answer). Rejections and our own teardowns don't count">Success</th>
+            <th>Failures</th>
+            <th title="CreateRunner sent until the runner is up, by the coordinator's clock">To runner up</th>
+            <th title="agent answered the CreateRunner">Ack</th>
+            {% for step in steps %}
+            <th title="{{ step.title }}" class="capitalize">{{ step.name }}</th>
+            {% endfor %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for g in groups %}
+        <tr>
+            <td>
+                {% if let Some(link) = g.link %}<a href="{{ link }}">{{ g.label }}</a>{% else %}<code class="group-name">{{ g.label }}</code>{% endif %}
+                {% if !g.detail.is_empty() %}<div class="muted">{{ g.detail }}</div>{% endif %}
+            </td>
+            <td class="nowrap">
+                {{ g.runs }}
+                {% if g.running > 0 %}<div class="muted">{{ g.running }} running</div>{% endif %}
+                {% if g.rejected > 0 %}<div class="muted" title="agent was full">{{ g.rejected }} rejected</div>{% endif %}
+                {% if g.stopped > 0 %}<div class="muted" title="idled, drained or pool runners we destroyed">{{ g.stopped }} stopped</div>{% endif %}
+            </td>
+            <td class="nowrap"><span class="badge" data-variant="outline" data-status="{{ g.success_status }}">{{ g.success }}</span></td>
+            <td>
+                {{ g.failures }}
+                {% if !g.failed_phases.is_empty() %}<div class="muted">{{ g.failed_phases }}</div>{% endif %}
+            </td>
+            <td class="nowrap">{% call stat(g.provision) %}{% endcall %}</td>
+            <td class="nowrap">{% call stat(g.ack) %}{% endcall %}</td>
+            {% for s in g.steps %}
+            <td class="nowrap">{% call step_cell(s) %}{% endcall %}</td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% block body %}
+{% include "admin/nav.html" %}
+
+<div class="container">
+    <div class="page-header">
+        <h1>Metrics</h1>
+        {#- plain links styled as Basecoat tabs, each range is its own page -#}
+        <div class="tabs">
+            <nav role="tablist" aria-orientation="horizontal">
+                {% for r in ranges %}
+                <a role="tab" href="/admin/metrics?range={{ r }}" aria-selected="{% if *r == range %}true{% else %}false{% endif %}">{{ r }}</a>
+                {% endfor %}
+            </nav>
+        </div>
+    </div>
+
+    {% if runs == 0 %}
+    <div class="card">
+        <section>
+            <p class="empty-text empty-center">No runners in the last {{ range }}. History starts from when this coordinator version was deployed.</p>
+        </section>
+    </div>
+    {% else %}
+
+    <div class="stats-grid">
+        <div class="card" data-size="sm">
+            <section>
+                <div class="stat-label">Runner Attempts</div>
+                <div class="stat-value">{{ runs }}</div>
+                {% if running > 0 %}<div class="muted stat-detail">{{ running }} still running</div>{% endif %}
+            </section>
+        </div>
+        <div class="card" data-size="sm" title="completed / (completed + failed, lost or no answer)">
+            <section>
+                <div class="stat-label">Success Rate</div>
+                <div class="stat-value">{{ success }}</div>
+                <div class="muted stat-detail">{{ failures }} failed</div>
+            </section>
+        </div>
+        <div class="card" data-size="sm" title="CreateRunner sent until the runner is up">
+            <section>
+                <div class="stat-label">Time to Runner, p95</div>
+                <div class="stat-value">{{ provision_p95 }}</div>
+            </section>
+        </div>
+        <div class="card" data-size="sm" title="queued on the forge until a runner took it">
+            <section>
+                <div class="stat-label">Queue Wait, p50</div>
+                <div class="stat-value">{{ wait_p50 }}</div>
+                {% if jobs.wait.count == 0 %}<div class="muted stat-detail">needs GitHub webhooks</div>{% endif %}
+            </section>
+        </div>
+    </div>
+
+    <div class="card">
+        <header>
+            <h2>Runner Outcomes</h2>
+            <p>Attempts by when they were requested, UTC</p>
+        </header>
+        <section><div class="chart-box"><canvas id="chart-outcomes" role="img" aria-label="Runner attempts per period by outcome, numbers in the tables below"></canvas></div></section>
+    </div>
+
+    <div class="chart-grid">
+        <div class="card">
+            <header>
+                <h2>Time to Runner, p95</h2>
+                <p>CreateRunner sent until the runner is up, busiest agents</p>
+            </header>
+            <section><div class="chart-box"><canvas id="chart-provision" role="img" aria-label="p95 time to a running runner per agent over time"></canvas></div></section>
+        </div>
+        <div class="card">
+            <header>
+                <h2>Steps to Runner Up, p50</h2>
+                <p>Reported by the agent, skipped steps count as 0. Older agents leave this blank</p>
+            </header>
+            <section><div class="chart-box"><canvas id="chart-phases" role="img" aria-label="median create, boot and setup time per agent"></canvas></div></section>
+        </div>
+    </div>
+
+    <div class="card">
+        <header>
+            <h2>Agents</h2>
+            <p>p50, with p95 below. Step times come from the agent's clock</p>
+        </header>
+        <section>{% call group_table(agents, "Agent") %}{% endcall %}</section>
+    </div>
+
+    <div class="card">
+        <header>
+            <h2>Images</h2>
+            <p>Agents that don't report their image are grouped by the runner's labels</p>
+        </header>
+        <section>{% call group_table(images, "Image") %}{% endcall %}</section>
+    </div>
+    {% endif %}
+
+    {% if jobs.jobs > 0 %}
+    <div class="chart-grid">
+        <div class="card">
+            <header>
+                <h2>Queue Wait</h2>
+                <p>Queued on the forge until a runner took it, UTC</p>
+            </header>
+            <section>
+                {% if jobs.wait.count == 0 %}
+                <p class="empty-text">Needs the forge to say when a job starts, which only GitHub webhooks do.</p>
+                {% else %}
+                <div class="chart-box"><canvas id="chart-wait" role="img" aria-label="p50 and p95 queue wait over time"></canvas></div>
+                {% endif %}
+            </section>
+        </div>
+        <div class="card">
+            <header>
+                <h2>Jobs</h2>
+                <p>{{ jobs.jobs }} jobs, {{ jobs.mean_attempts }} runners each on average</p>
+            </header>
+            <section>
+                <table class="table">
+                    <thead><tr><th>Where the wait went</th><th>p50</th><th>p95</th></tr></thead>
+                    <tbody>
+                        <tr><td>Forge to coordinator<div class="muted">webhook delivery or the next poll</div></td><td>{{ jobs.to_coordinator.p50 }}</td><td>{{ jobs.to_coordinator.p95 }}</td></tr>
+                        <tr><td>Waiting for an agent<div class="muted">no capacity, and earlier failed runners</div></td><td>{{ jobs.dispatch.p50 }}</td><td>{{ jobs.dispatch.p95 }}</td></tr>
+                        <tr><td>Runner starting<div class="muted">clone, boot, install and setup</div></td><td>{{ jobs.provision.p50 }}</td><td>{{ jobs.provision.p95 }}</td></tr>
+                        <tr><td>Runner taking the job</td><td>{{ jobs.pickup.p50 }}</td><td>{{ jobs.pickup.p95 }}</td></tr>
+                        <tr><td><strong>Total</strong></td><td><strong>{{ jobs.wait.p50 }}</strong></td><td><strong>{{ jobs.wait.p95 }}</strong></td></tr>
+                    </tbody>
+                </table>
+                <p class="muted stat-detail">
+                    {{ jobs.ran }} ran, {{ jobs.pending }} pending, {{ jobs.abandoned }} abandoned,
+                    {{ jobs.cancelled }} cancelled, {{ jobs.gone }} taken elsewhere or gone
+                </p>
+            </section>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<style>
+    .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 0 24px; }
+    .chart-box { position: relative; height: 260px; }
+    th.capitalize { text-transform: capitalize; }
+    /* a step column per step can outgrow the card, scroll it rather than spill out */
+    .table-scroll { overflow-x: auto; }
+    .group-name { display: inline-block; max-width: 16em; white-space: normal; }
+</style>
+<script type="application/json" id="metrics-data">{{ chart_json|safe }}</script>
+<script src="/admin/static/chart-4.6.1.umd.min.js"></script>
+<script>
+    (() => {
+        const data = JSON.parse(document.getElementById('metrics-data').textContent);
+
+        // Chart.js parses colors for hover shades and doesn't know oklch, so theme variables go through a canvas
+        // to come out as rgb
+        const probe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+        const cssColor = (name) => {
+            const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+            probe.clearRect(0, 0, 1, 1);
+            probe.fillStyle = value;
+            probe.fillRect(0, 0, 1, 1);
+            const [r, g, b, a] = probe.getImageData(0, 0, 1, 1).data;
+            return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
+        };
+
+        // validated categorical palette, each mode stepped for its own surface. status colors are fixed
+        const SERIES = {
+            light: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'],
+            dark: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'],
+        };
+        const STATUS = { good: '#0ca30c', warning: '#fab219', critical: '#d03b3b' };
+
+        const dur = (s) => {
+            if (s == null) return '-';
+            if (s < 60) return `${+s.toFixed(1)}s`;
+            if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+            return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
+        };
+        const durTick = (s) => {
+            if (s < 60) return `${s}s`;
+            if (s < 3600) return s % 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s / 60}m`;
+            return s % 3600 ? `${Math.floor(s / 3600)}h ${(s % 3600) / 60}m` : `${s / 3600}h`;
+        };
+        // Chart.js picks round numbers of seconds (100s reads as 1.7m), so ticks step by round durations instead
+        const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800];
+        const durSteps = {
+            afterDataLimits: (scale) => {
+                const step = STEPS.find((x) => scale.max / x <= 6) ?? STEPS[STEPS.length - 1];
+                scale.min = 0;
+                scale.max = Math.max(step, Math.ceil(scale.max / step) * step);
+                scale.durStep = step;
+            },
+            afterBuildTicks: (scale) => {
+                scale.ticks = [];
+                for (let v = 0; v <= scale.max; v += scale.durStep) scale.ticks.push({ value: v });
+            },
+        };
+
+        let charts = [];
+        const build = () => {
+            charts.forEach((c) => c.destroy());
+            charts = [];
+            const dark = document.documentElement.classList.contains('dark');
+            const series = SERIES[dark ? 'dark' : 'light'];
+            const surface = cssColor('--card');
+            const muted = cssColor('--muted-foreground');
+            const grid = cssColor('--border');
+
+            Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+            Chart.defaults.color = muted;
+            Chart.defaults.borderColor = grid;
+
+            const legend = { position: 'bottom', labels: { boxWidth: 12, boxHeight: 12, useBorderRadius: true, borderRadius: 2 } };
+            const lineLegend = { position: 'bottom', labels: { boxWidth: 16, boxHeight: 2 } };
+            const axis = { grid: { color: grid, drawTicks: false }, border: { display: false }, ticks: { padding: 6 } };
+            const timeAxis = { ...axis, grid: { display: false }, ticks: { ...axis.ticks, maxRotation: 0, autoSkipPadding: 16 } };
+            const durAxis = { ...axis, ...durSteps, beginAtZero: true, ticks: { ...axis.ticks, callback: durTick } };
+            const durTooltip = { callbacks: { label: (c) => ` ${dur(c.parsed.y ?? c.parsed.x)}  ${c.dataset.label}` } };
+            const line = (label, values, color) => ({
+                label, data: values, borderColor: color, backgroundColor: color, borderWidth: 2,
+                pointRadius: 0, pointHoverRadius: 5, pointHitRadius: 12, pointHoverBorderColor: surface,
+                pointHoverBorderWidth: 2, spanGaps: true, tension: 0,
+            });
+            const crosshair = { mode: 'index', intersect: false };
+
+            const outcomes = document.getElementById('chart-outcomes');
+            if (outcomes) {
+                const bar = (label, values, color) => ({
+                    label, data: values, backgroundColor: color, hoverBackgroundColor: color,
+                    // a surface gap between stacked segments instead of an outline
+                    borderColor: surface, borderWidth: { top: 2 }, borderSkipped: 'bottom', maxBarThickness: 32,
+                });
+                charts.push(new Chart(outcomes, {
+                    type: 'bar',
+                    data: {
+                        labels: data.buckets,
+                        datasets: [
+                            bar('Completed', data.outcomes.completed, STATUS.good),
+                            bar('Failed or lost', data.outcomes.failed, STATUS.critical),
+                            bar('Rejected (agent full)', data.outcomes.rejected, STATUS.warning),
+                            bar('Stopped by us', data.outcomes.other, muted),
+                        ],
+                    },
+                    options: {
+                        maintainAspectRatio: false,
+                        interaction: crosshair,
+                        plugins: { legend },
+                        scales: { x: { ...timeAxis, stacked: true }, y: { ...axis, stacked: true, beginAtZero: true, ticks: { ...axis.ticks, precision: 0 } } },
+                    },
+                }));
+            }
+
+            const provision = document.getElementById('chart-provision');
+            if (provision) {
+                // color follows the agent, not its rank, so a different range doesn't repaint the ones that stay
+                const order = data.provision.map((s) => s.label).sort();
+                charts.push(new Chart(provision, {
+                    type: 'line',
+                    data: {
+                        labels: data.buckets,
+                        datasets: data.provision.map((s) => line(s.label, s.data, series[order.indexOf(s.label)])),
+                    },
+                    options: {
+                        maintainAspectRatio: false,
+                        interaction: crosshair,
+                        plugins: { legend: lineLegend, tooltip: durTooltip },
+                        scales: { x: timeAxis, y: durAxis },
+                    },
+                }));
+            }
+
+            const phases = document.getElementById('chart-phases');
+            if (phases) {
+                const step = (label, values, color) => ({
+                    label, data: values, backgroundColor: color, hoverBackgroundColor: color,
+                    borderColor: surface, borderWidth: { right: 2 }, borderSkipped: 'left', maxBarThickness: 20,
+                });
+                // steps come in a fixed order, so each keeps its color as agents start reporting new ones
+                charts.push(new Chart(phases, {
+                    type: 'bar',
+                    data: {
+                        labels: data.phases.agents,
+                        datasets: data.phases.steps.map((s, i) => step(s.label, s.data, series[i % series.length])),
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        maintainAspectRatio: false,
+                        plugins: { legend, tooltip: { callbacks: { label: (c) => ` ${dur(c.parsed.x)}  ${c.dataset.label}` } } },
+                        scales: { x: { ...durAxis, stacked: true }, y: { ...axis, stacked: true, grid: { display: false } } },
+                    },
+                }));
+            }
+
+            const wait = document.getElementById('chart-wait');
+            if (wait) {
+                charts.push(new Chart(wait, {
+                    type: 'line',
+                    data: {
+                        labels: data.buckets,
+                        datasets: [line('p50', data.wait_p50, series[0]), line('p95', data.wait_p95, series[1])],
+                    },
+                    options: {
+                        maintainAspectRatio: false,
+                        interaction: crosshair,
+                        plugins: { legend: lineLegend, tooltip: durTooltip },
+                        scales: { x: timeAxis, y: durAxis },
+                    },
+                }));
+            }
+        };
+
+        build();
+        // the layout toggles html.dark on the same media query, run after it
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTimeout(build));
+    })();
+</script>
+{% endblock %}

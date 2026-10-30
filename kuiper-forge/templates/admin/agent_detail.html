@@ -61,6 +61,42 @@
         </section>
     </div>
 
+    {% if let Some(p) = performance %}
+    <div class="card">
+        <header>
+            <h2>Last 7 Days</h2>
+            <p>p50, with p95 below. <a href="/admin/metrics">All agents</a></p>
+        </header>
+        <section>
+        <div class="detail-grid">
+            <div class="detail-label">Runners</div>
+            <div>{{ p.runs }}</div>
+
+            <div class="detail-label">Success</div>
+            <div>
+                <span class="badge" data-variant="outline" data-status="{{ p.success_status }}">{{ p.success }}</span>
+                {% if p.failures > 0 %}<div class="muted">{{ p.failures }} failed{% if !p.failed_phases.is_empty() %}: {{ p.failed_phases }}{% endif %}</div>{% endif %}
+            </div>
+
+            <div class="detail-label">Time to runner</div>
+            <div>{{ p.provision.p50 }}<div class="muted">p95 {{ p.provision.p95 }}</div></div>
+
+            <div class="detail-label">Boot</div>
+            <div>{{ p.boot.stat.p50 }}<div class="muted">p95 {{ p.boot.stat.p95 }}</div></div>
+
+            <div class="detail-label">Runner install</div>
+            <div>
+                {% if p.install.stat.count > 0 %}{{ p.install.stat.p50 }}<div class="muted">p95 {{ p.install.stat.p95 }}</div>{% else %}-{% endif %}
+                {% if !p.install.skipped.is_empty() %}<div class="muted">{{ p.install.skipped }}, already in the image</div>{% endif %}
+            </div>
+
+            <div class="detail-label">Job</div>
+            <div>{{ p.job.stat.p50 }}<div class="muted">p95 {{ p.job.stat.p95 }}</div></div>
+        </div>
+        </section>
+    </div>
+    {% endif %}
+
     <div class="card">
         <header><h2>Active Runners ({{ runners.len() }})</h2></header>
         <section>

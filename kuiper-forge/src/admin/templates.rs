@@ -212,6 +212,8 @@ pub struct AgentDetailTemplate {
     pub agent: AgentSummary,
     pub runners: Vec<RunnerSummary>,
     pub failures: Vec<FailureSummary>,
+    /// Last week's runner stats, None when it ran nothing
+    pub performance: Option<AgentPerformance>,
     /// Active tab for the shared agent header
     pub tab: &'static str,
 }
@@ -443,4 +445,101 @@ mod tests {
             ("macOS", 2, 4, 1)
         );
     }
+}
+
+/// Metrics page
+#[derive(Template)]
+#[template(path = "admin/metrics.html")]
+pub struct MetricsTemplate {
+    pub base: BaseContext,
+    /// Selected range, e.g. `7d`
+    pub range: &'static str,
+    pub ranges: Vec<&'static str>,
+    pub runs: usize,
+    pub running: usize,
+    pub failures: usize,
+    pub success: String,
+    pub provision_p95: String,
+    pub wait_p50: String,
+    /// Step columns, in the order every group's `steps` follows
+    pub steps: Vec<StepColumn>,
+    pub agents: Vec<RunGroupView>,
+    pub images: Vec<RunGroupView>,
+    pub jobs: JobSummaryView,
+    /// Chart series, JSON with `<` escaped so it can sit in a script tag
+    pub chart_json: String,
+}
+
+/// One agent step's column header
+pub struct StepColumn {
+    pub name: String,
+    /// What the step covers, for the header's tooltip
+    pub title: &'static str,
+}
+
+/// One agent step for a group, formatted
+pub struct StepView {
+    pub stat: StatView,
+    /// e.g. `75% skipped`, empty when nothing skipped it
+    pub skipped: String,
+}
+
+/// p50 and p95 of one duration, formatted
+pub struct StatView {
+    pub p50: String,
+    pub p95: String,
+    pub count: usize,
+}
+
+/// Runner stats for one agent or image
+pub struct RunGroupView {
+    /// Agent page to link to, None for images
+    pub link: Option<String>,
+    pub label: String,
+    pub detail: String,
+    pub runs: usize,
+    pub running: usize,
+    pub completed: usize,
+    pub failures: usize,
+    pub rejected: usize,
+    pub stopped: usize,
+    /// e.g. `97.5%`, `-` before anything finished
+    pub success: String,
+    /// `ok`/`warn`/`bad`/`idle` for the status dot
+    pub success_status: &'static str,
+    /// e.g. `boot 3, setup 1`
+    pub failed_phases: String,
+    pub ack: StatView,
+    pub provision: StatView,
+    /// Same order as the page's step columns
+    pub steps: Vec<StepView>,
+}
+
+/// Where queued jobs spent their time
+pub struct JobSummaryView {
+    pub jobs: usize,
+    pub pending: usize,
+    pub ran: usize,
+    pub abandoned: usize,
+    pub gone: usize,
+    pub cancelled: usize,
+    pub mean_attempts: String,
+    pub wait: StatView,
+    pub to_coordinator: StatView,
+    pub dispatch: StatView,
+    pub provision: StatView,
+    pub pickup: StatView,
+}
+
+/// The agent page's last-week numbers
+pub struct AgentPerformance {
+    pub runs: usize,
+    pub failures: usize,
+    pub success: String,
+    pub success_status: &'static str,
+    pub failed_phases: String,
+    pub provision: StatView,
+    pub boot: StepView,
+    pub install: StepView,
+    pub job: StepView,
 }

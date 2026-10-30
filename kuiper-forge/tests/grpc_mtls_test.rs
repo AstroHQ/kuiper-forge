@@ -115,6 +115,7 @@ impl TestFixture {
             tls: tls_config,
             proxy_protocol,
             agent_logs: Some(agent_logs.clone()),
+            metrics: Arc::new(kuiper_forge::metrics::MetricsStore::new(db.pool())),
         };
 
         // Create webhook config and pending job store if needed

@@ -24,7 +24,7 @@ use crate::{AgentCertStore, AgentConfig, AgentConnector, Error, Result};
 use kuiper_agent_proto::{
     AgentMessage, AgentPayload, AgentServiceClient, AgentStatus, CommandAck, CoordinatorMessage,
     CoordinatorPayload, CreateRunnerCommand, DestroyRunnerCommand, Ping, Pong, RunnerEvent,
-    RunnerEventType,
+    RunnerEventType, RunnerTimings,
 };
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -88,12 +88,14 @@ impl EventSender {
         vm_id: String,
         event_type: RunnerEventType,
         error: String,
+        timings: Option<RunnerTimings>,
     ) -> Result<()> {
         self.send(AgentPayload::RunnerEvent(RunnerEvent {
             runner_name,
             vm_id,
             event_type: event_type as i32,
             error,
+            timings,
         }))
         .await
     }
