@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## kuiper-agent-lib-v0.6.0 - 2026-10-30
+#### Features
+- **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
+
+- - -
 ## kuiper-agent-lib-v0.5.2 - 2026-10-28
 #### Bug Fixes
 - **(agent-lib)** destroy VMs in parallel on shutdown and allow longer for it - (08c09b3) - *jfro*

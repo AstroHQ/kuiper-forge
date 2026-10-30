@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.8.0 - 2026-10-30
+#### Features
+- **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
+
+#### Bug Fixes
+- **(metrics)** let a cancel replace a started job's outcome - (76b7e83) - *jfro*
+
+- - -
 ## kuiper-forge-v0.7.6 - 2026-10-28
 #### Features
 - **(libvirt-agent)** agent for ephemeral runner VMs on a local libvirt host - (f1dd9e5) - *jfro*
