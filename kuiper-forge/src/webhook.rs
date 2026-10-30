@@ -15,6 +15,7 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
@@ -24,6 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{LabelMapping, RunnerScope, WebhookConfig};
 use crate::forge::JobKey;
+use crate::metrics::MetricsStore;
 use crate::pending_jobs::PendingJobStore;
 
 /// GitHub webhook event types we care about
@@ -52,6 +54,15 @@ pub struct WorkflowJob {
     pub runner_id: Option<u64>,
     #[serde(default)]
     pub runner_name: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    /// success, failure, cancelled, skipped, ... once it's completed
+    #[serde(default)]
+    pub conclusion: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +108,8 @@ pub struct WebhookRunnerRequest {
     pub job_name: Option<String>,
     /// Workflow name
     pub workflow_name: Option<String>,
+    /// When the forge queued the job, if it says
+    pub queued_at: Option<DateTime<Utc>>,
 }
 
 /// Event types sent from webhook handler to fleet manager.
@@ -136,6 +149,7 @@ pub struct WebhookState {
     pub notifier: WebhookNotifier,
     /// Persistent store for pending jobs - webhook handler writes directly to DB
     pub pending_job_store: Arc<PendingJobStore>,
+    pub metrics: Arc<MetricsStore>,
 }
 
 /// Validate HMAC-SHA256 signature from GitHub.
@@ -375,6 +389,7 @@ async fn handle_webhook(
                 repository: Some(event.repository.full_name),
                 job_name: Some(event.workflow_job.name),
                 workflow_name: event.workflow_name,
+                queued_at: event.workflow_job.created_at,
             };
 
             // Persist to database - this ensures we don't lose the job
@@ -393,12 +408,31 @@ async fn handle_webhook(
             // If notification fails, FleetManager will pick up the job on next event or poll
             let _ = state.notifier.send(WebhookEvent::NewJobAvailable).await;
         }
+        "in_progress" => {
+            // only for the history: the dashboard's queue wait ends here, and it says which runner took the job
+            let job_key = JobKey::new(&state.forge, event.workflow_job.id.to_string());
+            let at = event.workflow_job.started_at.unwrap_or_else(Utc::now);
+            let runner = event.workflow_job.runner_name.as_deref();
+            state.metrics.job_started(&job_key, runner, at).await;
+            if let Some(runner) = runner {
+                state.metrics.runner_job_started(runner, at).await;
+            }
+        }
         "completed" | "cancelled" => {
             // Job finished - notify fleet manager to clean up deduplication state
             debug!(
                 "Received workflow_job.{} for job {}",
                 event.action, event.workflow_job.id
             );
+            let job_key = JobKey::new(&state.forge, event.workflow_job.id.to_string());
+            state
+                .metrics
+                .job_completed(
+                    &job_key,
+                    event.workflow_job.conclusion.as_deref(),
+                    event.workflow_job.completed_at.unwrap_or_else(Utc::now),
+                )
+                .await;
             let _ = state
                 .notifier
                 .send(WebhookEvent::JobCompleted {
@@ -718,5 +752,41 @@ mod tests {
                 .labels
                 .contains(&"self-hosted".to_string())
         );
+        assert_eq!(event.workflow_job.created_at, None);
+    }
+
+    #[test]
+    fn test_parse_completed_job_times() {
+        let payload = r#"{
+            "action": "completed",
+            "workflow_job": {
+                "id": 29679449,
+                "run_id": 10431227,
+                "name": "test",
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": "2026-10-28T19:34:56Z",
+                "started_at": "2026-10-28T19:35:41Z",
+                "completed_at": "2026-10-28T19:41:02Z",
+                "labels": ["self-hosted", "macos"],
+                "runner_id": 412,
+                "runner_name": "mac-mini-3-1a2b3c4d",
+                "runner_group_id": 1
+            },
+            "repository": {
+                "full_name": "test-org/test-repo",
+                "name": "test-repo",
+                "owner": { "login": "test-org", "type": "Organization" }
+            }
+        }"#;
+
+        let job = serde_json::from_str::<WorkflowJobEvent>(payload)
+            .unwrap()
+            .workflow_job;
+        assert_eq!(job.conclusion.as_deref(), Some("success"));
+        assert_eq!(job.runner_name.as_deref(), Some("mac-mini-3-1a2b3c4d"));
+        let wait = job.started_at.unwrap() - job.created_at.unwrap();
+        assert_eq!(wait.num_seconds(), 45);
+        assert!(job.completed_at.is_some());
     }
 }

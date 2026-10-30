@@ -146,6 +146,9 @@ message RunnerEvent {
     string vm_id = 2;
     RunnerEventType event_type = 3;
     string error = 4;
+    // How long each step took, by the agent's clock. Sent on STARTED (the steps so far) and on the final
+    // COMPLETED/FAILED. Unset from older agents and on DESTROYED
+    RunnerTimings timings = 5;
 
     enum RunnerEventType {
         RUNNER_EVENT_TYPE_UNSPECIFIED = 0;
@@ -154,6 +157,17 @@ message RunnerEvent {
         FAILED = 3;
         DESTROYED = 4;
     }
+}
+
+// Step durations for one runner, by the agent's clock
+message RunnerTimings {
+    // step name to milliseconds. Steps so far: "create" (clone the VM), "boot" (until SSH answers), "install" (download
+    // the runner), "setup" (the rest of getting the runner ready), "job" (the runner's run), "destroy". Agents can add
+    // steps without a proto change. A step that didn't run is left out, 0 means it was skipped (say "install" when the
+    // runner is already in the image). Time spent in a step more than once is added up
+    map<string, uint64> steps_ms = 1;
+    string failed_phase = 2;  // the step that failed, empty if nothing did
+    string image = 3;         // the image (tart image, proxmox template) the VM came from
 }
 
 message CommandResult {

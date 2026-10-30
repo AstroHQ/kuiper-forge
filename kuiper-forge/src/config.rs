@@ -22,6 +22,7 @@
 //! - `KUIPER_PROVISIONING__MODE` → `provisioning.mode`
 //! - `KUIPER_PROVISIONING__WEBHOOK__SECRET` → `provisioning.webhook.secret`
 //! - `KUIPER_PROVISIONING__POLLING__INTERVAL_SECS` → `provisioning.polling.interval_secs`
+//! - `KUIPER_METRICS__RETENTION_DAYS` → `metrics.retention_days`
 //!
 //! **Note:** Complex arrays like `runners` and `label_mappings` should be configured
 //! via TOML file, not environment variables.
@@ -369,6 +370,10 @@ pub struct Config {
     /// Admin web UI configuration.
     #[serde(default)]
     pub admin: AdminConfig,
+
+    /// Run history kept for the metrics page.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 
     /// Provisioning mode and settings.
     ///
@@ -815,6 +820,26 @@ impl Default for AdminConfig {
     }
 }
 
+/// Run history for the admin metrics page.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Days of runner and job history to keep (default: 90).
+    pub retention_days: u32,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self { retention_days: 90 }
+    }
+}
+
+impl MetricsConfig {
+    pub fn retention(&self) -> chrono::Duration {
+        chrono::Duration::days(i64::from(self.retention_days))
+    }
+}
+
 /// Where runners are registered on a forge.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -981,6 +1006,7 @@ impl Config {
             tls: TlsConfig::with_defaults(data_dir),
             database: DatabaseConfig::default(),
             admin: AdminConfig::default(),
+            metrics: MetricsConfig::default(),
             provisioning: ProvisioningConfig::default(),
             runner_scope: Some(RunnerScope::Organization {
                 name: "test-org".into(),
@@ -1138,6 +1164,10 @@ name = "my-org"
 enabled = false
 # session_timeout_secs = 3600  # Session timeout (default: 1 hour)
 # coordinator_url = "https://localhost:9443"  # URL for registration bundles
+
+# Runner and job timings for the admin metrics page
+# [metrics]
+# retention_days = 90                  # days of history to keep (default 90)
 
 # =============================================================================
 # Provisioning Mode
@@ -1438,6 +1468,13 @@ mode = "polling"
         let filters = config.provisioning.on_demand_filters().unwrap();
         assert_eq!(filters.required_labels, vec!["self-hosted"]);
         assert_eq!(filters.queued_scan_lookback_hours, 168);
+        assert_eq!(config.metrics.retention_days, 90);
+    }
+
+    #[test]
+    fn test_metrics_retention() {
+        let config = parse_config(&format!("{POLLING_BASE}\n[metrics]\nretention_days = 14\n"));
+        assert_eq!(config.metrics.retention(), chrono::Duration::days(14));
     }
 
     #[test]

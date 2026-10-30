@@ -43,6 +43,7 @@ use crate::agent_registry::{AgentCapacity, AgentRegistry, AgentType};
 use crate::auth::AuthManager;
 use crate::config::{TlsConfig, WebhookConfig};
 use crate::fleet::FleetNotifier;
+use crate::metrics::MetricsStore;
 use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
 use crate::tls::ServerTrust;
@@ -672,6 +673,7 @@ impl AgentService for AgentServiceImpl {
                                     vm_id: runner_name,
                                     event_type: RunnerEventType::Destroyed.into(),
                                     error: "agent disconnected".to_string(),
+                                    timings: None,
                                 },
                             )
                             .await;
@@ -754,6 +756,7 @@ async fn handle_agent_message(
                                         vm_id: runner_name.clone(),
                                         event_type: RunnerEventType::Destroyed.into(),
                                         error: "VM missing during reconciliation".to_string(),
+                                        timings: None,
                                     },
                                 )
                                 .await;
@@ -856,6 +859,9 @@ pub struct ServerConfig {
 
     /// Store for logs agents upload. None accepts uploads and throws them away
     pub agent_logs: Option<Arc<AgentLogStore>>,
+
+    /// Run history, the webhook handler records job starts and completions in it
+    pub metrics: Arc<MetricsStore>,
 }
 
 /// Start the gRPC server with optional mTLS.
@@ -910,6 +916,7 @@ pub async fn run_server(
                     config: wh_config.clone(),
                     notifier: wh_notifier,
                     pending_job_store: pjs.clone(),
+                    metrics: config.metrics.clone(),
                 });
                 let router = webhook::http_router(webhook_state, admin);
                 (router, Some(wh_config.path), Some(pjs))

@@ -325,6 +325,7 @@ impl TartBackend {
                 &self.config.forgejo_runner_version,
                 &self.config.forgejo_runner_url,
                 vm.os,
+                ctx,
             )
             .await?;
             RunnerProgram::Forgejo
@@ -334,8 +335,14 @@ impl TartBackend {
                 "[{}] JIT mode: ensuring runner is installed (skipping config.sh)",
                 vm.name
             );
-            ssh::ensure_runner_installed(ip, &self.ssh_config, &self.config.runner_version, vm.os)
-                .await?;
+            ssh::ensure_runner_installed(
+                ip,
+                &self.ssh_config,
+                &self.config.runner_version,
+                vm.os,
+                ctx,
+            )
+            .await?;
             RunnerProgram::GitHub
         } else {
             info!("[{}] Configuring GitHub runner...", vm.name);
@@ -348,6 +355,7 @@ impl TartBackend {
                 job.runner_name,
                 &self.config.runner_version,
                 vm.os,
+                ctx,
             )
             .await?;
             RunnerProgram::GitHub

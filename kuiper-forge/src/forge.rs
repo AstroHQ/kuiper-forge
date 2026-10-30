@@ -90,6 +90,8 @@ pub struct QueuedJob {
     pub runner_scope: RunnerScope,
     /// Repository full name (owner/repo)
     pub repository: Option<String>,
+    /// When the forge queued it, if the API says
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Which runner program a forge's runners use. Agents advertise the kinds they can

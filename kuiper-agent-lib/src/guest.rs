@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::forgejo_runner;
 use crate::github_runner::{self, Arch, RunnerConfigBuilder};
 use crate::ssh::{CommandOutput, SshError, SshSession};
+use crate::vm_agent::{JobContext, step};
 
 /// A runner setup or run failure.
 #[derive(Debug, Error)]
@@ -146,15 +147,19 @@ impl<'s> Guest<'s> {
     }
 
     /// Install the job's runner if needed and set it up: the JIT config file or `config.sh`
-    /// for GitHub, the token file and job script for Forgejo.
+    /// for GitHub, the token file and job script for Forgejo. The download is timed as its own step in `ctx`.
     pub async fn prepare(
         &mut self,
         job: &Job<'_>,
         versions: &RunnerVersions<'_>,
+        ctx: &JobContext,
     ) -> Result<PreparedRunner> {
         match job.forgejo {
-            Some(forgejo) => self.prepare_forgejo(forgejo, job.labels, versions).await,
-            None => self.prepare_github(job, versions.github).await,
+            Some(forgejo) => {
+                self.prepare_forgejo(forgejo, job.labels, versions, ctx)
+                    .await
+            }
+            None => self.prepare_github(job, versions.github, ctx).await,
         }
     }
 
@@ -179,7 +184,12 @@ impl<'s> Guest<'s> {
         }
     }
 
-    async fn prepare_github(&mut self, job: &Job<'_>, version: &str) -> Result<PreparedRunner> {
+    async fn prepare_github(
+        &mut self,
+        job: &Job<'_>,
+        version: &str,
+        ctx: &JobContext,
+    ) -> Result<PreparedRunner> {
         let vm = &self.vm;
         let builder = self.runner_builder();
 
@@ -188,6 +198,7 @@ impl<'s> Guest<'s> {
             .execute(&builder.check_installed_command())
             .await?;
         if check.stdout.trim() != "installed" {
+            ctx.step(step::INSTALL);
             let version = github_runner::resolve_version(version).await;
 
             // Windows is x64 only for now; elsewhere ask uname
@@ -225,8 +236,10 @@ impl<'s> Guest<'s> {
                 "Runner installed successfully: {}",
                 install.stdout.trim()
             );
+            ctx.step(step::SETUP);
         } else {
             debug!("GitHub Actions runner already installed on {}", vm);
+            ctx.skip_step(step::INSTALL);
         }
 
         // JIT: skip config.sh and run with --jitconfig. Legacy: config.sh, then run.sh
@@ -454,6 +467,7 @@ impl<'s> Guest<'s> {
         forgejo: &ForgejoRunner,
         labels: &[String],
         versions: &RunnerVersions<'_>,
+        ctx: &JobContext,
     ) -> Result<PreparedRunner> {
         let vm = &self.vm;
         let is_windows = self.shell.is_windows();
@@ -466,6 +480,7 @@ impl<'s> Guest<'s> {
         };
         let check = self.session.execute(&check_cmd).await?;
         if check.stdout.trim() != "installed" {
+            ctx.step(step::INSTALL);
             let version = forgejo_runner::resolve_version(versions.forgejo).to_string();
             let (os, arch) = if is_windows {
                 // like the GitHub runner: x64 Windows only for now
@@ -518,8 +533,10 @@ impl<'s> Guest<'s> {
                 vm,
                 install.stdout.trim()
             );
+            ctx.step(step::SETUP);
         } else {
             debug!("forgejo-runner already installed on {}", vm);
+            ctx.skip_step(step::INSTALL);
         }
 
         let job = forgejo_runner::OneJob {

@@ -7,6 +7,7 @@ use crate::agent_logs::AgentLogStore;
 use crate::agent_registry::AgentRegistry;
 use crate::auth::AuthManager;
 use crate::fleet::FleetNotifier;
+use crate::metrics::MetricsStore;
 use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
 use crate::tls::ServerTrust;
@@ -33,6 +34,7 @@ pub struct AdminState {
     pub pending_jobs: Arc<PendingJobStore>,
     /// Recent per-agent failures
     pub agent_failures: Arc<AgentFailureStore>,
+    pub metrics: Arc<MetricsStore>,
     /// Logs uploaded by agents
     pub agent_logs: Arc<AgentLogStore>,
     /// Server trust info for registration bundles

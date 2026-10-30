@@ -9,7 +9,7 @@ use crate::admin::templates::{
     FailureSummary, LimitView, LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary,
     split_labels,
 };
-use crate::admin::{agent_log_routes, api_token_routes, user_routes};
+use crate::admin::{agent_log_routes, api_token_routes, metrics_routes, user_routes};
 use crate::agent_failures::FailureKind;
 use crate::agent_registry::AgentInfo;
 use crate::forge::JobKey;
@@ -32,9 +32,11 @@ use tracing::{error, info, warn};
 pub fn admin_router(state: Arc<AdminState>) -> Router {
     Router::new()
         .route("/static/basecoat-1.0.2.css", get(basecoat_css))
+        .route("/static/chart-4.6.1.umd.min.js", get(chart_js))
         .route("/login", get(login_page))
         .route("/login", post(login_submit))
         .route("/dashboard", get(dashboard))
+        .route("/metrics", get(metrics_routes::metrics_page))
         .route("/logout", post(logout))
         .route("/tokens/create", post(token_create))
         .route("/tokens/{token}/delete", post(token_delete))
@@ -66,6 +68,17 @@ async fn basecoat_css() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         include_str!("../../static/basecoat.min.css"),
+    )
+}
+
+/// Vendored Chart.js (UMD build, so no bundler), served like Basecoat.
+async fn chart_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        include_str!("../../static/chart-4.6.1.umd.min.js"),
     )
 }
 
@@ -484,11 +497,14 @@ async fn agent_detail(
         })
         .collect();
 
+    let performance = metrics_routes::agent_performance(&state, &agent_id).await;
+
     let template = AgentDetailTemplate {
         base,
         agent: agent_summary,
         runners,
         failures,
+        performance,
         tab: "overview",
     };
 

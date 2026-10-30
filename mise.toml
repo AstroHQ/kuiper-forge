@@ -21,5 +21,9 @@ run = "scripts/build-proxmox-agent-musl.sh"
 description = "Build a kuiper-proxmox-agent Linux package. Append 'arm64' for arm; set PACKAGERS to pick formats. Needs Docker + nfpm."
 run = "scripts/package-proxmox-agent.sh"
 
+[tasks."seed:metrics"]
+description = "Fill the local coordinator database with mock runner/job history for the metrics page. Pass --clear to remove it, --help for options"
+run = "cargo run -p kuiper-forge --example seed_metrics --"
+
 [tools]
 release-plz = "0.3.172"  # keep in sync with .github/workflows/release-plz.yml

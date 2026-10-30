@@ -197,6 +197,8 @@ struct WorkflowJob {
     id: u64,
     status: String,
     labels: Vec<String>,
+    #[serde(default)]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Repository owner from GitHub API
@@ -1026,6 +1028,7 @@ impl GitHubClient {
                             labels: job.labels,
                             runner_scope: scope,
                             repository: Some(repo.full_name.clone()),
+                            created_at: job.created_at,
                         });
                     }
                 }

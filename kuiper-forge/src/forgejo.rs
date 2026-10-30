@@ -529,6 +529,8 @@ impl Forge for ForgejoClient {
                     labels: job.runs_on,
                     runner_scope: scope.clone(),
                     repository,
+                    // the runner jobs API has no created time
+                    created_at: None,
                 });
             }
         }

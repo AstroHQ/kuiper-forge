@@ -12,6 +12,7 @@ use chrono::Local;
 use kuiper_agent_lib::forgejo_runner;
 use kuiper_agent_lib::github_runner::{self, Arch, RunnerConfigBuilder};
 use kuiper_agent_lib::ssh::{CommandOutput, SshClient, SshSession};
+use kuiper_agent_lib::vm_agent::{JobContext, step};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info};
@@ -168,13 +169,14 @@ fn runner_commands(os: GuestOs) -> RunnerConfigBuilder {
 }
 
 /// Ensure the GitHub Actions runner is installed on the VM.
-/// Downloads and extracts the runner if not present.
+/// Downloads and extracts the runner if not present, timed as its own step in `ctx`.
 /// If `runner_version` is empty, fetches the latest version from GitHub.
 pub async fn ensure_runner_installed(
     ip: Ipv4Addr,
     config: &SshConfig,
     runner_version: &str,
     os: GuestOs,
+    ctx: &JobContext,
 ) -> Result<()> {
     let commands = runner_commands(os);
 
@@ -182,12 +184,14 @@ pub async fn ensure_runner_installed(
     match ssh_exec(ip, config, &commands.check_installed_command()).await {
         Ok(output) if output.trim() == "installed" => {
             debug!("GitHub Actions runner already installed on {}", ip);
+            ctx.skip_step(step::INSTALL);
             return Ok(());
         }
         _ => {
             info!("GitHub Actions runner not found on {}, installing...", ip);
         }
     }
+    ctx.step(step::INSTALL);
 
     let version = github_runner::resolve_version(runner_version).await;
 
@@ -215,6 +219,7 @@ pub async fn ensure_runner_installed(
                 local_only = tracing::field::Empty,
                 "Install output: {}", output
             );
+            ctx.step(step::SETUP);
             Ok(())
         }
         Err(e) => {
@@ -237,6 +242,7 @@ pub async fn configure_runner(
     runner_name: &str,
     runner_version: &str,
     os: GuestOs,
+    ctx: &JobContext,
 ) -> Result<()> {
     let labels_str = labels.join(",");
 
@@ -254,7 +260,7 @@ pub async fn configure_runner(
     }
 
     // Ensure runner is installed first
-    ensure_runner_installed(ip, config, runner_version, os).await?;
+    ensure_runner_installed(ip, config, runner_version, os, ctx).await?;
 
     info!(
         "Configuring runner {} with labels: {} (scope: {})",
@@ -314,12 +320,15 @@ pub async fn prepare_forgejo_runner(
     version: &str,
     url_template: &str,
     os: GuestOs,
+    ctx: &JobContext,
 ) -> Result<()> {
     match ssh_exec(ip, config, &forgejo_runner::check_installed_command()).await {
         Ok(output) if output.trim() == "installed" => {
             debug!("forgejo-runner already installed on {}", ip);
+            ctx.skip_step(step::INSTALL);
         }
         _ => {
+            ctx.step(step::INSTALL);
             let version = forgejo_runner::resolve_version(version);
             let arch_output = ssh_exec(ip, config, "uname -m").await?;
             let arch = Arch::from_uname(&arch_output).ok_or_else(|| {
@@ -354,6 +363,7 @@ pub async fn prepare_forgejo_runner(
                         local_only = tracing::field::Empty,
                         "Install output: {}", output
                     );
+                    ctx.step(step::SETUP);
                 }
                 Err(e) => {
                     error!("Failed to install forgejo-runner on {}: {}", ip, e);
