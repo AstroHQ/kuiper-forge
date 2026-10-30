@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## kuiper-libvirt-agent-v0.2.0 - 2026-10-30
+#### Features
+- **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
+
+- - -
 ## kuiper-libvirt-agent-v0.1.0 - 2026-10-28
 #### Features
 - **(libvirt-agent)** generate domain XML from per-image hardware settings - (36ea7a0) - *jfro*

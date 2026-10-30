@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-tart-agent-v0.6.0 - 2026-10-30
+#### Features
+- **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
+
+- - -
 ## kuiper-tart-agent-v0.5.2 - 2026-10-28
 #### Bug Fixes
 - apply logging.retention_days in the agents - (71b0d49) - *jfro*
