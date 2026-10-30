@@ -122,30 +122,34 @@ pub const JOB_RUNNER_CREATED: &str = r#"
     UPDATE job_runs SET attempts = attempts + 1, first_runner_at = COALESCE(first_runner_at, $1) WHERE job_id = $2
 "#;
 
+// a cancel is final: webhooks can arrive out of order, so a late start mustn't undo it
 #[cfg(feature = "sqlite")]
 pub const SET_JOB_STARTED: &str = r#"
-    UPDATE job_runs SET started_at = COALESCE(started_at, ?), runner_name = COALESCE(runner_name, ?), outcome = 'ran'
+    UPDATE job_runs SET started_at = COALESCE(started_at, ?), runner_name = COALESCE(runner_name, ?),
+        outcome = CASE WHEN outcome = 'cancelled' THEN outcome ELSE 'ran' END
     WHERE job_id = ?
 "#;
 
 #[cfg(feature = "postgres")]
 pub const SET_JOB_STARTED: &str = r#"
-    UPDATE job_runs SET started_at = COALESCE(started_at, $1), runner_name = COALESCE(runner_name, $2), outcome = 'ran'
+    UPDATE job_runs SET started_at = COALESCE(started_at, $1), runner_name = COALESCE(runner_name, $2),
+        outcome = CASE WHEN outcome = 'cancelled' THEN outcome ELSE 'ran' END
     WHERE job_id = $3
 "#;
 
+// a job that started and then got cancelled already says `ran`, so a cancel replaces it. the rest only fill in a blank
 #[cfg(feature = "sqlite")]
 pub const SET_JOB_COMPLETED: &str = r#"
     UPDATE job_runs SET completed_at = COALESCE(completed_at, ?), conclusion = COALESCE(?, conclusion),
-        outcome = COALESCE(outcome, ?)
+        outcome = CASE WHEN ? = 'cancelled' THEN 'cancelled' ELSE COALESCE(outcome, ?) END
     WHERE job_id = ?
 "#;
 
 #[cfg(feature = "postgres")]
 pub const SET_JOB_COMPLETED: &str = r#"
     UPDATE job_runs SET completed_at = COALESCE(completed_at, $1), conclusion = COALESCE($2, conclusion),
-        outcome = COALESCE(outcome, $3)
-    WHERE job_id = $4
+        outcome = CASE WHEN $3::TEXT = 'cancelled' THEN 'cancelled' ELSE COALESCE(outcome, $4) END
+    WHERE job_id = $5
 "#;
 
 // a job can be dropped as gone (say the forge listed it running) and later finish on our runner, so `ran` wins over

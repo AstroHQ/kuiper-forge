@@ -264,14 +264,15 @@ fn mock_job(rng: &mut StdRng, id: u64, queued: i64, now: i64) -> (JobRun, Vec<Ru
             job.outcome = Some("ran".into());
             if let Some(finished) = finished {
                 job.completed_at = Some(finished);
-                job.conclusion = Some(
-                    match rng.random_range(0..100) {
-                        0..90 => "success",
-                        90..98 => "failure",
-                        _ => "cancelled",
-                    }
-                    .into(),
-                );
+                let conclusion = match rng.random_range(0..100) {
+                    0..90 => "success",
+                    90..98 => "failure",
+                    _ => "cancelled",
+                };
+                job.conclusion = Some(conclusion.into());
+                if conclusion == "cancelled" {
+                    job.outcome = Some("cancelled".into());
+                }
             }
         }
         if done {

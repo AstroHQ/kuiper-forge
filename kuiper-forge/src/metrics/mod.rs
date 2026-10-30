@@ -322,6 +322,7 @@ impl MetricsStore {
             .bind(at.timestamp_millis())
             .bind(conclusion)
             .bind(outcome)
+            .bind(outcome)
             .bind(&key)
             .execute(&self.pool)
             .await;
@@ -629,6 +630,66 @@ mod tests {
         assert_eq!(j.attempts, 2);
         assert!(j.first_runner_at.is_some());
         assert_eq!(j.outcome.as_deref(), Some("ran"));
+    }
+
+    async fn seen_job(store: &MetricsStore, job: &JobKey) {
+        store
+            .job_seen(NewJob {
+                job_id: job,
+                repository: None,
+                workflow_name: None,
+                job_name: None,
+                labels: &[],
+                queued_at: None,
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_cancel_replaces_a_started_job() {
+        let (_temp, store) = store().await;
+        let job = JobKey::new("github", "9");
+        seen_job(&store, &job).await;
+        store.job_started(&job, Some("r1"), Utc::now()).await;
+        store
+            .job_completed(&job, Some("cancelled"), Utc::now())
+            .await;
+        store.job_ended(&job, JobOutcome::Ran).await;
+
+        let j = &store.jobs_since(0).await.unwrap()[0];
+        assert_eq!(j.outcome.as_deref(), Some("cancelled"));
+        assert_eq!(j.runner_name.as_deref(), Some("r1"), "it did start");
+        assert!(j.started_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_late_start_keeps_the_cancel() {
+        let (_temp, store) = store().await;
+        let job = JobKey::new("github", "10");
+        seen_job(&store, &job).await;
+
+        // webhook delivery order isn't guaranteed
+        store
+            .job_completed(&job, Some("cancelled"), Utc::now())
+            .await;
+        store.job_started(&job, Some("r1"), Utc::now()).await;
+
+        let j = &store.jobs_since(0).await.unwrap()[0];
+        assert_eq!(j.outcome.as_deref(), Some("cancelled"));
+        assert!(j.started_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_failed_job_still_counts_as_ran() {
+        let (_temp, store) = store().await;
+        let job = JobKey::new("github", "11");
+        seen_job(&store, &job).await;
+        store.job_started(&job, Some("r1"), Utc::now()).await;
+        store.job_completed(&job, Some("failure"), Utc::now()).await;
+
+        let j = &store.jobs_since(0).await.unwrap()[0];
+        assert_eq!(j.outcome.as_deref(), Some("ran"));
+        assert_eq!(j.conclusion.as_deref(), Some("failure"));
     }
 
     #[tokio::test]
