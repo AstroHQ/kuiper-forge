@@ -1,0 +1,112 @@
+{% extends "admin/layout.html" %}
+{% import "admin/macros.html" as m %}
+
+{% block title %}Errors{% endblock %}
+
+{% block body %}
+{% include "admin/nav.html" %}
+
+<div class="container">
+    <div class="page-header">
+        <h1>Errors</h1>
+    </div>
+
+    <div class="card">
+        <header><h2>Last 24 Hours</h2></header>
+        <section>
+        {% if last_day.is_empty() %}
+        <p class="empty-text">No failures in the last 24 hours.</p>
+        {% else %}
+        <div class="table-scroll">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Agent</th>
+                    <th title="Only the newest 100 failures per agent are kept">Total</th>
+                    {% for (value, label) in kinds %}
+                    <th><a href="?kind={{ value }}">{{ label }}</a></th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in last_day %}
+                <tr>
+                    <td><a href="?agent={{ row.agent_id }}">{{ row.hostname }}</a></td>
+                    <td>{{ row.total }}</td>
+                    {% for n in row.counts %}
+                    <td>{% if *n == 0 %}<span class="muted">-</span>{% else %}{{ n }}{% endif %}</td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+                {% if last_day.len() > 1 %}
+                <tr>
+                    <td class="muted">All agents</td>
+                    <td>{{ last_day_totals.iter().sum::<i64>() }}</td>
+                    {% for n in last_day_totals %}
+                    <td>{% if *n == 0 %}<span class="muted">-</span>{% else %}{{ n }}{% endif %}</td>
+                    {% endfor %}
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+        </div>
+        {% endif %}
+        </section>
+    </div>
+
+    <div class="card">
+        <header><h2>Recent Errors ({{ failures.len() }}{% if failures.len() == limit %}, newest only{% endif %})</h2></header>
+        <section>
+        <form method="get" class="log-toolbar">
+            <label for="kind">Type</label>
+            <select id="kind" name="kind" class="select" onchange="this.form.submit()">
+                <option value=""{% if kind.is_empty() %} selected{% endif %}>All</option>
+                {% for (value, label) in kinds %}
+                <option value="{{ value }}"{% if kind == **value %} selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+            <label for="agent">Agent</label>
+            <select id="agent" name="agent" class="select" onchange="this.form.submit()">
+                <option value=""{% if agent.is_empty() %} selected{% endif %}>All</option>
+                {% for (id, hostname) in agents %}
+                <option value="{{ id }}"{% if agent == **id %} selected{% endif %}>{{ hostname }}</option>
+                {% endfor %}
+            </select>
+            {% if !kind.is_empty() || !agent.is_empty() %}
+            <a href="/admin/errors" class="btn" data-variant="ghost" data-size="sm">Clear</a>
+            {% endif %}
+        </form>
+        {% if failures.is_empty() %}
+        <p class="empty-text">No failures recorded{% if !kind.is_empty() || !agent.is_empty() %} matching these filters{% endif %}.</p>
+        {% else %}
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>When</th>
+                    <th>Agent</th>
+                    <th>Type</th>
+                    <th>Runner / Job</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in failures %}
+                {% let failure = row.failure %}
+                <tr>
+                    <td class="nowrap">{% call m::ts_title(failure.occurred_at, failure.ago ~ " ago") %}{% endcall %}</td>
+                    <td class="nowrap"><a href="/admin/agents/{{ row.agent_id }}">{{ row.hostname }}</a></td>
+                    <td class="nowrap"><span class="badge" data-variant="destructive">{{ failure.kind }}</span></td>
+                    <td>
+                        {% if let Some(name) = failure.runner_name %}{{ name }}{% else %}-{% endif %}
+                        {% if let Some(job_id) = failure.job_id %}<div class="muted">{{ job_id.forge() }} job #{{ job_id.id() }}</div>{% endif %}
+                    </td>
+                    <td><code class="failure-message">{% if failure.message.is_empty() %}(no error message){% else %}{{ failure.message }}{% endif %}</code></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        </section>
+    </div>
+</div>
+{% endblock %}

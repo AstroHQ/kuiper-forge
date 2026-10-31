@@ -9,7 +9,7 @@ use crate::admin::templates::{
     FailureSummary, LimitView, LoginTemplate, PendingJobSummary, RunnerSummary, TokenSummary,
     split_labels,
 };
-use crate::admin::{agent_log_routes, api_token_routes, metrics_routes, user_routes};
+use crate::admin::{agent_log_routes, api_token_routes, error_routes, metrics_routes, user_routes};
 use crate::agent_failures::FailureKind;
 use crate::agent_registry::AgentInfo;
 use crate::forge::JobKey;
@@ -37,6 +37,7 @@ pub fn admin_router(state: Arc<AdminState>) -> Router {
         .route("/login", post(login_submit))
         .route("/dashboard", get(dashboard))
         .route("/metrics", get(metrics_routes::metrics_page))
+        .route("/errors", get(error_routes::errors_page))
         .route("/logout", post(logout))
         .route("/tokens/create", post(token_create))
         .route("/tokens/{token}/delete", post(token_delete))
@@ -614,7 +615,7 @@ async fn agent_availability(
 }
 
 /// Short human age like `45s`, `4m 12s`, `3h 5m` or `2d 4h`.
-fn format_age(age: Duration) -> String {
+pub(crate) fn format_age(age: Duration) -> String {
     let secs = age.num_seconds().max(0);
     let (d, h, m, s) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
     match (d, h, m) {

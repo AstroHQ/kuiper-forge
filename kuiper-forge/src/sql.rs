@@ -401,6 +401,19 @@ pub const SELECT_AGENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind,
 #[cfg(feature = "postgres")]
 pub const SELECT_AGENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind, runner_name, job_id, message FROM agent_failures WHERE agent_id = $1 ORDER BY occurred_at DESC LIMIT $2";
 
+// `kind` and `agent_id` are each bound twice: NULL matches everything
+#[cfg(feature = "sqlite")]
+pub const SELECT_RECENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind, runner_name, job_id, message FROM agent_failures WHERE (? IS NULL OR kind = ?) AND (? IS NULL OR agent_id = ?) ORDER BY occurred_at DESC LIMIT ?";
+
+#[cfg(feature = "postgres")]
+pub const SELECT_RECENT_FAILURES: &str = "SELECT id, agent_id, occurred_at, kind, runner_name, job_id, message FROM agent_failures WHERE ($1::text IS NULL OR kind = $2) AND ($3::text IS NULL OR agent_id = $4) ORDER BY occurred_at DESC LIMIT $5";
+
+#[cfg(feature = "sqlite")]
+pub const COUNT_FAILURES_SINCE: &str = "SELECT agent_id, kind, COUNT(*) AS n FROM agent_failures WHERE occurred_at >= ? GROUP BY agent_id, kind";
+
+#[cfg(feature = "postgres")]
+pub const COUNT_FAILURES_SINCE: &str = "SELECT agent_id, kind, COUNT(*) AS n FROM agent_failures WHERE occurred_at >= $1 GROUP BY agent_id, kind";
+
 #[cfg(feature = "sqlite")]
 pub const PRUNE_AGENT_FAILURES: &str = r#"
     DELETE FROM agent_failures WHERE agent_id = ? AND id NOT IN (
