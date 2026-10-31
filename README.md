@@ -28,15 +28,23 @@ Kuiper automatically provisions and destroys VMs for each CI job, giving you cle
 ### 1. Set up the coordinator
 
 ```bash
-# Generate TLS certificates
-kuiper-forge ca init
-
-# Create config file (see examples/coordinator-config.toml)
-# Configure your GitHub App credentials and runner pools
+# Creates the certificates, config and an admin user, asking for whatever isn't given as a flag
+kuiper-forge setup
 
 # Run the coordinator
-kuiper-forge serve --config config.toml
+kuiper-forge serve
 ```
+
+No forge yet? Pick "None" and use `kuiper-forge serve --dry-run` to look around. To script it, give the answers as
+flags (see `kuiper-forge setup --help`); `--yes` or running without a terminal never prompts, and fails on anything
+that has no default:
+
+```bash
+KUIPER_ADMIN_PASSWORD=... kuiper-forge setup --yes --hostname ci.example.com \
+    --github-app-id 123456 --github-key ./app.pem --admin-user admin
+```
+
+It's safe to run again. It fills in what's missing and never replaces an existing CA.
 
 ### 2. Register an agent
 

@@ -2,8 +2,9 @@
 #
 # This file demonstrates ALL possible configuration options for kuiper-forge.
 # Uncomment and customize sections as needed for your deployment.
+# `kuiper-forge setup` writes a working config, this is for what it doesn't ask about.
 #
-# Before using:
+# Before using this one by hand:
 # 1. Run: cargo run --bin kuiper-forge -- ca init --org "Test Org"
 # 2. Run: cargo run --bin kuiper-forge -- ca server-cert --hostname localhost
 #

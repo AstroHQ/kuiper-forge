@@ -705,9 +705,18 @@ pub fn generate_server_cert(
     params.not_before = now;
     params.not_after = now + ::time::Duration::days(365);
 
-    // Add SAN for hostname
+    // Add SAN for hostname. An IP has to be an IP SAN, TLS clients don't match one against DNS names
+    let san = match hostname.parse::<std::net::IpAddr>() {
+        Ok(ip) => SanType::IpAddress(ip),
+        Err(_) => SanType::DnsName(
+            hostname
+                .to_string()
+                .try_into()
+                .map_err(|e| anyhow!("Invalid hostname '{hostname}': {e}"))?,
+        ),
+    };
     params.subject_alt_names = vec![
-        SanType::DnsName(hostname.to_string().try_into().unwrap()),
+        san,
         SanType::DnsName("localhost".to_string().try_into().unwrap()),
     ];
 
@@ -745,6 +754,39 @@ pub fn generate_server_cert(
     Ok(())
 }
 
+/// Whether the server certificate at `path` is still valid and covers `hostname`.
+pub fn server_cert_covers(path: &Path, hostname: &str) -> Result<bool> {
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::pem::parse_x509_pem;
+
+    let pem = fs::read(path)
+        .with_context(|| format!("Failed to read server cert: {}", path.display()))?;
+    let (_, pem) =
+        parse_x509_pem(&pem).map_err(|e| anyhow!("Failed to parse server cert PEM: {e}"))?;
+    let cert = pem
+        .parse_x509()
+        .map_err(|e| anyhow!("Failed to parse server cert: {e}"))?;
+    if !cert.validity().is_valid() {
+        return Ok(false);
+    }
+
+    let ip = hostname.parse::<std::net::IpAddr>().ok();
+    let names = cert
+        .subject_alternative_name()
+        .map_err(|e| anyhow!("Failed to read server cert names: {e}"))?;
+    Ok(names.is_some_and(|names| {
+        names.value.general_names.iter().any(|name| match name {
+            GeneralName::DNSName(dns) => dns.eq_ignore_ascii_case(hostname),
+            GeneralName::IPAddress(bytes) => match ip {
+                Some(std::net::IpAddr::V4(ip)) => *bytes == ip.octets(),
+                Some(std::net::IpAddr::V6(ip)) => *bytes == ip.octets(),
+                None => false,
+            },
+            _ => false,
+        })
+    }))
+}
+
 /// Export CA certificate to stdout
 pub fn export_ca_cert(ca_cert_path: &Path) -> Result<String> {
     fs::read_to_string(ca_cert_path)
@@ -752,7 +794,7 @@ pub fn export_ca_cert(ca_cert_path: &Path) -> Result<String> {
 }
 
 /// Write a private key with restricted permissions (0600 on Unix)
-fn write_private_key(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_private_key(path: &Path, content: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
