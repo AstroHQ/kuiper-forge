@@ -368,6 +368,7 @@ impl RunnerConfigBuilder {
             let dir = escape_powershell(&self.runner_dir);
             let ps_cmd = format!(
                 "$ErrorActionPreference = 'Stop'; \
+                 $ProgressPreference = 'SilentlyContinue'; \
                  $Upload = Join-Path $HOME '{upload}'; \
                  New-Item -ItemType Directory -Force -Path {dir} | Out-Null; \
                  Expand-Archive -Path $Upload -DestinationPath {dir} -Force; \
@@ -721,6 +722,8 @@ mod tests {
         let cmd = builder.install_upload_command();
         assert!(cmd.contains("Join-Path $HOME 'kuiper-actions-runner.zip'"));
         assert!(cmd.contains(r"-DestinationPath 'C:\actions-runner' -Force"));
+        // Expand-Archive is slower drawing its progress bar too
+        assert!(cmd.contains("$ProgressPreference = 'SilentlyContinue'"));
 
         // cmd.exe SSH shell: wrapped, like the other commands
         let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
