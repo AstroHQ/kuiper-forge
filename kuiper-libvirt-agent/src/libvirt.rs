@@ -131,7 +131,9 @@ pub fn domain_template(hardware: &Hardware) -> String {
 {os}  </os>
   <features>
 {features}  </features>
-  <cpu mode='host-passthrough'/>
+  <cpu mode='host-passthrough'>
+    <topology sockets='1' cores='{{vcpus}}' threads='1'/>
+  </cpu>
   {clock}
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
@@ -611,6 +613,18 @@ mod tests {
     }
 
     #[test]
+    fn test_domain_xml_vcpus_are_cores() {
+        let libvirt = libvirt();
+        let disk = libvirt.disk_path("kuiper-runner-1");
+        let xml = libvirt.domain_xml(&spec(&disk, None, &Hardware::default()));
+        let vcpus = spec(&disk, None, &Hardware::default()).vcpus;
+        // libvirt's default is a socket per vCPU, and Windows client editions only use two sockets
+        assert!(xml.contains(&format!(
+            "<topology sockets='1' cores='{vcpus}' threads='1'/>"
+        )));
+    }
+
+    #[test]
     fn test_domain_xml_default_is_bios_virtio() {
         let xml = domain_template(&Hardware::default());
         assert!(!xml.contains("firmware") && !xml.contains("nvram") && !xml.contains("machine="));
@@ -791,7 +805,7 @@ mod tests {
         // no libvirt network in a session, and maybe no /dev/kvm
         let template = domain_template(&hardware)
             .replace("<domain type='kvm'>", "<domain type='qemu'>")
-            .replace("<cpu mode='host-passthrough'/>", "")
+            .replace("<cpu mode='host-passthrough'>", "<cpu>")
             .replace(
                 "{interface}",
                 "<interface type='user'><model type='virtio'/></interface>",
