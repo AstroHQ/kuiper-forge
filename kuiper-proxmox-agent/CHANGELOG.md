@@ -2,12 +2,20 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
-## kuiper-proxmox-agent-v0.5.0 - 2026-10-30
+## v0.6.0 - 2026-10-31
+#### Features
+- **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
+
+#### Bug Fixes
+- **(proxmox-agent)** restart the service after a package upgrade - (708e52a) - *jfro*
+
+- - -
+## v0.5.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
 
 - - -
-## kuiper-proxmox-agent-v0.4.3 - 2026-10-28
+## v0.4.3 - 2026-10-28
 #### Bug Fixes
 - apply logging.retention_days in the agents - (71b0d49) - *jfro*
 - **(agent-lib)** destroy VMs in parallel on shutdown and allow longer for it - (08c09b3) - *jfro*
@@ -18,7 +26,7 @@ All notable changes to this project will be documented in this file. See [conven
 - **(agent-lib)** share the SSH transport and runner commands - (5bc5db9) - *jfro*
 
 - - -
-## kuiper-proxmox-agent-v0.4.2 - 2026-10-21
+## v0.4.2 - 2026-10-21
 #### Features
 - Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*
 - publish forgejo-runner builds for every platform on kuiper-forge - (02b6c9d) - *jfro*
@@ -31,12 +39,12 @@ All notable changes to this project will be documented in this file. See [conven
 - **(proxmox)** only destroy a VM while its VMID still belongs to it - (5417dec) - *jfro*
 
 - - -
-## kuiper-proxmox-agent-v0.4.1 - 2026-10-20
+## v0.4.1 - 2026-10-20
 #### Bug Fixes
 - security update to russh - (7249398) - *jfro*
 
 - - -
-## kuiper-proxmox-agent-v0.4.0 - 2026-09-24
+## v0.4.0 - 2026-09-24
 #### Features
 - report agent version in UI - (177cce8) - *jfro*
 - agent log upload, consistent browser timezone datestamps in UI - (24edf43) - *jfro*
@@ -49,13 +57,13 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-proxmox-agent-v0.3.1 - 2026-09-16
+## v0.3.1 - 2026-09-16
 #### Bug Fixes
 - security updates - (ae3b27c) - *jfro*
 
 - - -
 
-## kuiper-proxmox-agent-v0.3.0 - 2026-06-17
+## v0.3.0 - 2026-06-17
 #### Bug Fixes
 - avoid selecting first image when it should use default image if base labels match - (2eabee4) - *jfro*
 - (**proxmox-agent**) ensure systemd paths are escaped if needed - (65b20ed) - *jfro*
@@ -68,7 +76,7 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-proxmox-agent-v0.2.2 - 2026-05-20
+## v0.2.2 - 2026-05-20
 #### Bug Fixes
 - ensure coordinator gets status updates on VM transitions - (90a780c) - *jfro*
 - ensure max vms & labels is always current from agents - (ec77e28) - *jfro*
@@ -78,7 +86,7 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-proxmox-agent-v0.2.0 - 2026-03-12
+## v0.2.0 - 2026-03-12
 #### Bug Fixes
 - fix hang risk with tail on linux VMs - (05a4a25) - *jfro*
 - fix missing runner group passing along, and not destroying successful runs in debug - (1af0630) - *jfro*
@@ -86,7 +94,7 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-proxmox-agent-v0.1.1 - 2026-02-19
+## v0.1.1 - 2026-02-19
 #### Bug Fixes
 - (**kuiper-forge,kuiper-tart-agent,kuiper-proxmox-agent**) queued jobs getting stuck due to failed VM start & lack of requeue - (211e86f) - *jfro*
 

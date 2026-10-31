@@ -2,7 +2,23 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
-## kuiper-forge-v0.8.0 - 2026-10-30
+## v0.9.0 - 2026-10-31
+#### Features
+- **(admin)** flag agents running an out-of-date version - (0707562) - *jfro*
+- **(admin)** add a recent errors page across all agents - (49fe4f9) - *jfro*
+- **(coordinator)** add a setup command for the first run - (eb8ae0a) - *jfro*
+- **(metrics)** show where each runner install came from - (158f52b) - *jfro*
+
+#### Bug Fixes
+- **(admin)** follow every page of GitHub releases for agent updates - (7a3d524) - *jfro*
+- **(admin)** count unknown failure kinds in the all agents error total - (33b1c0f) - *jfro*
+- **(coordinator)** make setup check certificates are usable - (f046479) - *jfro*
+
+#### Performance Improvements
+- **(db)** index agent_failures by occurred_at for the recent errors page - (0bc193b) - *jfro*
+
+- - -
+## v0.8.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
 
@@ -10,7 +26,7 @@ All notable changes to this project will be documented in this file. See [conven
 - **(metrics)** let a cancel replace a started job's outcome - (76b7e83) - *jfro*
 
 - - -
-## kuiper-forge-v0.7.6 - 2026-10-28
+## v0.7.6 - 2026-10-28
 #### Features
 - **(libvirt-agent)** agent for ephemeral runner VMs on a local libvirt host - (f1dd9e5) - *jfro*
 
@@ -18,12 +34,12 @@ All notable changes to this project will be documented in this file. See [conven
 - **(coordinator)** accept any agent type - (b90354c) - *jfro*
 
 - - -
-## kuiper-forge-v0.7.5 - 2026-10-22
+## v0.7.5 - 2026-10-22
 #### Bug Fixes
 - **(tls)** rustls-webpki 0.103.16, fresh ca-certificates in the image - (519d2a6) - *jfro*
 
 - - -
-## kuiper-forge-v0.7.4 - 2026-10-21
+## v0.7.4 - 2026-10-21
 #### Features
 - Forgejo user (@name) and instance (*) runner scopes - (7e00791) - *jfro*
 - Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*
@@ -41,7 +57,7 @@ All notable changes to this project will be documented in this file. See [conven
 - redesign admin web UI with basecoat, tweak some of the UI to - (def7b9e) - *jfro*
 
 - - -
-## kuiper-forge-v0.7.3 - 2026-10-20
+## v0.7.3 - 2026-10-20
 #### Features
 - drain idle pool runners from unavailable agents - (a1ab136) - *jfro*
 - mark agents unavailable from the dashboard for maintenance - (8878a38) - *jfro*
@@ -53,20 +69,20 @@ All notable changes to this project will be documented in this file. See [conven
 - apply label mappings to jobs recovered in webhook mode - (8879858) - *jfro*
 
 - - -
-## kuiper-forge-v0.7.2 - 2026-09-25
+## v0.7.2 - 2026-09-25
 #### Bug Fixes
 - cleaner label display in dashboard - (fa20bfd) - *jfro*
 - name runners after their hosts - fixes ENG-4764 - (c67bfdd) - *jfro*
 
 - - -
 
-## kuiper-forge-v0.7.1 - 2026-09-24
+## v0.7.1 - 2026-09-24
 #### Bug Fixes
 - make PROXY protocol optional so in-cluster connections aren't an issue - (55ed2ff) - *jfro*
 
 - - -
 
-## kuiper-forge-v0.7.0 - 2026-09-24
+## v0.7.0 - 2026-09-24
 #### Features
 - linux VMs supported in tart-agent - (d01cb4a) - *jfro*
 - report agent version in UI - (177cce8) - *jfro*
@@ -85,7 +101,7 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-forge-v0.6.1 - 2026-09-16
+## v0.6.1 - 2026-09-16
 #### Bug Fixes
 - better handling of job queue check - (2e8a91d) - *jfro*
 - require rust 1.94 for docker/etc now - (6c79581) - *jfro*
@@ -94,7 +110,7 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-forge-v0.6.0 - 2026-09-14
+## v0.6.0 - 2026-09-14
 #### Bug Fixes
 - more edge cases - (d8a39ad) - *jfro*
 - edge case around timers - (c381316) - *jfro*
@@ -102,21 +118,21 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-forge-v0.5.0 - 2026-06-17
+## v0.5.0 - 2026-06-17
 #### Bug Fixes
 - prevent stuck queued jobs - (483f053) - *jfro*
 - track when agents are revoked & clean them ever 7d - (1909a4f) - *jfro*
 
 - - -
 
-## kuiper-forge-v0.4.2 - 2026-05-20
+## v0.4.2 - 2026-05-20
 #### Bug Fixes
 - avoid clobbering revoked flag - (f6a2b42) - *jfro*
 - ensure max vms & labels is always current from agents - (ec77e28) - *jfro*
 
 - - -
 
-## kuiper-forge-v0.4.1 - 2026-05-12
+## v0.4.1 - 2026-05-12
 #### Bug Fixes
 - add better logging around possible runner conflict - (549d20c) - *jfro*
 - avoid gap in runner creation failure causing dangling gh runners - (84c231d) - *jfro*
@@ -124,20 +140,20 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-forge-v0.4.0 - 2026-03-12
+## v0.4.0 - 2026-03-12
 #### Bug Fixes
 - fix missing runner group passing along, and not destroying successful runs in debug - (1af0630) - *jfro*
 - fix JIT runners for webhook mode, ensure win VMs are time sync'd - (767c543) - *jfro*
 
 - - -
 
-## kuiper-forge-v0.3.2 - 2026-02-19
+## v0.3.2 - 2026-02-19
 #### Bug Fixes
 - (**kuiper-forge,kuiper-tart-agent,kuiper-proxmox-agent**) queued jobs getting stuck due to failed VM start & lack of requeue - (211e86f) - *jfro*
 
 - - -
 
-## kuiper-forge-v0.3.1 - 2026-02-17
+## v0.3.1 - 2026-02-17
 #### Bug Fixes
 - (**kuiper-forge**) runner state mismatch with agent capacity. hopefully - (392784e) - *jfro*
 

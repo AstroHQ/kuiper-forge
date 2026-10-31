@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## kuiper-libvirt-agent-v0.2.0 - 2026-10-30
+## v0.3.0 - 2026-10-31
+#### Features
+- **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
+
+#### Bug Fixes
+- **(libvirt)** give VMs one socket with all their vCPUs as cores - (9287bf2) - *jfro*
+
+- - -
+## v0.2.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
 
 - - -
-## kuiper-libvirt-agent-v0.1.0 - 2026-10-28
+## v0.1.0 - 2026-10-28
 #### Features
 - **(libvirt-agent)** generate domain XML from per-image hardware settings - (36ea7a0) - *jfro*
 - **(libvirt-agent)** per-VM UEFI variable store and a Windows 11 domain template - (72976d9) - *jfro*
