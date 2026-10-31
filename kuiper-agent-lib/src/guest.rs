@@ -222,9 +222,13 @@ impl<'s> Guest<'s> {
                 .install_github(self.session, &builder, &version, arch)
                 .await;
             if !cached {
+                let sha256 = versions
+                    .cache
+                    .github_checksum(&version, builder.platform(), arch)
+                    .await;
                 let install = self
                     .session
-                    .execute(&builder.install_command(&version, arch))
+                    .execute(&builder.install_command(&version, arch, sha256.as_deref()))
                     .await?;
                 if install.exit_code != 0 {
                     error!(

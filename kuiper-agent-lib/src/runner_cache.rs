@@ -169,6 +169,8 @@ pub struct RunnerCache {
     http: reqwest::Client,
     /// Locked for the whole lookup, so concurrent jobs share one
     latest: Mutex<Option<LatestRelease>>,
+    /// Checksums per platform of other releases by version, so they're only looked up once
+    release_checksums: Mutex<HashMap<String, HashMap<String, String>>>,
     /// One per platform directory, so concurrent jobs share one download
     downloads: Mutex<HashMap<PathBuf, DownloadSlot>>,
     retry_download_after: Duration,
@@ -190,6 +192,7 @@ impl RunnerCache {
             releases_url: GITHUB_RELEASES.to_string(),
             http,
             latest: Mutex::new(None),
+            release_checksums: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
             retry_download_after: RETRY_DOWNLOAD_AFTER,
         })
@@ -199,8 +202,9 @@ impl RunnerCache {
     /// or "latest". GitHub is asked at most once per `version_ttl_secs`, and if it can't be reached
     /// the last answer is used, then [`FALLBACK_VERSION`] if there isn't one.
     pub async fn github_version(&self, configured: &str) -> String {
+        let configured = configured.trim();
         if !configured.is_empty() && configured != "latest" {
-            return configured.to_string();
+            return configured.trim_start_matches('v').to_string();
         }
 
         let mut latest = self.latest.lock().await;
@@ -344,7 +348,7 @@ impl RunnerCache {
         platform: Platform,
         arch: Arch,
     ) -> Result<PathBuf> {
-        let key = format!("{}-{}", platform.as_str(), arch.as_str());
+        let key = github_platform(platform, arch);
         let path = self
             .dir
             .join("github")
@@ -355,8 +359,23 @@ impl RunnerCache {
             .await
     }
 
+    /// The published checksum of a GitHub runner archive, for a VM downloading it itself to check.
+    /// `None` if it can't be had, a VM can do without it.
+    pub async fn github_checksum(
+        &self,
+        version: &str,
+        platform: Platform,
+        arch: Arch,
+    ) -> Option<String> {
+        let key = github_platform(platform, arch);
+        self.github_sha256(version, &key)
+            .await
+            .inspect_err(|e| warn!("VM can't check its download of runner v{version}: {e}"))
+            .ok()
+    }
+
     /// Checksum of a GitHub runner archive. `latest` usually has it already; a pinned version or
-    /// the fallback is only looked up here, when there's a new copy to check.
+    /// the fallback is looked up the first time it's needed.
     async fn github_sha256(&self, version: &str, key: &str) -> Result<String> {
         if let Some(latest) = self.latest.lock().await.as_ref()
             && latest.version == version
@@ -364,9 +383,16 @@ impl RunnerCache {
         {
             return Ok(sha256.clone());
         }
-        let release = self.github_release(&format!("tags/v{version}")).await?;
-        checksums(release.body.as_deref().unwrap_or_default())
-            .remove(key)
+        let mut known = self.release_checksums.lock().await;
+        if !known.contains_key(version) {
+            let release = self.github_release(&format!("tags/v{version}")).await?;
+            let found = checksums(release.body.as_deref().unwrap_or_default());
+            known.insert(version.to_string(), found);
+        }
+        known
+            .get(version)
+            .and_then(|found| found.get(key))
+            .cloned()
             .ok_or_else(|| CacheError::NoChecksum(format!("runner v{version} {key}")))
     }
 
@@ -482,6 +508,11 @@ impl RunnerCache {
         }
         Ok(())
     }
+}
+
+/// A platform in runner release file names and checksums, e.g. `linux-x64`.
+fn github_platform(platform: Platform, arch: Arch) -> String {
+    format!("{}-{}", platform.as_str(), arch.as_str())
 }
 
 /// Where the checksum `path` was downloaded with is kept.
@@ -669,6 +700,8 @@ mod tests {
         // nothing listens here, asking would fall back
         let cache = cache(dir.path(), "http://127.0.0.1:1", 3600);
         assert_eq!(cache.github_version("2.300.0").await, "2.300.0");
+        assert_eq!(cache.github_version("v2.300.0").await, "2.300.0");
+        assert_eq!(cache.github_version(" v2.300.0\n").await, "2.300.0");
     }
 
     #[tokio::test]
@@ -789,6 +822,28 @@ mod tests {
             cache.github_sha256("2.300.0", "osx-x64").await,
             Err(CacheError::NoChecksum(_))
         ));
+
+        // only looked up once
+        cache.github_sha256("2.300.0", "linux-x64").await.unwrap();
+        assert_eq!(server.requests(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_github_checksum_for_a_vm() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start(|_| (200, release_json("2.338.2").into_bytes())).await;
+        let reachable = cache(dir.path(), &server.url, 3600);
+        let checksum = reachable
+            .github_checksum("2.338.2", Platform::Linux, Arch::X64)
+            .await;
+        assert_eq!(checksum.as_deref(), Some(SHA_LINUX));
+
+        // the VM goes without, like it would have before
+        let unreachable = cache(dir.path(), "http://127.0.0.1:1", 3600);
+        let checksum = unreachable
+            .github_checksum("2.338.2", Platform::Linux, Arch::X64)
+            .await;
+        assert_eq!(checksum, None);
     }
 
     #[tokio::test]

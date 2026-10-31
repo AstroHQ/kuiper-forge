@@ -223,7 +223,11 @@ pub async fn ensure_runner_installed(
         return Ok(());
     }
 
-    match ssh_exec(ip, config, &commands.install_command(&version, arch)).await {
+    let sha256 = cache
+        .github_checksum(&version, commands.platform(), arch)
+        .await;
+    let install = commands.install_command(&version, arch, sha256.as_deref());
+    match ssh_exec(ip, config, &install).await {
         Ok(output) => {
             info!("GitHub Actions runner installed on {}", ip);
             debug!(

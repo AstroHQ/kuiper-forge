@@ -109,8 +109,16 @@ pub const GUI_RUNNER_SCRIPT_MACOS: &str = include_str!("../scripts/run_runner_gu
 /// * `version` - The runner version (e.g., "2.321.0")
 /// * `platform` - Target platform
 /// * `arch` - Target architecture
-pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch: Arch) -> String {
+/// * `sha256` - Published checksum of the archive, for the VM to check its download against
+pub fn install_command(
+    runner_dir: &str,
+    version: &str,
+    platform: Platform,
+    arch: Arch,
+    sha256: Option<&str>,
+) -> String {
     let url = download_url(version, platform, arch);
+    let sha256 = sha256.unwrap_or_default();
 
     match platform {
         Platform::Windows => {
@@ -123,9 +131,10 @@ pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch
                 .join("\n");
 
             format!(
-                "$RunnerDir = {}; $Url = {}; {}",
+                "$RunnerDir = {}; $Url = {}; $Sha256 = {}; {}",
                 escape_powershell(runner_dir),
                 escape_powershell(&url),
+                escape_powershell(sha256),
                 script_body.replace('\n', "; ").trim()
             )
         }
@@ -133,9 +142,10 @@ pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch
             // Bash: use heredoc to pass script with arguments
             // Use escape_posix_path for runner_dir to preserve tilde expansion (~/actions-runner)
             format!(
-                "bash -s -- {} {} << 'INSTALL_RUNNER_EOF'\n{INSTALL_SCRIPT_UNIX}\nINSTALL_RUNNER_EOF",
+                "bash -s -- {} {} {} << 'INSTALL_RUNNER_EOF'\n{INSTALL_SCRIPT_UNIX}\nINSTALL_RUNNER_EOF",
                 escape_posix_path(runner_dir),
                 escape_posix(&url),
+                escape_posix(sha256),
             )
         }
     }
@@ -333,8 +343,9 @@ impl RunnerConfigBuilder {
     /// # Arguments
     /// * `version` - The runner version (e.g., "2.321.0")
     /// * `arch` - The target architecture
-    pub fn install_command(&self, version: &str, arch: Arch) -> String {
-        let cmd = install_command(&self.runner_dir, version, self.platform, arch);
+    /// * `sha256` - Published checksum of the archive, for the VM to check its download against
+    pub fn install_command(&self, version: &str, arch: Arch, sha256: Option<&str>) -> String {
+        let cmd = install_command(&self.runner_dir, version, self.platform, arch, sha256);
 
         if self.is_windows() {
             // Wrap with powershell invocation if SSH shell is cmd.exe
@@ -422,20 +433,57 @@ mod tests {
 
     #[test]
     fn test_install_command_unix() {
-        let cmd = install_command("~/actions-runner", "2.321.0", Platform::Linux, Arch::X64);
+        let cmd = install_command(
+            "~/actions-runner",
+            "2.321.0",
+            Platform::Linux,
+            Arch::X64,
+            Some("abc123"),
+        );
         // Should use heredoc with bash -s
         // Tilde should be unquoted for shell expansion, path portion quoted
         assert!(cmd.contains("bash -s -- ~/'actions-runner'"));
-        assert!(cmd.contains("actions-runner-linux-x64-2.321.0.tar.gz"));
+        assert!(cmd.contains("actions-runner-linux-x64-2.321.0.tar.gz' 'abc123' <<"));
         assert!(cmd.contains("INSTALL_RUNNER_EOF"));
-        // Script should use $1, $2 for arguments
+        // Script should use $1, $2, $3 for arguments
         assert!(cmd.contains("$1"));
         assert!(cmd.contains("$2"));
+        assert!(cmd.contains("${3:-}"));
+        // an error page mustn't be saved as the archive
+        assert!(cmd.contains("curl -fsSL --retry 3"));
+    }
+
+    #[test]
+    fn test_install_command_unix_without_checksum() {
+        let cmd = install_command("~/r", "2.321.0", Platform::Linux, Arch::X64, None);
+        assert!(cmd.contains("x64-2.321.0.tar.gz' '' <<"));
+    }
+
+    #[test]
+    fn test_install_script_windows_survives_being_joined() {
+        // install_command joins the lines with "; "
+        let body = INSTALL_SCRIPT_WINDOWS
+            .lines()
+            .skip_while(|l| !l.trim().starts_with("$ErrorActionPreference"));
+        for line in body {
+            assert!(!line.trim().starts_with('#'), "comment: {line}");
+            assert_eq!(
+                line.matches('{').count(),
+                line.matches('}').count(),
+                "block over several lines: {line}"
+            );
+        }
     }
 
     #[test]
     fn test_install_command_unix_absolute_path() {
-        let cmd = install_command("/opt/actions-runner", "2.321.0", Platform::Linux, Arch::X64);
+        let cmd = install_command(
+            "/opt/actions-runner",
+            "2.321.0",
+            Platform::Linux,
+            Arch::X64,
+            None,
+        );
         // Absolute paths should be fully quoted
         assert!(cmd.contains("bash -s -- '/opt/actions-runner'"));
     }
@@ -447,11 +495,16 @@ mod tests {
             "2.321.0",
             Platform::Windows,
             Arch::X64,
+            Some("abc123"),
         );
         // Should set variables and include script body
         assert!(cmd.contains(r"$RunnerDir = 'C:\actions-runner'"));
         assert!(cmd.contains("actions-runner-win-x64-2.321.0.zip"));
+        assert!(cmd.contains("$Sha256 = 'abc123'"));
+        assert!(cmd.contains("Get-FileHash"));
         assert!(cmd.contains("Expand-Archive"));
+        // Invoke-WebRequest is very slow drawing its progress bar
+        assert!(cmd.contains("$ProgressPreference = 'SilentlyContinue'"));
     }
 
     #[test]
@@ -681,7 +734,7 @@ mod tests {
     #[test]
     fn test_macos_install_uses_osx_archive() {
         let builder = RunnerConfigBuilder::macos("~/actions-runner");
-        let cmd = builder.install_command("2.321.0", Arch::Arm64);
+        let cmd = builder.install_command("2.321.0", Arch::Arm64, None);
         assert!(cmd.contains("actions-runner-osx-arm64-2.321.0.tar.gz"));
         assert!(cmd.starts_with("bash -s --"));
     }
