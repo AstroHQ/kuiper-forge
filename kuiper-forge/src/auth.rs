@@ -661,13 +661,35 @@ pub fn init_ca(ca_cert_path: &Path, ca_key_path: &Path, org_name: &str) -> Resul
     Ok(())
 }
 
-/// Generate a server certificate signed by the CA
+/// Generate a server certificate signed by the CA, valid for a year
 pub fn generate_server_cert(
     ca_cert_path: &Path,
     ca_key_path: &Path,
     server_cert_path: &Path,
     server_key_path: &Path,
     hostname: &str,
+) -> Result<()> {
+    let now = ::time::OffsetDateTime::now_utc();
+    issue_server_cert(
+        ca_cert_path,
+        ca_key_path,
+        server_cert_path,
+        server_key_path,
+        hostname,
+        now,
+        now + ::time::Duration::days(365),
+    )
+}
+
+/// [`generate_server_cert`] with the dates spelled out, so tests can make an expired one.
+pub(crate) fn issue_server_cert(
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+    server_cert_path: &Path,
+    server_key_path: &Path,
+    hostname: &str,
+    not_before: ::time::OffsetDateTime,
+    not_after: ::time::OffsetDateTime,
 ) -> Result<()> {
     // Load CA cert and key
     let ca_cert_pem = fs::read_to_string(ca_cert_path)
@@ -700,10 +722,8 @@ pub fn generate_server_cert(
     dn.push(DnType::OrganizationName, "CI Runner Coordinator");
     params.distinguished_name = dn;
 
-    // Set validity (1 year)
-    let now = ::time::OffsetDateTime::now_utc();
-    params.not_before = now;
-    params.not_after = now + ::time::Duration::days(365);
+    params.not_before = not_before;
+    params.not_after = not_after;
 
     // Add SAN for hostname. An IP has to be an IP SAN, TLS clients don't match one against DNS names
     let san = match hostname.parse::<std::net::IpAddr>() {
@@ -752,39 +772,6 @@ pub fn generate_server_cert(
     }
 
     Ok(())
-}
-
-/// Whether the server certificate at `path` is still valid and covers `hostname`.
-pub fn server_cert_covers(path: &Path, hostname: &str) -> Result<bool> {
-    use x509_parser::extensions::GeneralName;
-    use x509_parser::pem::parse_x509_pem;
-
-    let pem = fs::read(path)
-        .with_context(|| format!("Failed to read server cert: {}", path.display()))?;
-    let (_, pem) =
-        parse_x509_pem(&pem).map_err(|e| anyhow!("Failed to parse server cert PEM: {e}"))?;
-    let cert = pem
-        .parse_x509()
-        .map_err(|e| anyhow!("Failed to parse server cert: {e}"))?;
-    if !cert.validity().is_valid() {
-        return Ok(false);
-    }
-
-    let ip = hostname.parse::<std::net::IpAddr>().ok();
-    let names = cert
-        .subject_alternative_name()
-        .map_err(|e| anyhow!("Failed to read server cert names: {e}"))?;
-    Ok(names.is_some_and(|names| {
-        names.value.general_names.iter().any(|name| match name {
-            GeneralName::DNSName(dns) => dns.eq_ignore_ascii_case(hostname),
-            GeneralName::IPAddress(bytes) => match ip {
-                Some(std::net::IpAddr::V4(ip)) => *bytes == ip.octets(),
-                Some(std::net::IpAddr::V6(ip)) => *bytes == ip.octets(),
-                None => false,
-            },
-            _ => false,
-        })
-    }))
 }
 
 /// Export CA certificate to stdout

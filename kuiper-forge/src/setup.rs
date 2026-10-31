@@ -19,13 +19,14 @@ use dialoguer::{Confirm, Input, Select};
 use rand::RngCore;
 
 use crate::admin::AdminAuthStore;
-use crate::auth::{generate_server_cert, init_ca, server_cert_covers, write_private_key};
+use crate::auth::{generate_server_cert, init_ca, write_private_key};
 use crate::config::{
     AdminConfig, Config, DatabaseConfig, ForgeConfig, ForgeKindConfig, ForgejoConfig, GitHubConfig,
     GrpcConfig, MetricsConfig, PollingConfig, ProvisioningConfig, ProvisioningMode, RunnerScope,
-    TlsConfig, WebhookConfig,
+    ServerTrustMode, TlsConfig, WebhookConfig,
 };
 use crate::db::Database;
+use crate::tls::{server_cert_name, server_identity_problem};
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:9443";
 const DEFAULT_ORG: &str = "CI Runner";
@@ -789,7 +790,18 @@ fn database_step(ask: &Ask, args: &SetupArgs) -> Result<DatabaseConfig> {
     })
 }
 
-/// Create what's missing: an existing CA stays, a server certificate only goes if it can't serve `hostname`.
+/// Whether the server certificate comes from somewhere else, like a public CA, rather than our own CA. Agents don't
+/// trust our CA for it, so replacing it with one of ours would lock them out.
+fn managed_elsewhere(tls: &TlsConfig) -> bool {
+    tls.server_use_native_roots
+        || matches!(tls.server_trust_mode, ServerTrustMode::Chain)
+        || tls
+            .server_ca_cert
+            .as_ref()
+            .is_some_and(|ca| *ca != tls.ca_cert)
+}
+
+/// Create what's missing: an existing CA stays, and a server certificate only goes if it can't serve `hostname`.
 fn certificates_step(tls: &TlsConfig, ask: &Ask, args: &SetupArgs, hostname: &str) -> Result<()> {
     if tls.ca_cert.exists() && tls.ca_key.exists() {
         println!("✓ Using the existing CA at {}", tls.ca_cert.display());
@@ -805,19 +817,56 @@ fn certificates_step(tls: &TlsConfig, ask: &Ask, args: &SetupArgs, hostname: &st
         println!("✓ Created a CA at {}", tls.ca_cert.display());
     }
 
-    if tls.server_cert.exists() && server_cert_covers(&tls.server_cert, hostname)? {
+    let Some(problem) = server_identity_problem(tls, hostname) else {
         println!("✓ Using the existing server certificate for {hostname}");
-    } else {
-        generate_server_cert(
-            &tls.ca_cert,
-            &tls.ca_key,
-            &tls.server_cert,
-            &tls.server_key,
-            hostname,
-        )?;
-        println!("✓ Created a server certificate for {hostname}");
+        return Ok(());
+    };
+    if managed_elsewhere(tls) {
+        println!("⚠ Agents can't use the server certificate: {problem}");
+        println!(
+            "  It doesn't come from our CA so setup leaves it alone, replace it before they connect"
+        );
+        return Ok(());
     }
+    if tls.server_cert.exists() {
+        println!("⚠ Replacing the server certificate: {problem}");
+    }
+    generate_server_cert(
+        &tls.ca_cert,
+        &tls.ca_key,
+        &tls.server_cert,
+        &tls.server_key,
+        hostname,
+    )?;
+    // a certificate that's no good from a CA whose key doesn't match it, say, isn't a success
+    if let Some(problem) = server_identity_problem(tls, hostname) {
+        bail!("The new server certificate doesn't work either: {problem}");
+    }
+    println!("✓ Created a server certificate for {hostname}");
     Ok(())
+}
+
+/// The name to check a kept config's server certificate against: what it was issued for, so a new `--hostname` from
+/// an earlier run sticks, then what agents are told to connect to, and otherwise ask.
+fn kept_hostname(ask: &Ask, args: &SetupArgs, config: &Config) -> Result<String> {
+    if args.hostname.is_none() {
+        let from_url = (config.admin.coordinator_url != AdminConfig::default().coordinator_url)
+            .then(|| url_host(&config.admin.coordinator_url))
+            .flatten();
+        let known = server_cert_name(&config.tls.server_cert)
+            .or(from_url)
+            .filter(|name| check_hostname(name).is_ok());
+        if let Some(name) = known {
+            return Ok(name);
+        }
+    }
+    hostname_step(ask, args)
+}
+
+fn url_host(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let host = url.host_str()?;
+    Some(host.trim_matches(['[', ']']).to_string())
 }
 
 /// Whether to leave a config that's already there alone.
@@ -1011,23 +1060,16 @@ pub async fn run(args: SetupArgs, config_path: &Path, data_dir: &Path) -> Result
     let keep = keep_config(&ask, &args, config_path)?;
     let (config, webhook_secret, hostname) = if keep {
         let config = Config::load(config_path)?;
-        let hostname = match &args.hostname {
-            Some(_) => Some(hostname_step(&ask, &args)?),
-            None if config.tls.server_cert.exists() => None,
-            None => Some(hostname_step(&ask, &args)?),
-        };
+        let hostname = kept_hostname(&ask, &args, &config)?;
         (config, None, hostname)
     } else {
         let hostname = hostname_step(&ask, &args)?;
         let (config, secret) = new_config(&ask, &args, data_dir, &hostname)?;
-        (config, secret, Some(hostname))
+        (config, secret, hostname)
     };
 
     println!("\n== Certificates ==");
-    match &hostname {
-        Some(hostname) => certificates_step(&config.tls, &ask, &args, hostname)?,
-        None => println!("✓ Using the existing certificates"),
-    }
+    certificates_step(&config.tls, &ask, &args, &hostname)?;
     if !keep {
         save_config(&config, config_path)?;
     }
@@ -1036,7 +1078,7 @@ pub async fn run(args: SetupArgs, config_path: &Path, data_dir: &Path) -> Result
     admin_step(&ask, &args, &config, data_dir).await?;
 
     // agents need a URL the server certificate covers, a kept config can be behind a new --hostname
-    let url = match &hostname {
+    let url = match &args.hostname {
         Some(hostname) => coordinator_url(hostname, &config.grpc.listen_addr),
         None => config.admin.coordinator_url.clone(),
     };
@@ -1044,6 +1086,13 @@ pub async fn run(args: SetupArgs, config_path: &Path, data_dir: &Path) -> Result
         println!(
             "\n⚠ [admin] coordinator_url in the config is still {}, change it to {url}",
             config.admin.coordinator_url
+        );
+    } else if let Some(host) = url_host(&url)
+        && server_identity_problem(&config.tls, &host).is_some()
+        && !managed_elsewhere(&config.tls)
+    {
+        println!(
+            "\n⚠ [admin] coordinator_url is {url}, but the server certificate is for {hostname}"
         );
     }
     next_steps(
@@ -1395,11 +1444,37 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), "old");
     }
 
-    #[test]
-    fn test_server_cert_names() {
+    fn covers(tls: &TlsConfig, hostname: &str) -> bool {
+        server_identity_problem(tls, hostname).is_none()
+    }
+
+    /// A CA and a working server certificate for `hostname` in a new directory.
+    fn issued(hostname: &str) -> (TempDir, TlsConfig) {
         let dir = TempDir::new().unwrap();
         let tls = TlsConfig::with_defaults(dir.path());
-        init_ca(&tls.ca_cert, &tls.ca_key, "Test").unwrap();
+        certificates_step(&tls, &nobody(), &SetupArgs::default(), hostname).unwrap();
+        assert!(covers(&tls, hostname));
+        (dir, tls)
+    }
+
+    /// Replace the server certificate with one that expired yesterday, from the same CA.
+    fn expire(tls: &TlsConfig, hostname: &str) {
+        let now = ::time::OffsetDateTime::now_utc();
+        crate::auth::issue_server_cert(
+            &tls.ca_cert,
+            &tls.ca_key,
+            &tls.server_cert,
+            &tls.server_key,
+            hostname,
+            now - ::time::Duration::days(30),
+            now - ::time::Duration::days(1),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_server_cert_names() {
+        let (_dir, tls) = issued("10.0.0.5");
         let generate = |hostname| {
             generate_server_cert(
                 &tls.ca_cert,
@@ -1411,20 +1486,171 @@ mod tests {
         };
 
         // an IP is an IP name, a DNS name with those characters wouldn't match it
-        generate("10.0.0.5").unwrap();
-        assert!(server_cert_covers(&tls.server_cert, "10.0.0.5").unwrap());
-        assert!(server_cert_covers(&tls.server_cert, "localhost").unwrap());
-        assert!(!server_cert_covers(&tls.server_cert, "10.0.0.6").unwrap());
+        assert_eq!(server_cert_name(&tls.server_cert).unwrap(), "10.0.0.5");
+        assert!(covers(&tls, "localhost"));
+        assert!(!covers(&tls, "10.0.0.6"));
 
         generate("::1").unwrap();
-        assert!(server_cert_covers(&tls.server_cert, "::1").unwrap());
+        assert!(covers(&tls, "::1"));
+        assert_eq!(server_cert_name(&tls.server_cert).unwrap(), "::1");
 
-        generate("CI.Local").unwrap();
-        assert!(server_cert_covers(&tls.server_cert, "ci.local").unwrap());
-        assert!(!server_cert_covers(&tls.server_cert, "other.local").unwrap());
+        generate("ci.local").unwrap();
+        assert!(covers(&tls, "CI.Local"));
+        assert!(!covers(&tls, "other.local"));
+        assert_eq!(server_cert_name(&tls.server_cert).unwrap(), "ci.local");
 
         // an error, it used to panic
         assert!(generate("bad\u{e9}host").is_err());
+    }
+
+    #[test]
+    fn test_expired_certificate_is_a_problem_and_gets_replaced() {
+        let (_dir, tls) = issued("ci.local");
+        expire(&tls, "ci.local");
+        assert!(
+            server_identity_problem(&tls, "ci.local")
+                .unwrap()
+                .to_lowercase()
+                .contains("expired")
+        );
+        // what it's for can still be read, so a reissue keeps the name
+        assert_eq!(server_cert_name(&tls.server_cert).unwrap(), "ci.local");
+
+        certificates_step(&tls, &nobody(), &SetupArgs::default(), "ci.local").unwrap();
+        assert!(covers(&tls, "ci.local"));
+    }
+
+    #[test]
+    fn test_missing_key_gets_the_certificate_replaced() {
+        let (_dir, tls) = issued("ci.local");
+        std::fs::remove_file(&tls.server_key).unwrap();
+        assert!(!covers(&tls, "ci.local"));
+
+        certificates_step(&tls, &nobody(), &SetupArgs::default(), "ci.local").unwrap();
+        assert!(covers(&tls, "ci.local"));
+    }
+
+    #[test]
+    fn test_another_certificates_key_gets_the_certificate_replaced() {
+        let (_dir, tls) = issued("ci.local");
+        let (_other_dir, other) = issued("ci.local");
+        std::fs::copy(&other.server_key, &tls.server_key).unwrap();
+        let problem = server_identity_problem(&tls, "ci.local").unwrap();
+        assert!(problem.contains("isn't the key of"), "{problem}");
+
+        certificates_step(&tls, &nobody(), &SetupArgs::default(), "ci.local").unwrap();
+        assert!(covers(&tls, "ci.local"));
+    }
+
+    #[test]
+    fn test_garbled_certificate_gets_replaced() {
+        let (_dir, tls) = issued("ci.local");
+        std::fs::write(&tls.server_cert, "-----BEGIN CERTIFICATE-----\nnope\n").unwrap();
+        assert!(!covers(&tls, "ci.local"));
+        assert_eq!(server_cert_name(&tls.server_cert), None);
+
+        certificates_step(&tls, &nobody(), &SetupArgs::default(), "ci.local").unwrap();
+        assert!(covers(&tls, "ci.local"));
+    }
+
+    #[test]
+    fn test_certificate_from_a_replaced_ca_gets_replaced() {
+        let (_dir, tls) = issued("ci.local");
+        let (_other_dir, other) = issued("ci.local");
+        std::fs::copy(&other.ca_cert, &tls.ca_cert).unwrap();
+        std::fs::copy(&other.ca_key, &tls.ca_key).unwrap();
+        assert!(!covers(&tls, "ci.local"));
+
+        certificates_step(&tls, &nobody(), &SetupArgs::default(), "ci.local").unwrap();
+        assert!(covers(&tls, "ci.local"));
+    }
+
+    #[test]
+    fn test_ca_key_that_cant_sign_for_the_ca_is_an_error() {
+        let (_dir, tls) = issued("ci.local");
+        let (_other_dir, other) = issued("ci.local");
+        std::fs::copy(&other.ca_key, &tls.ca_key).unwrap();
+        expire(&tls, "ci.local");
+
+        // the new certificate can't verify, setup mustn't say it worked
+        let err = certificates_step(&tls, &nobody(), &SetupArgs::default(), "ci.local");
+        assert!(err.unwrap_err().to_string().contains("doesn't work either"));
+    }
+
+    #[test]
+    fn test_certificates_from_elsewhere_are_left_alone() {
+        for elsewhere in [
+            |tls: &mut TlsConfig| tls.server_use_native_roots = true,
+            |tls: &mut TlsConfig| tls.server_trust_mode = ServerTrustMode::Chain,
+            |tls: &mut TlsConfig| tls.server_ca_cert = Some("/public/bundle.pem".into()),
+        ] {
+            let (_dir, mut tls) = issued("ci.local");
+            elsewhere(&mut tls);
+            assert!(managed_elsewhere(&tls));
+            expire(&tls, "ci.local");
+            let cert = std::fs::read(&tls.server_cert).unwrap();
+
+            certificates_step(&tls, &nobody(), &SetupArgs::default(), "ci.local").unwrap();
+            assert_eq!(std::fs::read(&tls.server_cert).unwrap(), cert);
+        }
+    }
+
+    #[test]
+    fn test_server_ca_set_to_our_own_ca_isnt_elsewhere() {
+        let (_dir, mut tls) = issued("ci.local");
+        tls.server_ca_cert = Some(tls.ca_cert.clone());
+        assert!(!managed_elsewhere(&tls));
+    }
+
+    fn kept(url: &str, tls: TlsConfig) -> Config {
+        Config {
+            github: None,
+            forges: Vec::new(),
+            grpc: GrpcConfig::default(),
+            tls,
+            database: DatabaseConfig::default(),
+            admin: AdminConfig {
+                coordinator_url: url.to_string(),
+                ..AdminConfig::default()
+            },
+            metrics: MetricsConfig::default(),
+            provisioning: ProvisioningConfig::default(),
+            runner_scope: None,
+            runner_group: None,
+        }
+    }
+
+    #[test]
+    fn test_kept_hostname() {
+        let ask = nobody();
+        let args = SetupArgs::default();
+
+        // the certificate's name wins, an earlier --hostname mustn't get undone by an older URL
+        let (_dir, tls) = issued("new.local");
+        let config = kept("https://old.local:9443", tls);
+        assert_eq!(kept_hostname(&ask, &args, &config).unwrap(), "new.local");
+
+        // an expired one still says what it's for
+        expire(&config.tls, "new.local");
+        assert_eq!(kept_hostname(&ask, &args, &config).unwrap(), "new.local");
+
+        // the flag beats both
+        let flag = SetupArgs {
+            hostname: Some("flag.local".into()),
+            ..Default::default()
+        };
+        assert_eq!(kept_hostname(&ask, &flag, &config).unwrap(), "flag.local");
+
+        // no certificate to go on: the URL, brackets off an IPv6 address
+        let empty = TempDir::new().unwrap();
+        let none = TlsConfig::with_defaults(empty.path());
+        let config = kept("https://[fe80::1]:9443", none.clone());
+        assert_eq!(kept_hostname(&ask, &args, &config).unwrap(), "fe80::1");
+
+        // the default URL isn't anyone's choice, so this is the system's name, not localhost by accident
+        let config = kept(&AdminConfig::default().coordinator_url, none);
+        let name = kept_hostname(&ask, &args, &config).unwrap();
+        assert_eq!(name, hostname_step(&ask, &args).unwrap());
     }
 
     #[test]
@@ -1445,6 +1671,6 @@ mod tests {
         certificates_step(&tls, &ask, &args, "10.0.0.5").unwrap();
         assert_ne!(std::fs::read(&tls.server_cert).unwrap(), cert);
         assert_eq!(std::fs::read(&tls.ca_key).unwrap(), ca);
-        assert!(server_cert_covers(&tls.server_cert, "10.0.0.5").unwrap());
+        assert!(covers(&tls, "10.0.0.5"));
     }
 }
