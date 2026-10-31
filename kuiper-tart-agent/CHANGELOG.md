@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-tart-agent-v0.7.0 - 2026-10-31
+#### Features
+- **(metrics)** show where each runner install came from - (158f52b) - *jfro*
+- **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
+
+#### Bug Fixes
+- **(agents)** [**breaking**] check GitHub runner downloads like Forgejo's - (36797f7) - *jfro*
+
+- - -
 ## kuiper-tart-agent-v0.6.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*

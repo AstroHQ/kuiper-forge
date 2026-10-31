@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-proxmox-agent-v0.6.0 - 2026-10-31
+#### Features
+- **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
+
+#### Bug Fixes
+- **(proxmox-agent)** restart the service after a package upgrade - (708e52a) - *jfro*
+
+- - -
 ## kuiper-proxmox-agent-v0.5.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*

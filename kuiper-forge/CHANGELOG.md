@@ -2,6 +2,22 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kuiper-forge-v0.8.1 - 2026-10-31
+#### Features
+- **(admin)** flag agents running an out-of-date version - (0707562) - *jfro*
+- **(admin)** add a recent errors page across all agents - (49fe4f9) - *jfro*
+- **(coordinator)** add a setup command for the first run - (eb8ae0a) - *jfro*
+- **(metrics)** show where each runner install came from - (158f52b) - *jfro*
+
+#### Bug Fixes
+- **(admin)** follow every page of GitHub releases for agent updates - (7a3d524) - *jfro*
+- **(admin)** count unknown failure kinds in the all agents error total - (33b1c0f) - *jfro*
+- **(coordinator)** make setup check certificates are usable - (f046479) - *jfro*
+
+#### Performance Improvements
+- **(db)** index agent_failures by occurred_at for the recent errors page - (0bc193b) - *jfro*
+
+- - -
 ## kuiper-forge-v0.8.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
