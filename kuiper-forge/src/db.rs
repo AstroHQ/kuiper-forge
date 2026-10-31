@@ -152,6 +152,22 @@ mod tests {
         let _pool = db.pool();
     }
 
+    /// The occurred_at index survives the sqlite rebuild of agent_failures on a fresh database
+    #[tokio::test]
+    async fn test_agent_failures_occurred_at_index_exists() {
+        let temp = TempDir::new().unwrap();
+        let db = Database::new(&DatabaseConfig::default(), temp.path())
+            .await
+            .unwrap();
+        let found: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_agent_failures_occurred_at'",
+        )
+        .fetch_optional(&db.pool())
+        .await
+        .unwrap();
+        assert!(found.is_some());
+    }
+
     /// A database created before job keys: numeric github job ids get the "github:" prefix and
     /// runners stay readable, with no forge recorded.
     #[tokio::test]
