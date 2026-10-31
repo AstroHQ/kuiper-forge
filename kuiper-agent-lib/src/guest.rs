@@ -15,7 +15,8 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::forgejo_runner;
-use crate::github_runner::{self, Arch, RunnerConfigBuilder};
+use crate::github_runner::{Arch, RunnerConfigBuilder};
+use crate::runner_cache::RunnerCache;
 use crate::ssh::{CommandOutput, SshError, SshSession};
 use crate::vm_agent::{JobContext, step};
 
@@ -72,7 +73,7 @@ pub struct Job<'a> {
     pub forgejo: Option<&'a ForgejoRunner>,
 }
 
-/// Which runner versions to install, from the agent's config.
+/// Which runner versions to install, from the agent's config, and the agent's copies of them.
 pub struct RunnerVersions<'a> {
     /// GitHub runner version, or empty/"latest"
     pub github: &'a str,
@@ -80,6 +81,7 @@ pub struct RunnerVersions<'a> {
     pub forgejo: &'a str,
     /// forgejo-runner download URL template
     pub forgejo_url: &'a str,
+    pub cache: &'a RunnerCache,
 }
 
 /// A runner that's installed and set up for the job, ready for [`Guest::run`].
@@ -159,7 +161,7 @@ impl<'s> Guest<'s> {
                 self.prepare_forgejo(forgejo, job.labels, versions, ctx)
                     .await
             }
-            None => self.prepare_github(job, versions.github, ctx).await,
+            None => self.prepare_github(job, versions, ctx).await,
         }
     }
 
@@ -187,7 +189,7 @@ impl<'s> Guest<'s> {
     async fn prepare_github(
         &mut self,
         job: &Job<'_>,
-        version: &str,
+        versions: &RunnerVersions<'_>,
         ctx: &JobContext,
     ) -> Result<PreparedRunner> {
         let vm = &self.vm;
@@ -199,7 +201,7 @@ impl<'s> Guest<'s> {
             .await?;
         if check.stdout.trim() != "installed" {
             ctx.step(step::INSTALL);
-            let version = github_runner::resolve_version(version).await;
+            let version = versions.cache.github_version(versions.github).await;
 
             // Windows is x64 only for now; elsewhere ask uname
             let arch = if self.shell.is_windows() {
@@ -215,27 +217,38 @@ impl<'s> Guest<'s> {
                 version,
                 arch.as_str()
             );
-            let install = self
-                .session
-                .execute(&builder.install_command(&version, arch))
-                .await?;
-            if install.exit_code != 0 {
-                error!(
+            let source = versions
+                .cache
+                .install_github(self.session, &builder, &version, arch)
+                .await;
+            ctx.install_source(source);
+            if !source.installed() {
+                let sha256 = versions
+                    .cache
+                    .github_checksum(&version, builder.platform(), arch)
+                    .await;
+                let install = self
+                    .session
+                    .execute(&builder.install_command(&version, arch, sha256.as_deref()))
+                    .await?;
+                if install.exit_code != 0 {
+                    error!(
+                        local_only = tracing::field::Empty,
+                        "Runner installation failed: stdout={}, stderr={}",
+                        install.stdout,
+                        install.stderr
+                    );
+                    return Err(RunnerError::Runner(format!(
+                        "Failed to install runner (exit code {})",
+                        install.exit_code
+                    )));
+                }
+                info!(
                     local_only = tracing::field::Empty,
-                    "Runner installation failed: stdout={}, stderr={}",
-                    install.stdout,
-                    install.stderr
+                    "Runner installed successfully: {}",
+                    install.stdout.trim()
                 );
-                return Err(RunnerError::Runner(format!(
-                    "Failed to install runner (exit code {})",
-                    install.exit_code
-                )));
             }
-            info!(
-                local_only = tracing::field::Empty,
-                "Runner installed successfully: {}",
-                install.stdout.trim()
-            );
             ctx.step(step::SETUP);
         } else {
             debug!("GitHub Actions runner already installed on {}", vm);
@@ -508,31 +521,38 @@ impl<'s> Guest<'s> {
                 arch.as_str(),
                 url
             );
-            let install_cmd = if is_windows {
-                forgejo_runner::windows_install_command(&url, win_dir)
-            } else {
-                forgejo_runner::install_command(&url, &version, os, arch)
-            };
-            let install = self.session.execute(&install_cmd).await?;
-            if install.exit_code != 0 {
-                error!(
+            let source = versions
+                .cache
+                .install_forgejo(self.session, &url, &version, os, arch)
+                .await;
+            ctx.install_source(source);
+            if !source.installed() {
+                let install_cmd = if is_windows {
+                    forgejo_runner::windows_install_command(&url, win_dir)
+                } else {
+                    forgejo_runner::install_command(&url, &version, os, arch)
+                };
+                let install = self.session.execute(&install_cmd).await?;
+                if install.exit_code != 0 {
+                    error!(
+                        local_only = tracing::field::Empty,
+                        "forgejo-runner installation failed on {}: stdout={}, stderr={}",
+                        vm,
+                        install.stdout,
+                        install.stderr
+                    );
+                    return Err(RunnerError::Runner(format!(
+                        "Failed to install forgejo-runner v{version} (exit code {})",
+                        install.exit_code
+                    )));
+                }
+                info!(
                     local_only = tracing::field::Empty,
-                    "forgejo-runner installation failed on {}: stdout={}, stderr={}",
+                    "forgejo-runner installed on {}: {}",
                     vm,
-                    install.stdout,
-                    install.stderr
+                    install.stdout.trim()
                 );
-                return Err(RunnerError::Runner(format!(
-                    "Failed to install forgejo-runner v{version} (exit code {})",
-                    install.exit_code
-                )));
             }
-            info!(
-                local_only = tracing::field::Empty,
-                "forgejo-runner installed on {}: {}",
-                vm,
-                install.stdout.trim()
-            );
             ctx.step(step::SETUP);
         } else {
             debug!("forgejo-runner already installed on {}", vm);

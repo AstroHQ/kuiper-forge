@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use kuiper_agent_lib::runner_cache::RunnerCache;
 use kuiper_agent_lib::vm_agent::{AgentInfo, RunOptions, VmAgent, VmBackend};
 use kuiper_agent_lib::{AgentCertStore, AgentConfig, LogCapture};
 use tracing::{error, info, warn};
@@ -231,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
         config.agent.labels.clone(),
         SshConfig::from_config(&config.tart.ssh),
         data_dir.join("logs"),
+        RunnerCache::new(data_dir.join("runner-cache"), &config.runner_cache)?,
     ));
     info!("Capabilities: {:?}", backend.capabilities());
 

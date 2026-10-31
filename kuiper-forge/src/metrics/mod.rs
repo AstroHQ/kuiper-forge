@@ -122,6 +122,9 @@ pub struct RunnerRun {
     pub error: Option<String>,
     pub image: Option<String>,
     pub failed_phase: Option<String>,
+    /// Where the agent got the runner from, see `RunnerTimings` in the proto. None if the image had it or for older
+    /// agents, `summary::by_install` tells those apart
+    pub install_source: Option<String>,
     /// The agent's step timings in millis (create, boot, install, setup, job, destroy, ...). A missing step didn't
     /// run or wasn't reported, 0 means it was skipped
     pub steps: BTreeMap<String, i64>,
@@ -256,6 +259,7 @@ impl MetricsStore {
         let result = sqlx::query(sql::SET_RUNNER_TIMINGS)
             .bind(text(&timings.image))
             .bind(text(&timings.failed_phase))
+            .bind(text(&timings.install_source))
             .bind(steps_json(&steps))
             .bind(runner_name)
             .execute(&self.pool)
@@ -380,6 +384,7 @@ impl MetricsStore {
             .bind(&run.image)
             .bind(&run.failed_phase)
             .bind((!run.steps.is_empty()).then(|| steps_json(&run.steps)))
+            .bind(&run.install_source)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -468,6 +473,7 @@ fn row_to_run(row: &DbRow) -> RunnerRun {
         error: row.get("error"),
         image: row.get("image"),
         failed_phase: row.get("failed_phase"),
+        install_source: row.get("install_source"),
         steps: row
             .get::<Option<String>, _>("steps")
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -554,6 +560,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v))
                     .collect(),
                     image: "macos-15".into(),
+                    install_source: "hit".into(),
                     ..Default::default()
                 },
             )
@@ -585,6 +592,7 @@ mod tests {
         assert_eq!(r.error.as_deref(), Some("boom"));
         assert_eq!(r.image.as_deref(), Some("macos-15"));
         assert_eq!(r.failed_phase.as_deref(), Some("job"));
+        assert_eq!(r.install_source.as_deref(), Some("hit"));
         // merged: the later event's steps added or replaced, the rest kept
         let steps: Vec<(&str, i64)> = r.steps.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         assert_eq!(

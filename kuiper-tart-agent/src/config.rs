@@ -1,5 +1,6 @@
 //! Configuration for the Tart agent.
 
+use kuiper_agent_lib::runner_cache::RunnerCacheConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,9 @@ pub struct Config {
     /// Reconnection settings (optional)
     #[serde(default)]
     pub reconnect: ReconnectConfig,
+    /// Runner download cache settings (optional)
+    #[serde(default)]
+    pub runner_cache: RunnerCacheConfig,
     /// Host environment settings (optional)
     #[serde(default)]
     pub host: HostConfig,

@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 
 use crate::guest::Job;
 use crate::labels::Capability;
+use crate::runner_cache::InstallSource;
 use crate::runtime::{self, EventSender};
 use crate::{AgentCertStore, AgentConfig, LogCapture};
 
@@ -143,6 +144,12 @@ impl JobContext {
     pub fn skip_step(&self, step: &str) {
         self.clock.skip(step);
     }
+
+    /// Where the runner came from, for the metrics page. Not needed if the image has it, that's a skipped
+    /// [`step::INSTALL`].
+    pub fn install_source(&self, source: InstallSource) {
+        self.clock.install_source(source);
+    }
 }
 
 /// Names of the steps a runner's time is split into, see `RunnerTimings` in the proto. Backends can time their own
@@ -150,7 +157,7 @@ impl JobContext {
 pub mod step {
     pub const CREATE: &str = "create";
     pub const BOOT: &str = "boot";
-    /// Downloading the runner, inside setup. Skipped when the image already has it
+    /// Getting the runner onto the VM, inside setup. Skipped when the image already has it
     pub const INSTALL: &str = "install";
     pub const SETUP: &str = "setup";
     pub const JOB: &str = "job";
@@ -205,6 +212,10 @@ impl PhaseClock {
     fn skip(&self, step: &str) {
         let mut state = self.state.lock().unwrap();
         state.timings.steps_ms.entry(step.to_string()).or_default();
+    }
+
+    fn install_source(&self, source: InstallSource) {
+        self.state.lock().unwrap().timings.install_source = source.as_str().to_string();
     }
 
     /// The current step failed. Only the first failure is kept: the destroy after a failed boot doesn't replace it.
@@ -881,6 +892,14 @@ mod tests {
         clock.skip(step::INSTALL);
         clock.next(Some(step::JOB));
         assert_eq!(ms(&clock.timings(), step::INSTALL), Some(0));
+    }
+
+    #[test]
+    fn test_phase_clock_install_source() {
+        let clock = PhaseClock::new("image");
+        assert_eq!(clock.timings().install_source, "");
+        clock.install_source(InstallSource::FellBack);
+        assert_eq!(clock.timings().install_source, "fell_back");
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::ssh;
 use async_trait::async_trait;
 use kuiper_agent_lib::guest::{Guest, Job, RunnerVersions};
 use kuiper_agent_lib::labels::{self, Capability};
+use kuiper_agent_lib::runner_cache::RunnerCache;
 use kuiper_agent_lib::vm_agent::{BackendResult, JobContext, Limit, LimitNames, VmBackend};
 use kuiper_agent_proto::CreateRunnerCommand;
 use std::collections::HashMap;
@@ -47,11 +48,12 @@ pub struct LibvirtBackend {
     ip_source: IpSource,
     /// By image path, as [`VmBackend::select_image`] gives it
     images: HashMap<String, ImageVm>,
+    runner_cache: RunnerCache,
 }
 
 impl LibvirtBackend {
     /// Fails if a `domain_template` can't be read.
-    pub fn new(config: &Config) -> Result<Self> {
+    pub fn new(config: &Config, runner_cache: RunnerCache) -> Result<Self> {
         let vm = &config.vm;
         let mappings = vm.image_mappings.iter().map(|m| {
             (
@@ -100,6 +102,7 @@ impl LibvirtBackend {
             bridge: config.libvirt.bridge.clone(),
             ip_source: config.libvirt.ip_source,
             images,
+            runner_cache,
         })
     }
 
@@ -176,6 +179,7 @@ impl LibvirtBackend {
             github: &self.vm_config.runner_version,
             forgejo: &self.vm_config.forgejo_runner_version,
             forgejo_url: &self.vm_config.forgejo_runner_url,
+            cache: &self.runner_cache,
         };
         let runner = guest.prepare(job, &versions, ctx).await?;
         ctx.runner_started().await;

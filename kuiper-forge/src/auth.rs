@@ -661,13 +661,35 @@ pub fn init_ca(ca_cert_path: &Path, ca_key_path: &Path, org_name: &str) -> Resul
     Ok(())
 }
 
-/// Generate a server certificate signed by the CA
+/// Generate a server certificate signed by the CA, valid for a year
 pub fn generate_server_cert(
     ca_cert_path: &Path,
     ca_key_path: &Path,
     server_cert_path: &Path,
     server_key_path: &Path,
     hostname: &str,
+) -> Result<()> {
+    let now = ::time::OffsetDateTime::now_utc();
+    issue_server_cert(
+        ca_cert_path,
+        ca_key_path,
+        server_cert_path,
+        server_key_path,
+        hostname,
+        now,
+        now + ::time::Duration::days(365),
+    )
+}
+
+/// [`generate_server_cert`] with the dates spelled out, so tests can make an expired one.
+pub(crate) fn issue_server_cert(
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+    server_cert_path: &Path,
+    server_key_path: &Path,
+    hostname: &str,
+    not_before: ::time::OffsetDateTime,
+    not_after: ::time::OffsetDateTime,
 ) -> Result<()> {
     // Load CA cert and key
     let ca_cert_pem = fs::read_to_string(ca_cert_path)
@@ -700,14 +722,21 @@ pub fn generate_server_cert(
     dn.push(DnType::OrganizationName, "CI Runner Coordinator");
     params.distinguished_name = dn;
 
-    // Set validity (1 year)
-    let now = ::time::OffsetDateTime::now_utc();
-    params.not_before = now;
-    params.not_after = now + ::time::Duration::days(365);
+    params.not_before = not_before;
+    params.not_after = not_after;
 
-    // Add SAN for hostname
+    // Add SAN for hostname. An IP has to be an IP SAN, TLS clients don't match one against DNS names
+    let san = match hostname.parse::<std::net::IpAddr>() {
+        Ok(ip) => SanType::IpAddress(ip),
+        Err(_) => SanType::DnsName(
+            hostname
+                .to_string()
+                .try_into()
+                .map_err(|e| anyhow!("Invalid hostname '{hostname}': {e}"))?,
+        ),
+    };
     params.subject_alt_names = vec![
-        SanType::DnsName(hostname.to_string().try_into().unwrap()),
+        san,
         SanType::DnsName("localhost".to_string().try_into().unwrap()),
     ];
 
@@ -752,7 +781,7 @@ pub fn export_ca_cert(ca_cert_path: &Path) -> Result<String> {
 }
 
 /// Write a private key with restricted permissions (0600 on Unix)
-fn write_private_key(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_private_key(path: &Path, content: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

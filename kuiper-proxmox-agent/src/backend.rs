@@ -7,6 +7,7 @@ use crate::ssh;
 use async_trait::async_trait;
 use kuiper_agent_lib::guest::{Guest, Job, RunnerVersions};
 use kuiper_agent_lib::labels::{self, Capability};
+use kuiper_agent_lib::runner_cache::RunnerCache;
 use kuiper_agent_lib::vm_agent::{BackendResult, JobContext, Limit, LimitNames, VmBackend};
 use kuiper_agent_proto::CreateRunnerCommand;
 use kuiper_proxmox_api::ProxmoxVEAPI;
@@ -24,6 +25,7 @@ pub struct ProxmoxBackend {
     labels: Vec<String>,
     vm_config: VmConfig,
     ssh_config: SshConfig,
+    runner_cache: RunnerCache,
 }
 
 impl ProxmoxBackend {
@@ -32,12 +34,14 @@ impl ProxmoxBackend {
         labels: Vec<String>,
         vm_config: VmConfig,
         ssh_config: SshConfig,
+        runner_cache: RunnerCache,
     ) -> Self {
         Self {
             proxmox,
             labels,
             vm_config,
             ssh_config,
+            runner_cache,
         }
     }
 
@@ -110,6 +114,7 @@ impl ProxmoxBackend {
             github: &self.vm_config.runner_version,
             forgejo: &self.vm_config.forgejo_runner_version,
             forgejo_url: &self.vm_config.forgejo_runner_url,
+            cache: &self.runner_cache,
         };
         let runner = guest.prepare(job, &versions, ctx).await?;
         ctx.runner_started().await;
@@ -281,6 +286,7 @@ mod tests {
             vec!["proxmox".to_string()],
             toml::from_str(vm_config).unwrap(),
             toml::from_str("").unwrap(),
+            RunnerCache::new(std::env::temp_dir(), &Default::default()).unwrap(),
         )
     }
 

@@ -60,6 +60,7 @@ pub const SET_RUNNER_TIMINGS: &str = r#"
     UPDATE runner_runs SET
         image = COALESCE(?, image),
         failed_phase = COALESCE(?, failed_phase),
+        install_source = COALESCE(?, install_source),
         steps = json_patch(COALESCE(steps, '{}'), ?)
     WHERE runner_name = ?
 "#;
@@ -69,8 +70,9 @@ pub const SET_RUNNER_TIMINGS: &str = r#"
     UPDATE runner_runs SET
         image = COALESCE($1, image),
         failed_phase = COALESCE($2, failed_phase),
-        steps = (COALESCE(steps, '{}')::jsonb || $3::jsonb)::text
-    WHERE runner_name = $4
+        install_source = COALESCE($3, install_source),
+        steps = (COALESCE(steps, '{}')::jsonb || $4::jsonb)::text
+    WHERE runner_name = $5
 "#;
 
 // sqlx only takes static strings, so the column list is spelled out in each
@@ -78,7 +80,7 @@ pub const SET_RUNNER_TIMINGS: &str = r#"
 pub const SELECT_RUNNER_RUNS_SINCE: &str = r#"
     SELECT runner_name, agent_id, hostname, agent_type, forge, job_id, repository, workflow_name, job_name, pool,
            labels, requested_at, acked_at, started_at, job_started_at, finished_at, outcome, error, image,
-           failed_phase, steps
+           failed_phase, steps, install_source
     FROM runner_runs WHERE requested_at >= ? ORDER BY requested_at
 "#;
 
@@ -86,7 +88,7 @@ pub const SELECT_RUNNER_RUNS_SINCE: &str = r#"
 pub const SELECT_RUNNER_RUNS_SINCE: &str = r#"
     SELECT runner_name, agent_id, hostname, agent_type, forge, job_id, repository, workflow_name, job_name, pool,
            labels, requested_at, acked_at, started_at, job_started_at, finished_at, outcome, error, image,
-           failed_phase, steps
+           failed_phase, steps, install_source
     FROM runner_runs WHERE requested_at >= $1 ORDER BY requested_at
 "#;
 
@@ -198,16 +200,16 @@ pub const DELETE_JOB_RUNS_BEFORE: &str = "DELETE FROM job_runs WHERE seen_at < $
 pub const INSERT_RUNNER_RUN_ROW: &str = r#"
     INSERT INTO runner_runs (runner_name, agent_id, hostname, agent_type, forge, job_id, repository, workflow_name,
                              job_name, pool, labels, requested_at, acked_at, started_at, job_started_at, finished_at,
-                             outcome, error, image, failed_phase, steps)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             outcome, error, image, failed_phase, steps, install_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#;
 
 #[cfg(feature = "postgres")]
 pub const INSERT_RUNNER_RUN_ROW: &str = r#"
     INSERT INTO runner_runs (runner_name, agent_id, hostname, agent_type, forge, job_id, repository, workflow_name,
                              job_name, pool, labels, requested_at, acked_at, started_at, job_started_at, finished_at,
-                             outcome, error, image, failed_phase, steps)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                             outcome, error, image, failed_phase, steps, install_source)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 "#;
 
 #[cfg(feature = "sqlite")]

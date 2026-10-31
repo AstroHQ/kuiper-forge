@@ -200,6 +200,7 @@ pub fn blank_config(coordinator: config::CoordinatorConfig, tls: config::TlsConf
         reconnect: config::ReconnectConfig::default(),
         host: config::HostConfig::default(),
         logging: config::LoggingConfig::default(),
+        runner_cache: Default::default(),
     }
 }
 

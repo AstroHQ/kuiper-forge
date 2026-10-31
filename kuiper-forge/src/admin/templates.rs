@@ -465,6 +465,7 @@ pub struct MetricsTemplate {
     pub steps: Vec<StepColumn>,
     pub agents: Vec<RunGroupView>,
     pub images: Vec<RunGroupView>,
+    pub installs: Vec<InstallView>,
     pub jobs: JobSummaryView,
     /// Chart series, JSON with `<` escaped so it can sit in a script tag
     pub chart_json: String,
@@ -513,6 +514,16 @@ pub struct RunGroupView {
     pub provision: StatView,
     /// Same order as the page's step columns
     pub steps: Vec<StepView>,
+}
+
+/// One image's runner installs from one source
+pub struct InstallView {
+    pub image: String,
+    pub source: String,
+    /// What the source means, for its tooltip
+    pub source_title: &'static str,
+    pub runs: usize,
+    pub install: StatView,
 }
 
 /// Where queued jobs spent their time

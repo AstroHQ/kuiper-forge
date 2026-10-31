@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use chrono::Local;
 use kuiper_agent_lib::forgejo_runner;
-use kuiper_agent_lib::github_runner::{self, Arch, RunnerConfigBuilder};
+use kuiper_agent_lib::github_runner::{Arch, RunnerConfigBuilder};
+use kuiper_agent_lib::runner_cache::RunnerCache;
 use kuiper_agent_lib::ssh::{CommandOutput, SshClient, SshSession};
 use kuiper_agent_lib::vm_agent::{JobContext, step};
 use tokio::fs::OpenOptions;
@@ -169,12 +170,13 @@ fn runner_commands(os: GuestOs) -> RunnerConfigBuilder {
 }
 
 /// Ensure the GitHub Actions runner is installed on the VM.
-/// Downloads and extracts the runner if not present, timed as its own step in `ctx`.
-/// If `runner_version` is empty, fetches the latest version from GitHub.
+/// Installs the runner if not present, from `cache` or else having the VM download it, timed as
+/// its own step in `ctx`. If `runner_version` is empty or "latest", uses the latest version.
 pub async fn ensure_runner_installed(
     ip: Ipv4Addr,
     config: &SshConfig,
     runner_version: &str,
+    cache: &RunnerCache,
     os: GuestOs,
     ctx: &JobContext,
 ) -> Result<()> {
@@ -193,7 +195,7 @@ pub async fn ensure_runner_installed(
     }
     ctx.step(step::INSTALL);
 
-    let version = github_runner::resolve_version(runner_version).await;
+    let version = cache.github_version(runner_version).await;
 
     // Detect architecture
     let arch_output = ssh_exec(ip, config, "uname -m").await?;
@@ -212,7 +214,21 @@ pub async fn ensure_runner_installed(
         ip
     );
 
-    match ssh_exec(ip, config, &commands.install_command(&version, arch)).await {
+    let mut session = connect(ip, config).await?;
+    let source = cache
+        .install_github(&mut session, &commands, &version, arch)
+        .await;
+    ctx.install_source(source);
+    if source.installed() {
+        ctx.step(step::SETUP);
+        return Ok(());
+    }
+
+    let sha256 = cache
+        .github_checksum(&version, commands.platform(), arch)
+        .await;
+    let install = commands.install_command(&version, arch, sha256.as_deref());
+    match ssh_exec(ip, config, &install).await {
         Ok(output) => {
             info!("GitHub Actions runner installed on {}", ip);
             debug!(
@@ -241,6 +257,7 @@ pub async fn configure_runner(
     runner_scope_url: &str,
     runner_name: &str,
     runner_version: &str,
+    cache: &RunnerCache,
     os: GuestOs,
     ctx: &JobContext,
 ) -> Result<()> {
@@ -260,7 +277,7 @@ pub async fn configure_runner(
     }
 
     // Ensure runner is installed first
-    ensure_runner_installed(ip, config, runner_version, os, ctx).await?;
+    ensure_runner_installed(ip, config, runner_version, cache, os, ctx).await?;
 
     info!(
         "Configuring runner {} with labels: {} (scope: {})",
@@ -313,12 +330,14 @@ pub enum RunnerProgram {
 
 /// Install forgejo-runner on the VM if needed and write its token file and `run-job.sh`
 /// for one Forgejo job attempt.
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare_forgejo_runner(
     ip: Ipv4Addr,
     config: &SshConfig,
     job: &forgejo_runner::OneJob<'_>,
     version: &str,
     url_template: &str,
+    cache: &RunnerCache,
     os: GuestOs,
     ctx: &JobContext,
 ) -> Result<()> {
@@ -350,27 +369,34 @@ pub async fn prepare_forgejo_runner(
                 ip,
                 url
             );
-            match ssh_exec(
-                ip,
-                config,
-                &forgejo_runner::install_command(&url, version, fr_os, arch),
-            )
-            .await
-            {
-                Ok(output) => {
-                    info!("forgejo-runner installed on {}", ip);
-                    debug!(
-                        local_only = tracing::field::Empty,
-                        "Install output: {}", output
-                    );
-                    ctx.step(step::SETUP);
-                }
-                Err(e) => {
-                    error!("Failed to install forgejo-runner on {}: {}", ip, e);
-                    log_command_stderr(&e);
-                    return Err(e);
+            let mut session = connect(ip, config).await?;
+            let source = cache
+                .install_forgejo(&mut session, &url, version, fr_os, arch)
+                .await;
+            ctx.install_source(source);
+            if !source.installed() {
+                match ssh_exec(
+                    ip,
+                    config,
+                    &forgejo_runner::install_command(&url, version, fr_os, arch),
+                )
+                .await
+                {
+                    Ok(output) => {
+                        info!("forgejo-runner installed on {}", ip);
+                        debug!(
+                            local_only = tracing::field::Empty,
+                            "Install output: {}", output
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to install forgejo-runner on {}: {}", ip, e);
+                        log_command_stderr(&e);
+                        return Err(e);
+                    }
                 }
             }
+            ctx.step(step::SETUP);
         }
     }
 

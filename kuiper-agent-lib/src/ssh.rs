@@ -14,7 +14,9 @@ use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{HashAlg, PublicKeyOrCertificate};
 
 pub use russh::keys::PrivateKey;
+use russh_sftp::client::SftpSession;
 use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -38,6 +40,9 @@ pub enum SshError {
     /// output and the message ends up in uploaded logs.
     #[error("command failed (exit code: {exit_code})")]
     Command { exit_code: u32, stderr: String },
+
+    #[error("upload failed: {0}")]
+    Upload(String),
 }
 
 pub type Result<T, E = SshError> = std::result::Result<T, E>;
@@ -263,6 +268,9 @@ async fn rsa_hash<H: Handler>(session: &Handle<H>, key: &PrivateKey) -> Option<H
     }
 }
 
+/// Read size for [`SshSession::upload`].
+const UPLOAD_BUFFER: usize = 256 * 1024;
+
 /// An authenticated SSH session to a VM. Each command runs on its own channel.
 pub struct SshSession {
     handle: Handle<ClientHandler>,
@@ -327,6 +335,55 @@ impl SshSession {
             output.stderr.len()
         );
         Ok(output)
+    }
+
+    /// Copy a local file to the VM over SFTP, replacing `remote`. A relative `remote` is under the user's home
+    /// directory. Unlike a command's stdin this reads the same on Windows, where PowerShell can take stdin for itself.
+    pub async fn upload(&mut self, local: &Path, remote: &str) -> Result<()> {
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| SshError::Connection(format!("failed to open channel: {e}")))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| SshError::Upload(format!("no sftp subsystem: {e}")))?;
+        let sftp = SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|e| SshError::Upload(format!("sftp handshake: {e}")))?;
+
+        let mut source = tokio::fs::File::open(local)
+            .await
+            .map_err(|e| SshError::Upload(format!("failed to read {local:?}: {e}")))?;
+        let mut target = sftp
+            .create(remote)
+            .await
+            .map_err(|e| SshError::Upload(format!("failed to create {remote}: {e}")))?;
+
+        // not `io::copy`: its 8K would mean an sftp packet for every 8K, and it flushes, which here
+        // is an fsync that a slow VM disk can take longer on than sftp's 10s request timeout
+        let mut buffer = vec![0; UPLOAD_BUFFER];
+        loop {
+            let read = source
+                .read(&mut buffer)
+                .await
+                .map_err(|e| SshError::Upload(format!("failed to read {local:?}: {e}")))?;
+            if read == 0 {
+                break;
+            }
+            target
+                .write_all(&buffer[..read])
+                .await
+                .map_err(|e| SshError::Upload(format!("failed to write {remote}: {e}")))?;
+        }
+        target
+            .shutdown()
+            .await
+            .map_err(|e| SshError::Upload(format!("failed to close {remote}: {e}")))?;
+        sftp.close()
+            .await
+            .map_err(|e| SshError::Upload(format!("failed to end sftp session: {e}")))
     }
 
     /// Disconnect.

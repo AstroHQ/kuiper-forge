@@ -3,10 +3,12 @@
 use crate::admin::middleware::AdminState;
 use crate::admin::routes::check_auth;
 use crate::admin::templates::{
-    AgentPerformance, BaseContext, JobSummaryView, MetricsTemplate, RunGroupView, StatView,
-    StepColumn, StepView,
+    AgentPerformance, BaseContext, InstallView, JobSummaryView, MetricsTemplate, RunGroupView,
+    StatView, StepColumn, StepView,
 };
-use crate::metrics::summary::{self, JobSummary, Range, RunGroup, Stat, StepStat, fmt_ms};
+use crate::metrics::summary::{
+    self, InstallGroup, JobSummary, Range, RunGroup, Stat, StepStat, fmt_ms,
+};
 use askama::Template;
 use axum::{
     extract::{Query, State},
@@ -72,6 +74,10 @@ pub(crate) async fn metrics_page(
             .map(|g| group_view(g, &steps, Some(format!("/admin/agents/{}", g.key))))
             .collect(),
         images: images.iter().map(|g| group_view(g, &steps, None)).collect(),
+        installs: summary::by_install(&runs)
+            .iter()
+            .map(install_view)
+            .collect(),
         steps: steps
             .iter()
             .map(|name| StepColumn {
@@ -165,11 +171,45 @@ fn step_title(step: &str) -> &'static str {
     match step {
         "create" => "clone the VM",
         "boot" => "start the VM until SSH answers",
-        "install" => "download the runner, skipped when the image already has it",
+        "install" => "get the runner onto the VM, skipped when the image already has it",
         "setup" => "the rest of getting the runner ready: SSH, clock sync, runner config",
         "job" => "the runner's run",
         "destroy" => "stop and delete the VM",
         _ => "reported by newer agents",
+    }
+}
+
+/// How an install source reads on the page, and what it means for its tooltip.
+fn install_source_view(source: &str) -> (String, &'static str) {
+    let (name, title) = match source {
+        "hit" => ("Cache hit", "uploaded from the agent's copy"),
+        "filled" => (
+            "Filled cache",
+            "uploaded from the agent's copy, after waiting for it to download",
+        ),
+        "fell_back" => (
+            "Fell back",
+            "the cache didn't work out so the VM downloaded it, the agent's log says why",
+        ),
+        "vm" => ("VM download", "the agent's cache is turned off"),
+        summary::SOURCE_NOT_RECORDED => (
+            "Not recorded",
+            "from before agents reported this, or an older agent",
+        ),
+        summary::SOURCE_IMAGE => ("In image", "the image already has the runner"),
+        other => return (other.to_string(), "reported by newer agents"),
+    };
+    (name.to_string(), title)
+}
+
+fn install_view(g: &InstallGroup) -> InstallView {
+    let (source, source_title) = install_source_view(&g.source);
+    InstallView {
+        image: g.image.clone(),
+        source,
+        source_title,
+        runs: g.runs,
+        install: stat_view(g.install),
     }
 }
 
@@ -229,6 +269,62 @@ fn job_view(s: &JobSummary) -> JobSummaryView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn page(installs: Vec<InstallView>) -> String {
+        MetricsTemplate {
+            base: BaseContext {
+                username: "me".into(),
+            },
+            range: "7d",
+            ranges: vec!["7d"],
+            runs: 1,
+            running: 0,
+            failures: 0,
+            success: "-".into(),
+            provision_p95: "-".into(),
+            wait_p50: "-".into(),
+            steps: Vec::new(),
+            agents: Vec::new(),
+            images: Vec::new(),
+            installs,
+            jobs: job_view(&JobSummary::default()),
+            chart_json: "{}".into(),
+        }
+        .render()
+        .unwrap()
+    }
+
+    #[test]
+    fn test_runner_installs_card() {
+        let group = |source: &str, p50| InstallGroup {
+            image: "ubuntu-24.04".into(),
+            source: source.into(),
+            runs: 12,
+            install: Stat {
+                count: 12,
+                p50,
+                p95: p50,
+            },
+        };
+        let html = page(vec![
+            install_view(&group("hit", Some(3_000))),
+            install_view(&group(summary::SOURCE_NOT_RECORDED, Some(48_000))),
+        ]);
+        assert!(html.contains("Runner installs"));
+        assert!(html.contains("ubuntu-24.04"));
+        assert!(html.contains("Cache hit"));
+        assert!(html.contains("Not recorded"));
+        assert!(html.contains(&fmt_ms(Some(48_000))));
+
+        assert!(!page(Vec::new()).contains("Runner installs"));
+    }
+
+    #[test]
+    fn test_install_source_view() {
+        assert_eq!(install_source_view("fell_back").0, "Fell back");
+        // a newer agent's source still shows, under its own name
+        assert_eq!(install_source_view("zz-new").0, "zz-new");
+    }
 
     #[test]
     fn test_script_json_cant_close_the_tag() {

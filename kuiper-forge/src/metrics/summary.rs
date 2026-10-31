@@ -259,15 +259,98 @@ pub fn by_agent<'a>(runs: impl IntoIterator<Item = &'a RunnerRun>) -> Vec<RunGro
     })
 }
 
-/// Runner stats per image. Older agents don't report one, so those fall back to the runner's labels.
+/// The image a run is grouped under. Older agents don't report one, so those fall back to the runner's labels.
+fn image_key(run: &RunnerRun) -> String {
+    match &run.image {
+        Some(image) => image.clone(),
+        None => format!("labels: {}", run.labels.join(", ")),
+    }
+}
+
+/// Runner stats per image.
 pub fn by_image<'a>(runs: impl IntoIterator<Item = &'a RunnerRun>) -> Vec<RunGroup> {
     group_runs(runs, |r| {
-        let key = match &r.image {
-            Some(image) => image.clone(),
-            None => format!("labels: {}", r.labels.join(", ")),
-        };
+        let key = image_key(r);
         (key.clone(), key, r.agent_type.clone())
     })
+}
+
+/// The runner was already in the image, agents report that as a skipped install
+pub const SOURCE_IMAGE: &str = "image";
+/// It took time, but the run doesn't say where the runner came from: before agents reported it, or an older agent.
+/// With the cache working these are what's left of the VM download times to compare against
+pub const SOURCE_NOT_RECORDED: &str = "not_recorded";
+
+/// Install sources in the order they're shown. Any other goes last.
+const SOURCE_ORDER: &[&str] = &[
+    "hit",
+    "filled",
+    "fell_back",
+    "vm",
+    SOURCE_NOT_RECORDED,
+    SOURCE_IMAGE,
+];
+
+/// Where a run's runner came from, None if it stopped before finding out.
+fn install_source(run: &RunnerRun) -> Option<&str> {
+    match (run.install_source.as_deref(), run.steps.get("install")) {
+        (Some(source), _) => Some(source),
+        (None, Some(0)) => Some(SOURCE_IMAGE),
+        (None, Some(_)) => Some(SOURCE_NOT_RECORDED),
+        (None, None) => None,
+    }
+}
+
+/// One image's runner installs from one source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstallGroup {
+    pub image: String,
+    pub source: String,
+    pub runs: usize,
+    /// How long the install took. Failed installs count in `runs` but not here
+    pub install: Stat,
+}
+
+/// Runner installs per image and source: busiest image first, then in [`SOURCE_ORDER`].
+pub fn by_install<'a>(runs: impl IntoIterator<Item = &'a RunnerRun>) -> Vec<InstallGroup> {
+    let mut groups: HashMap<(String, String), (usize, Vec<i64>)> = HashMap::new();
+    let mut per_image: HashMap<String, usize> = HashMap::new();
+    for run in runs {
+        let Some(source) = install_source(run) else {
+            continue;
+        };
+        let image = image_key(run);
+        *per_image.entry(image.clone()).or_default() += 1;
+        let group = groups.entry((image, source.to_string())).or_default();
+        group.0 += 1;
+        group
+            .1
+            .extend(run.steps.get("install").copied().filter(|ms| *ms > 0));
+    }
+
+    let order = |source: &str| {
+        SOURCE_ORDER
+            .iter()
+            .position(|s| *s == source)
+            .unwrap_or(SOURCE_ORDER.len())
+    };
+    let mut out: Vec<InstallGroup> = groups
+        .into_iter()
+        .map(|((image, source), (runs, install))| InstallGroup {
+            image,
+            source,
+            runs,
+            install: Stat::of(install),
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        per_image[&b.image]
+            .cmp(&per_image[&a.image])
+            .then_with(|| a.image.cmp(&b.image))
+            .then_with(|| order(&a.source).cmp(&order(&b.source)))
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    out
 }
 
 /// Where a job's time in the queue went.
@@ -662,6 +745,59 @@ mod tests {
             "a download's time leaves out the cached runs"
         );
         assert_eq!(install.typical.p50, Some(0));
+    }
+
+    fn install_run(image: &str, source: Option<&str>, install: Option<i64>) -> RunnerRun {
+        let mut r = run("a", 0, Some("completed"));
+        r.image = Some(image.into());
+        r.install_source = source.map(String::from);
+        if let Some(ms) = install {
+            r.steps.insert("install".into(), ms);
+        }
+        r
+    }
+
+    #[test]
+    fn test_install_sources() {
+        let runs = [
+            install_run("linux", Some("hit"), Some(3_000)),
+            install_run("linux", Some("hit"), Some(5_000)),
+            install_run("linux", Some("filled"), Some(9_000)),
+            // today's agents, and history from before they said
+            install_run("linux", None, Some(40_000)),
+            // a failed install has no time, but it did happen
+            install_run("linux", Some("fell_back"), None),
+            install_run("mac", None, Some(0)),
+            // never got as far as installing
+            install_run("mac", None, None),
+        ];
+        let got: Vec<_> = by_install(&runs)
+            .into_iter()
+            .map(|g| (g.image, g.source, g.runs, g.install.count, g.install.p50))
+            .collect();
+        let row = |image: &str, source: &str, runs, count, p50| {
+            (image.to_string(), source.to_string(), runs, count, p50)
+        };
+        assert_eq!(
+            got,
+            vec![
+                row("linux", "hit", 2, 2, Some(3_000)),
+                row("linux", "filled", 1, 1, Some(9_000)),
+                row("linux", "fell_back", 1, 0, None),
+                row("linux", SOURCE_NOT_RECORDED, 1, 1, Some(40_000)),
+                row("mac", SOURCE_IMAGE, 1, 0, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unknown_install_source_is_kept_and_sorts_last() {
+        let runs = [
+            install_run("linux", Some("zz-newer-agent"), Some(1_000)),
+            install_run("linux", None, Some(0)),
+        ];
+        let sources: Vec<_> = by_install(&runs).into_iter().map(|g| g.source).collect();
+        assert_eq!(sources, vec![SOURCE_IMAGE, "zz-newer-agent"]);
     }
 
     #[test]

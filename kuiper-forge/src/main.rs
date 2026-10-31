@@ -32,6 +32,7 @@ use kuiper_forge::metrics::MetricsStore;
 use kuiper_forge::pending_jobs;
 use kuiper_forge::runner_state;
 use kuiper_forge::server::{ServerConfig, run_server};
+use kuiper_forge::setup::{self, SetupArgs};
 use kuiper_forge::tls::build_server_trust;
 
 /// CI Runner Coordinator - Manages ephemeral GitHub Actions runners
@@ -67,6 +68,10 @@ enum Commands {
         #[arg(long, env = "KUIPER_NO_LOG_FILE")]
         no_log_file: bool,
     },
+
+    /// First-run setup: certificates, config and an admin user. Asks for whatever isn't given as a flag. Re-run it to
+    /// fill in what's missing
+    Setup(Box<SetupArgs>),
 
     /// Certificate Authority management
     Ca {
@@ -200,6 +205,11 @@ async fn main() -> Result<()> {
                 init_daemon_logging(&cli.data_dir, filter)?;
             }
             serve(&cli.config, &cli.data_dir, listen, dry_run).await
+        }
+        Commands::Setup(args) => {
+            // it prints its own progress
+            init_cli_logging(EnvFilter::new("warn"));
+            setup::run(*args, &cli.config, &cli.data_dir).await
         }
         Commands::Ca { command } => {
             init_cli_logging(filter);

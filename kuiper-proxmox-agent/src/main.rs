@@ -15,6 +15,7 @@ use backend::ProxmoxBackend;
 use clap::Parser;
 use config::Config;
 use error::{Error, Result};
+use kuiper_agent_lib::runner_cache::RunnerCache;
 use kuiper_agent_lib::vm_agent::{AgentInfo, RunOptions, VmAgent};
 use kuiper_agent_lib::{
     AgentCertStore, AgentConfig as LibAgentConfig, LogCapture, RegistrationBundle,
@@ -187,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
         config.agent.labels.clone(),
         config.vm.clone(),
         config.ssh.clone(),
+        RunnerCache::new(args.data_dir().join("runner-cache"), &config.runner_cache)?,
     ));
 
     if args.debug_keep_vms {

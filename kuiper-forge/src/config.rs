@@ -961,8 +961,13 @@ impl Config {
         figment = figment.merge(Env::prefixed("KUIPER_").split("__"));
 
         let config: Config = figment.extract().with_context(|| {
+            let hint = if path.exists() {
+                ""
+            } else {
+                ". There's no config file there yet, `kuiper-forge setup` makes one"
+            };
             format!(
-                "Failed to load config from {} and environment",
+                "Failed to load config from {} and environment{hint}",
                 path.display()
             )
         })?;
