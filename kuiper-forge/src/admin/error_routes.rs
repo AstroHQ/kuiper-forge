@@ -170,4 +170,47 @@ mod tests {
         assert_eq!(rows[0].counts, [1, 3, 0, 0]);
         assert_eq!(rows[1].counts, [0, 2, 0, 0]);
     }
+
+    // nye: the "All agents" total must match the sum of the agent rows, unknown kinds included
+    #[test]
+    fn test_all_agents_total_includes_unknown_kinds() {
+        let counts = vec![
+            ("a1".to_owned(), "runner_lost".to_owned(), 2),
+            ("a2".to_owned(), "runner_lost".to_owned(), 3),
+            ("a2".to_owned(), "from_the_future".to_owned(), 1),
+        ];
+        let last_day = count_rows(&counts, &|id| format!("host-{id}"));
+        let last_day_totals = FailureKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, _)| last_day.iter().map(|r| r.counts[i]).sum())
+            .collect();
+        let html = ErrorsTemplate {
+            base: BaseContext {
+                username: "u".into(),
+            },
+            kind: String::new(),
+            agent: String::new(),
+            kinds: FailureKind::ALL
+                .iter()
+                .map(|k| (k.as_str(), FailureKind::label(k.as_str())))
+                .collect(),
+            agents: vec![],
+            last_day,
+            last_day_totals,
+            failures: vec![],
+            limit: 200,
+        }
+        .render()
+        .unwrap();
+        let all = &html[html.find("All agents").unwrap()..];
+        let total: String = all
+            .split("<td>")
+            .nth(1)
+            .unwrap()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        assert_eq!(total, "6", "rows total 2 + 4 = 6");
+    }
 }

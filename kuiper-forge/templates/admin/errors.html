@@ -41,7 +41,7 @@
                 {% if last_day.len() > 1 %}
                 <tr>
                     <td class="muted">All agents</td>
-                    <td>{{ last_day_totals.iter().sum::<i64>() }}</td>
+                    <td>{{ self.last_day_total() }}</td>
                     {% for n in last_day_totals %}
                     <td>{% if *n == 0 %}<span class="muted">-</span>{% else %}{{ n }}{% endif %}</td>
                     {% endfor %}

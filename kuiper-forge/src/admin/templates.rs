@@ -284,6 +284,13 @@ pub struct ErrorsTemplate {
     pub limit: usize,
 }
 
+impl ErrorsTemplate {
+    /// Total for all agents in the last 24 hours, kinds this build doesn't know included
+    pub fn last_day_total(&self) -> i64 {
+        self.last_day.iter().map(|r| r.total).sum()
+    }
+}
+
 /// One agent's failure counts by kind
 pub struct ErrorCountRow {
     pub agent_id: String,
