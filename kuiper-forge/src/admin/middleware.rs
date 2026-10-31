@@ -5,6 +5,7 @@ use crate::admin::auth::AdminAuthStore;
 use crate::agent_failures::AgentFailureStore;
 use crate::agent_logs::AgentLogStore;
 use crate::agent_registry::AgentRegistry;
+use crate::agent_updates::AgentUpdates;
 use crate::auth::AuthManager;
 use crate::fleet::FleetNotifier;
 use crate::metrics::MetricsStore;
@@ -34,6 +35,8 @@ pub struct AdminState {
     pub pending_jobs: Arc<PendingJobStore>,
     /// Recent per-agent failures
     pub agent_failures: Arc<AgentFailureStore>,
+    /// Newest agent releases, for flagging out-of-date agents
+    pub agent_updates: Arc<AgentUpdates>,
     pub metrics: Arc<MetricsStore>,
     /// Logs uploaded by agents
     pub agent_logs: Arc<AgentLogStore>,

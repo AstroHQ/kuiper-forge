@@ -23,7 +23,7 @@
             <div>{{ agent.agent_type }}</div>
 
             <div class="detail-label">Version</div>
-            <div>{% if let Some(v) = agent.version %}{{ v }}{% else %}<span class="muted">unknown, this agent version doesn't report it</span>{% endif %}</div>
+            <div>{% if let Some(v) = agent.version %}{{ v }}{% else %}<span class="muted">unknown, this agent version doesn't report it</span>{% endif %} {% call m::update_badge(agent) %}{% endcall %}</div>
 
             <div class="detail-label">Status</div>
             <div>

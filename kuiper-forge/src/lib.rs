@@ -14,6 +14,7 @@ pub mod admin;
 pub mod agent_failures;
 pub mod agent_logs;
 pub mod agent_registry;
+pub mod agent_updates;
 pub mod auth;
 pub mod config;
 pub mod db;
