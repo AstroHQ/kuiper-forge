@@ -1,6 +1,7 @@
 #!/bin/sh
 # Create the kuiper system user/group and the directories the agent uses, then
-# reload systemd. Runs on install and upgrade.
+# reload systemd and restart the service if it's running. Runs on install and
+# upgrade.
 set -e
 
 # Create the kuiper system group/user. Support both shadow-utils
@@ -34,6 +35,10 @@ install -d -o kuiper -g kuiper -m 0750 /var/log/kuiper-proxmox-agent
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
+    # On upgrade, restart a running agent so it picks up the new binary.
+    # try-restart is a no-op when the service isn't running, so a fresh install
+    # still waits for registration and an explicit `enable --now`.
+    systemctl try-restart kuiper-proxmox-agent.service || true
 fi
 
 cat <<'EOF'
