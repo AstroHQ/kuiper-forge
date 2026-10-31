@@ -2,7 +2,7 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
-## kuiper-tart-agent-v0.7.0 - 2026-10-31
+## v0.7.0 - 2026-10-31
 #### Features
 - **(metrics)** show where each runner install came from - (158f52b) - *jfro*
 - **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
@@ -11,12 +11,12 @@ All notable changes to this project will be documented in this file. See [conven
 - **(agents)** [**breaking**] check GitHub runner downloads like Forgejo's - (36797f7) - *jfro*
 
 - - -
-## kuiper-tart-agent-v0.6.0 - 2026-10-30
+## v0.6.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
 
 - - -
-## kuiper-tart-agent-v0.5.2 - 2026-10-28
+## v0.5.2 - 2026-10-28
 #### Bug Fixes
 - apply logging.retention_days in the agents - (71b0d49) - *jfro*
 
@@ -26,7 +26,7 @@ All notable changes to this project will be documented in this file. See [conven
 - **(agent-lib)** share the SSH transport and runner commands - (5bc5db9) - *jfro*
 
 - - -
-## kuiper-tart-agent-v0.5.1 - 2026-10-21
+## v0.5.1 - 2026-10-21
 #### Features
 - Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*
 - Forgejo backend with one-job runners on proxmox Linux VMs - (5168175) - *jfro*
@@ -35,7 +35,7 @@ All notable changes to this project will be documented in this file. See [conven
 - **(agents)** keep runner tokens out of SSH debug logs - (b159eaf) - *jfro*
 
 - - -
-## kuiper-tart-agent-v0.5.0 - 2026-10-01
+## v0.5.0 - 2026-10-01
 #### Features
 - install script & `kuiper-tart-agent update` self-update from GitHub releases - (efca8cf) - *jfro*
 - setup wizard for kuiper-tart-agent - (d05875b) - *jfro*
@@ -45,7 +45,7 @@ All notable changes to this project will be documented in this file. See [conven
 - cleaner label display in dashboard - (fa20bfd) - *jfro*
 
 - - -
-## kuiper-tart-agent-v0.4.0 - 2026-09-24
+## v0.4.0 - 2026-09-24
 #### Features
 - linux VMs supported in tart-agent - (d01cb4a) - *jfro*
 - report agent version in UI - (177cce8) - *jfro*
@@ -60,13 +60,13 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-tart-agent-v0.3.1 - 2026-09-16
+## v0.3.1 - 2026-09-16
 #### Bug Fixes
 - security updates - (ae3b27c) - *jfro*
 
 - - -
 
-## kuiper-tart-agent-v0.3.0 - 2026-06-17
+## v0.3.0 - 2026-06-17
 #### Bug Fixes
 - avoid selecting first image when it should use default image if base labels match - (2eabee4) - *jfro*
 
@@ -76,7 +76,7 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-tart-agent-v0.2.2 - 2026-05-20
+## v0.2.2 - 2026-05-20
 #### Bug Fixes
 - ensure coordinator gets status updates on VM transitions - (90a780c) - *jfro*
 - ensure max vms & labels is always current from agents - (ec77e28) - *jfro*
@@ -84,20 +84,20 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
-## kuiper-tart-agent-v0.2.1 - 2026-03-12
+## v0.2.1 - 2026-03-12
 #### Bug Fixes
 - (**kuiper-agent-lib,kuiper-tart-agent**) runner script being accessed across crates - (3c3dc84) - *jfro*
 
 - - -
 
-## kuiper-tart-agent-v0.2.0 - 2026-03-12
+## v0.2.0 - 2026-03-12
 #### Bug Fixes
 - fix missing runner group passing along, and not destroying successful runs in debug - (1af0630) - *jfro*
 - fix JIT runners for webhook mode, ensure win VMs are time sync'd - (767c543) - *jfro*
 
 - - -
 
-## kuiper-tart-agent-v0.1.1 - 2026-02-19
+## v0.1.1 - 2026-02-19
 #### Bug Fixes
 - (**kuiper-forge,kuiper-tart-agent,kuiper-proxmox-agent**) queued jobs getting stuck due to failed VM start & lack of requeue - (211e86f) - *jfro*
 

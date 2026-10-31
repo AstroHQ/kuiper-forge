@@ -8,14 +8,16 @@ pr_labels = ["release"]
 git_release_name = "{{ package }} v{{ version }}"
 
 [changelog]
-# matches the format cocogitto used to write, so existing changelogs stay consistent.
+# the format cocogitto used to write, without its package name in the heading: each package has
+# its own changelog, and parse-changelog needs the version first. With anything before it,
+# `release-plz set-version` fails and GitHub releases come out with an empty body.
 # release-plz splices this in right after the header's trailing `- - -`, so no trimming.
 # commit.remote.username rather than commit.author.name: release-plz 0.3.172 crashes
 # looking up the author of its synthetic "update Cargo.lock dependencies" commit.
 # It's unset for commits GitHub can't tie to an account, hence the `if`.
 trim = false
 body = """
-## {{ package }}-v{{ version }} - {{ timestamp | date(format="%Y-%m-%d") }}
+## v{{ version }} - {{ timestamp | date(format="%Y-%m-%d") }}
 {%- for group, commits in commits | group_by(attribute="group") %}
 #### {{ group | striptags | trim }}
 {%- for commit in commits %}

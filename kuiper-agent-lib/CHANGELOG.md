@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## kuiper-agent-lib-v0.7.0 - 2026-10-31
+## v0.7.0 - 2026-10-31
 #### Features
 - **(metrics)** show where each runner install came from - (158f52b) - *jfro*
 - **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
@@ -17,12 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(agents)** [**breaking**] check GitHub runner downloads like Forgejo's - (36797f7) - *jfro*
 
 - - -
-## kuiper-agent-lib-v0.6.0 - 2026-10-30
+## v0.6.0 - 2026-10-30
 #### Features
 - **(metrics)** [**breaking**] record runner and job timings, add a metrics page - (0dc8ffc) - *jfro*
 
 - - -
-## kuiper-agent-lib-v0.5.2 - 2026-10-28
+## v0.5.2 - 2026-10-28
 #### Bug Fixes
 - **(agent-lib)** destroy VMs in parallel on shutdown and allow longer for it - (08c09b3) - *jfro*
 - **(agent-lib)** wait for in-flight creates and destroys before a destroy returns - (4943a5a) - *jfro*
@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(agent-lib)** share the SSH transport and runner commands - (5bc5db9) - *jfro*
 
 - - -
-## kuiper-agent-lib-v0.5.1 - 2026-10-21
+## v0.5.1 - 2026-10-21
 #### Features
 - Forgejo jobs on tart (macOS) agents and proxmox Windows VMs - (a180d8c) - *jfro*
 - publish forgejo-runner builds for every platform on kuiper-forge - (02b6c9d) - *jfro*
