@@ -20,6 +20,7 @@ use kuiper_forge::admin::{AdminAuthStore, AdminState, ApiTokenStore};
 use kuiper_forge::agent_failures::AgentFailureStore;
 use kuiper_forge::agent_logs::AgentLogStore;
 use kuiper_forge::agent_registry::AgentRegistry;
+use kuiper_forge::agent_updates::AgentUpdates;
 use kuiper_forge::auth::{AuthManager, AuthStore, export_ca_cert, generate_server_cert, init_ca};
 use kuiper_forge::config::{self, Config, ForgeKindConfig, ProvisioningMode, WebhookConfig};
 use kuiper_forge::db::Database;
@@ -429,6 +430,12 @@ async fn serve(
     let admin_state = if config.admin.enabled {
         info!("Admin UI enabled at /admin, API at /api/v1");
         let admin_auth_store = AdminAuthStore::new(db.pool());
+        let agent_updates = Arc::new(AgentUpdates::new());
+        if config.admin.update_check_enabled() {
+            tokio::spawn(agent_updates.clone().run());
+        } else {
+            info!("Agent update check is off");
+        }
         Some(Arc::new(AdminState {
             auth_store: admin_auth_store,
             api_tokens: ApiTokenStore::new(db.pool()),
@@ -438,6 +445,7 @@ async fn serve(
             runner_state: runner_state.clone(),
             pending_jobs: pending_job_store.clone(),
             agent_failures: agent_failures.clone(),
+            agent_updates,
             agent_logs: agent_logs.clone(),
             metrics: metrics.clone(),
             server_trust: server_trust.clone(),

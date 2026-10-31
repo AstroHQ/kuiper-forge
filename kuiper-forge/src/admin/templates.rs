@@ -1,5 +1,6 @@
 //! Askama templates for the admin UI.
 
+use crate::agent_updates::UpdateAvailable;
 use crate::forge::JobKey;
 use askama::Template;
 use chrono::{DateTime, Utc};
@@ -78,6 +79,8 @@ pub struct AgentSummary {
     pub unavailable_at: Option<DateTime<Utc>>,
     /// None for agents that predate version reporting
     pub version: Option<String>,
+    /// Set when a newer release of this agent is out
+    pub update: Option<UpdateAvailable>,
 }
 
 /// Limit a tart agent reports for VMs of any OS. It's the agent's real cap: its `max_vms` only covers its biggest
@@ -431,6 +434,7 @@ mod tests {
             revoked: false,
             unavailable_at: None,
             version: None,
+            update: None,
         }
     }
 

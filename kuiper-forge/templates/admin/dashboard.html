@@ -148,7 +148,7 @@
                         <div class="muted agent-id">{{ agent.agent_id }}</div>
                     </td>
                     <td>{{ agent.agent_type }}</td>
-                    <td>{% if let Some(v) = agent.version %}{{ v }}{% else %}<span class="muted" title="agent doesn't report its version">unknown</span>{% endif %}</td>
+                    <td>{% if let Some(v) = agent.version %}{{ v }}{% else %}<span class="muted" title="agent doesn't report its version">unknown</span>{% endif %}{% if agent.update.is_some() %}<div>{% call m::update_badge(agent) %}{% endcall %}</div>{% endif %}</td>
                     <td>
                         {% if agent.revoked %}
                         <span class="badge" data-variant="secondary">Revoked</span>

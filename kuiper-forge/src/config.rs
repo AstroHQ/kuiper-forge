@@ -808,6 +808,23 @@ pub struct AdminConfig {
     /// Coordinator URL for registration bundles (default: https://localhost:9443).
     /// Used when generating registration tokens in the admin UI.
     pub coordinator_url: String,
+
+    /// Check GitHub releases for newer agent versions and flag out-of-date agents on the dashboard
+    /// (default: true). `KUIPER_UPDATE_CHECK=false` turns it off without touching the config.
+    pub update_check: bool,
+}
+
+impl AdminConfig {
+    /// `update_check`, unless `KUIPER_UPDATE_CHECK` says otherwise.
+    pub fn update_check_enabled(&self) -> bool {
+        match std::env::var("KUIPER_UPDATE_CHECK") {
+            Ok(v) => !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            ),
+            Err(_) => self.update_check,
+        }
+    }
 }
 
 impl Default for AdminConfig {
@@ -816,6 +833,7 @@ impl Default for AdminConfig {
             enabled: false,
             session_timeout_secs: 3600,
             coordinator_url: "https://localhost:9443".to_string(),
+            update_check: true,
         }
     }
 }

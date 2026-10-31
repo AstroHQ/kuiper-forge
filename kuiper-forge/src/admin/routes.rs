@@ -275,6 +275,14 @@ async fn render_dashboard(
                 .count();
             let live = connected.get(&a.agent_id);
             let (base_labels, mapping_labels) = live.map(split_labels).unwrap_or_default();
+            // a revoked agent won't be upgraded, so don't suggest it
+            let update = (!a.revoked)
+                .then(|| {
+                    state
+                        .agent_updates
+                        .check(&a.agent_type, a.agent_version.as_deref())
+                })
+                .flatten();
             AgentSummary {
                 agent_id: a.agent_id.clone(),
                 hostname: a.hostname,
@@ -288,6 +296,7 @@ async fn render_dashboard(
                 created_at: a.created_at,
                 revoked: a.revoked,
                 unavailable_at: a.unavailable_at,
+                update,
                 version: a.agent_version,
             }
         })
@@ -462,10 +471,11 @@ async fn agent_detail(
 
     let live = connected.get(&agent.agent_id);
     let (base_labels, mapping_labels) = live.map(split_labels).unwrap_or_default();
+    let agent_type = agent.agent_type;
     let agent_summary = AgentSummary {
         agent_id: agent.agent_id.clone(),
         hostname: agent.hostname,
-        agent_type: agent.agent_type,
+        agent_type: agent_type.clone(),
         base_labels,
         mapping_labels,
         max_vms: agent.max_vms,
@@ -475,6 +485,13 @@ async fn agent_detail(
         created_at: agent.created_at,
         revoked: agent.revoked,
         unavailable_at: agent.unavailable_at,
+        update: (!agent.revoked)
+            .then(|| {
+                state
+                    .agent_updates
+                    .check(&agent_type, agent.agent_version.as_deref())
+            })
+            .flatten(),
         version: agent.agent_version,
     };
 

@@ -38,3 +38,11 @@
     {% if size != "sm" %}<label for="available-{{ from }}-{{ agent_id }}">Available</label>{% endif %}
 </form>
 {% endmacro %}
+
+{# small badge when a newer release of the agent is out; the details are on hover and it links to the release #}
+{% macro update_badge(agent) %}
+{%- if let Some(u) = agent.update -%}
+<a class="badge update-badge" data-variant="outline" data-status="warn" href="{{ u.url }}" target="_blank" rel="noopener"
+    title="kuiper-{{ agent.agent_type }}-agent {{ u.latest }} is out{% if let Some(at) = u.published_at %} (released {{ at.format("%Y-%m-%d") }}){% endif %}; this agent runs {% if let Some(v) = agent.version %}{{ v }}{% endif %}">{{ u.latest }} available</a>
+{%- endif -%}
+{% endmacro %}
