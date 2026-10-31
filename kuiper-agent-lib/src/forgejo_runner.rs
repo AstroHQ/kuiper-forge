@@ -55,6 +55,10 @@ pub const RUNNER_DIR: &str = "~/forgejo-runner";
 /// Where the runner is installed on Windows VMs.
 pub const WINDOWS_RUNNER_DIR: &str = r"C:\forgejo-runner";
 
+/// Where to upload the binary for [`install_upload_command`] and
+/// [`windows_install_upload_command`], relative to the user's home directory.
+pub const UPLOAD_NAME: &str = "kuiper-forgejo-runner";
+
 const INSTALL_SCRIPT: &str = include_str!("../scripts/install_forgejo_runner.sh");
 
 /// Wrapper that runs `run-job.sh` with the tart agent's runner protocol (log to
@@ -88,12 +92,16 @@ pub fn resolve_version(configured: &str) -> &str {
     }
 }
 
+/// The platform in release file names, e.g. `linux-amd64`.
+pub fn platform_name(os: Os, arch: Arch) -> String {
+    format!("{}-{}", os.as_str(), arch_str(arch))
+}
+
 /// The release binary's file name.
 pub fn file_name(version: &str, os: Os, arch: Arch) -> String {
     format!(
-        "forgejo-runner-{version}-{}-{}{}",
-        os.as_str(),
-        arch_str(arch),
+        "forgejo-runner-{version}-{}{}",
+        platform_name(os, arch),
         os.ext()
     )
 }
@@ -133,6 +141,16 @@ pub fn install_command(url: &str, version: &str, os: Os, arch: Arch) -> String {
         escape_posix_path(RUNNER_DIR),
         escape_posix(url),
         escape_posix(&file_name(version, os, arch)),
+    )
+}
+
+/// Command that installs forgejo-runner on a Linux or macOS VM from a binary uploaded to
+/// [`UPLOAD_NAME`].
+pub fn install_upload_command() -> String {
+    let dir = escape_posix_path(RUNNER_DIR);
+    format!(
+        "mkdir -p {dir} && mv ~/{UPLOAD_NAME} {dir}/forgejo-runner && chmod +x {dir}/forgejo-runner \
+         && {{ {dir}/forgejo-runner --version || {{ rm -f {dir}/forgejo-runner; exit 1; }}; }}"
     )
 }
 
@@ -231,6 +249,17 @@ pub fn windows_check_installed_command(dir: &str) -> String {
     ))
 }
 
+/// Check the binary at `$Exe` runs, for after installing it.
+const WINDOWS_CHECK_EXE: &str = r#"$Version = & $Exe --version 2>&1
+if ($LASTEXITCODE -ne 0) {
+    # don't leave a binary that a later job would take as installed
+    Remove-Item -Force -LiteralPath $Exe
+    throw "forgejo-runner --version failed (exit $LASTEXITCODE): $Version"
+}
+Write-Output $Version
+Write-Output "forgejo-runner installed successfully"
+"#;
+
 /// Windows: command that downloads forgejo-runner from `url` (see [`download_url`])
 /// into `dir`, checks it against `<url>.sha256` and installs it as `forgejo-runner.exe`.
 pub fn windows_install_command(url: &str, dir: &str) -> String {
@@ -255,17 +284,23 @@ if ($Actual -ne $Expected) {{
 }}
 Write-Output "Checksum OK"
 Move-Item -Force -LiteralPath $Tmp -Destination $Exe
-$Version = & $Exe --version 2>&1
-if ($LASTEXITCODE -ne 0) {{
-    # don't leave a binary that a later job would take as installed
-    Remove-Item -Force -LiteralPath $Exe
-    throw "forgejo-runner --version failed (exit $LASTEXITCODE): $Version"
-}}
-Write-Output $Version
-Write-Output "forgejo-runner installed successfully"
-"#,
+{WINDOWS_CHECK_EXE}"#,
         dir = escape_powershell(dir),
         url = escape_powershell(url),
+    ))
+}
+
+/// Windows: command that installs forgejo-runner into `dir` from a binary uploaded to
+/// [`UPLOAD_NAME`].
+pub fn windows_install_upload_command(dir: &str) -> String {
+    powershell(&format!(
+        r#"$ErrorActionPreference = 'Stop'
+$Dir = {dir}
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+$Exe = Join-Path $Dir 'forgejo-runner.exe'
+Move-Item -Force -LiteralPath (Join-Path $HOME '{UPLOAD_NAME}') -Destination $Exe
+{WINDOWS_CHECK_EXE}"#,
+        dir = escape_powershell(dir),
     ))
 }
 
@@ -413,6 +448,20 @@ mod tests {
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         String::from_utf16(&utf16).unwrap()
+    }
+
+    #[test]
+    fn upload_commands() {
+        let cmd = install_upload_command();
+        assert!(cmd.contains("mv ~/kuiper-forgejo-runner ~/'forgejo-runner'/forgejo-runner"));
+        assert!(cmd.contains("chmod +x"));
+        // a binary that doesn't run isn't left to look installed
+        assert!(cmd.contains("--version || { rm -f"));
+
+        let script = decode(&windows_install_upload_command(WINDOWS_RUNNER_DIR));
+        assert!(script.contains(r"$Dir = 'C:\forgejo-runner'"));
+        assert!(script.contains("Join-Path $HOME 'kuiper-forgejo-runner'"));
+        assert!(script.contains("--version failed"));
     }
 
     #[test]

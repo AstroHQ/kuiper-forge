@@ -15,6 +15,7 @@ mod ssh;
 use backend::LibvirtBackend;
 use clap::Parser;
 use config::Config;
+use kuiper_agent_lib::runner_cache::RunnerCache;
 use kuiper_agent_lib::vm_agent::{AgentInfo, RunOptions, VmAgent};
 use kuiper_agent_lib::{
     AgentCertStore, AgentConfig as LibAgentConfig, LogCapture, RegistrationBundle,
@@ -182,7 +183,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     std::fs::create_dir_all(&config.libvirt.disk_dir)?;
-    let backend = Arc::new(LibvirtBackend::new(&config)?);
+    let runner_cache = RunnerCache::new(data_dir.join("runner-cache"), &config.runner_cache)?;
+    let backend = Arc::new(LibvirtBackend::new(&config, runner_cache)?);
 
     // VMs from an earlier run that crashed (or a host reboot) would otherwise use up disk forever
     backend.libvirt().sweep_leftovers().await.map_err(|e| {

@@ -185,6 +185,21 @@ initial_delay_secs = 1
 max_delay_secs = 60
 
 # =============================================================================
+# Runner Cache (optional)
+# =============================================================================
+[runner_cache]
+# Keep a copy of each runner download and upload it to VMs over SFTP, instead of every VM
+# downloading its own (default: true). Copies live in the agent's data directory under
+# runner-cache/, only the newest per platform is kept, and a copy is checked against its checksum
+# each time it's used and downloaded again if it's bad. A VM the upload doesn't work on, say its
+# sshd has no sftp subsystem, downloads the runner itself.
+enabled = true
+
+# How long runner_version = "latest" sticks to a version before asking GitHub again, in seconds
+# (default: 3600). GitHub allows 60 unauthenticated requests an hour per IP.
+version_ttl_secs = 3600
+
+# =============================================================================
 # Host Environment Configuration
 # =============================================================================
 [host]

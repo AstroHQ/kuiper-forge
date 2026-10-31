@@ -10,7 +10,8 @@
 //! - Registration token exchange
 //! - Automatic reconnection with backoff
 //! - Batched upload of the agent's own logs to the coordinator ([`log_upload`])
-//! - GitHub Actions runner version fetching and download URL construction
+//! - GitHub Actions runner download URL construction, and caching of the latest version and of
+//!   runner downloads on the agent ([`runner_cache`])
 //! - SSH to runner VMs and the runner install/config commands run over it ([`ssh`], [`github_runner`])
 //! - Setting up and running one job's runner on a VM over SSH ([`guest`])
 //! - A generic agent that runs runner VMs on any [`vm_agent::VmBackend`] ([`vm_agent`])
@@ -24,6 +25,7 @@ pub mod github_runner;
 pub mod guest;
 pub mod labels;
 pub mod log_upload;
+pub mod runner_cache;
 pub mod runtime;
 pub mod shell;
 pub mod ssh;

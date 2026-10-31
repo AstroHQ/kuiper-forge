@@ -15,6 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use kuiper_agent_lib::guest::Job;
 use kuiper_agent_lib::labels::{self, Capability};
+use kuiper_agent_lib::runner_cache::RunnerCache;
 use kuiper_agent_lib::vm_agent::{BackendResult, JobContext, Limit, LimitNames, Usage, VmBackend};
 use kuiper_agent_proto::CreateRunnerCommand;
 use serde::Deserialize;
@@ -107,6 +108,7 @@ pub struct TartBackend {
     ssh_config: SshConfig,
     /// Directory for runner log files
     log_dir: PathBuf,
+    runner_cache: RunnerCache,
     /// Fired when external usage or an image's OS changes
     changed: Arc<Notify>,
     /// Running tart VMs this agent doesn't manage, from the last `refresh_external`
@@ -123,6 +125,7 @@ impl TartBackend {
         agent_labels: Vec<String>,
         ssh_config: SshConfig,
         log_dir: PathBuf,
+        runner_cache: RunnerCache,
     ) -> Self {
         // base labels plus one image mapping's labels each, then base_image alone
         let labels: Vec<String> = agent_labels.iter().map(|l| l.to_lowercase()).collect();
@@ -135,6 +138,7 @@ impl TartBackend {
             capabilities,
             ssh_config,
             log_dir,
+            runner_cache,
             changed: Arc::new(Notify::new()),
             external: RwLock::new(Usage::new()),
             image_os: RwLock::new(HashMap::new()),
@@ -324,6 +328,7 @@ impl TartBackend {
                 &one_job,
                 &self.config.forgejo_runner_version,
                 &self.config.forgejo_runner_url,
+                &self.runner_cache,
                 vm.os,
                 ctx,
             )
@@ -339,6 +344,7 @@ impl TartBackend {
                 ip,
                 &self.ssh_config,
                 &self.config.runner_version,
+                &self.runner_cache,
                 vm.os,
                 ctx,
             )
@@ -354,6 +360,7 @@ impl TartBackend {
                 job.runner_scope_url,
                 job.runner_name,
                 &self.config.runner_version,
+                &self.runner_cache,
                 vm.os,
                 ctx,
             )
@@ -687,6 +694,7 @@ mod tests {
             vec!["MacOS".to_string()],
             SshConfig::default(),
             std::env::temp_dir(),
+            RunnerCache::new(std::env::temp_dir(), &Default::default()).unwrap(),
         );
         assert_eq!(
             backend.limits(),

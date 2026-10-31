@@ -3,6 +3,7 @@
 //! Configuration is loaded from a TOML file. See docs/ProxmoxProviderPlan.md for
 //! the full configuration schema.
 
+use kuiper_agent_lib::runner_cache::RunnerCacheConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,9 @@ pub struct Config {
     /// Logging settings (optional)
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Runner download cache settings (optional)
+    #[serde(default)]
+    pub runner_cache: RunnerCacheConfig,
 }
 
 /// Coordinator connection configuration.
@@ -428,6 +432,7 @@ impl Config {
             },
             cleanup: CleanupConfig::default(),
             logging: LoggingConfig::default(),
+            runner_cache: RunnerCacheConfig::default(),
         }
     }
 

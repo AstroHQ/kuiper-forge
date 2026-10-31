@@ -24,10 +24,15 @@ url = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
 russh = { workspace = true }
+russh-sftp = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 gethostname = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

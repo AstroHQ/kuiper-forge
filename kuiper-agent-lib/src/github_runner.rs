@@ -1,10 +1,9 @@
-//! GitHub Actions runner version fetching and download URL construction.
+//! GitHub Actions runner download URLs and the commands that install, configure and run it.
 //!
-//! This module provides shared functionality for both kuiper-tart-agent and kuiper-proxmox-agent
-//! to fetch the latest runner version and construct platform-specific download URLs.
+//! This module provides shared functionality for the agents. Which version "latest" means is
+//! [`RunnerCache::github_version`](crate::runner_cache::RunnerCache::github_version).
 
 use crate::shell::{encode_powershell_command, escape_posix, escape_posix_path, escape_powershell};
-use tracing::{debug, info};
 
 /// Fallback GitHub Actions runner version if API fetch fails.
 pub const FALLBACK_VERSION: &str = "2.321.0";
@@ -64,46 +63,14 @@ impl Arch {
     }
 }
 
-/// Fetch the latest GitHub Actions runner version from the GitHub API.
-///
-/// Returns `None` if the fetch fails (caller should fall back to `FALLBACK_VERSION`).
-pub async fn fetch_latest_version() -> Option<String> {
-    let url = "https://api.github.com/repos/actions/runner/releases/latest";
-
-    debug!("Fetching latest runner version from GitHub API");
-
-    let output = tokio::process::Command::new("curl")
-        .args(["-sL", "-H", "Accept: application/vnd.github.v3+json", url])
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
-        debug!("Failed to fetch latest runner version from GitHub API");
-        return None;
-    }
-
-    let body = String::from_utf8_lossy(&output.stdout);
-
-    // Parse JSON to extract tag_name (e.g., "v2.321.0")
-    // Simple parsing without adding serde_json dependency
-    // Note: GitHub API returns single-line JSON, so we search the whole body
-    if let Some(tag_idx) = body.find("\"tag_name\"") {
-        let after_tag = &body[tag_idx..];
-        // Extract version from: "tag_name": "v2.321.0" or "tag_name":"v2.321.0"
-        if let Some(v_idx) = after_tag
-            .find(':')
-            .and_then(|colon| after_tag[colon..].find("\"v").map(|v| colon + v + 2))
-            && let Some(end) = after_tag[v_idx..].find('"')
-        {
-            let version = &after_tag[v_idx..v_idx + end];
-            info!("Latest GitHub Actions runner version: v{}", version);
-            return Some(version.to_string());
-        }
-    }
-
-    debug!("Could not parse runner version from GitHub API response");
-    None
+/// File name of a GitHub Actions runner release archive.
+pub fn archive_name(version: &str, platform: Platform, arch: Arch) -> String {
+    format!(
+        "actions-runner-{platform}-{arch}-{version}.{ext}",
+        platform = platform.as_str(),
+        arch = arch.as_str(),
+        ext = platform.extension(),
+    )
 }
 
 /// Construct the download URL for a GitHub Actions runner release.
@@ -120,11 +87,8 @@ pub async fn fetch_latest_version() -> Option<String> {
 /// ```
 pub fn download_url(version: &str, platform: Platform, arch: Arch) -> String {
     format!(
-        "https://github.com/actions/runner/releases/download/v{version}/actions-runner-{platform}-{arch}-{version}.{ext}",
-        version = version,
-        platform = platform.as_str(),
-        arch = arch.as_str(),
-        ext = platform.extension(),
+        "https://github.com/actions/runner/releases/download/v{version}/{archive}",
+        archive = archive_name(version, platform, arch),
     )
 }
 
@@ -177,21 +141,6 @@ pub fn install_command(runner_dir: &str, version: &str, platform: Platform, arch
     }
 }
 
-/// The runner version to install: `configured`, or the latest release when it's empty or
-/// "latest" ([`FALLBACK_VERSION`] if GitHub can't be reached).
-pub async fn resolve_version(configured: &str) -> String {
-    if !configured.is_empty() && configured != "latest" {
-        return configured.to_string();
-    }
-    match fetch_latest_version().await {
-        Some(v) => v,
-        None => {
-            info!("Could not fetch latest runner version, using fallback v{FALLBACK_VERSION}");
-            FALLBACK_VERSION.to_string()
-        }
-    }
-}
-
 /// Builds the shell commands that install, configure and run the GitHub runner on a VM over SSH.
 pub struct RunnerConfigBuilder {
     runner_dir: String,
@@ -231,6 +180,10 @@ impl RunnerConfigBuilder {
 
     fn is_windows(&self) -> bool {
         self.platform == Platform::Windows
+    }
+
+    pub fn platform(&self) -> Platform {
+        self.platform
     }
 
     /// Wrap a PowerShell command appropriately based on the shell type.
@@ -388,6 +341,31 @@ impl RunnerConfigBuilder {
             self.wrap_powershell(&cmd)
         } else {
             cmd
+        }
+    }
+
+    /// Where to upload the runner archive for [`Self::install_upload_command`], relative to the
+    /// user's home directory.
+    pub fn upload_name(&self) -> String {
+        format!("kuiper-actions-runner.{}", self.platform.extension())
+    }
+
+    /// Build command to install the runner from an archive uploaded to [`Self::upload_name`].
+    pub fn install_upload_command(&self) -> String {
+        let upload = self.upload_name();
+        if self.is_windows() {
+            let dir = escape_powershell(&self.runner_dir);
+            let ps_cmd = format!(
+                "$ErrorActionPreference = 'Stop'; \
+                 $Upload = Join-Path $HOME '{upload}'; \
+                 New-Item -ItemType Directory -Force -Path {dir} | Out-Null; \
+                 Expand-Archive -Path $Upload -DestinationPath {dir} -Force; \
+                 Remove-Item $Upload",
+            );
+            self.wrap_powershell(&ps_cmd)
+        } else {
+            let dir = escape_posix_path(&self.runner_dir);
+            format!("mkdir -p {dir} && tar xzf ~/{upload} -C {dir} && rm -f ~/{upload}")
         }
     }
 }
@@ -669,6 +647,35 @@ mod tests {
         assert!(!cmd.starts_with("powershell"));
         assert!(cmd.contains("run.cmd --jitconfig"));
         assert!(cmd.contains("jit-config.txt"));
+    }
+
+    #[test]
+    fn test_install_upload_command_unix() {
+        let builder = RunnerConfigBuilder::linux("~/actions-runner");
+        assert_eq!(builder.upload_name(), "kuiper-actions-runner.tar.gz");
+        assert_eq!(
+            builder.install_upload_command(),
+            "mkdir -p ~/'actions-runner' && tar xzf ~/kuiper-actions-runner.tar.gz -C ~/'actions-runner' \
+             && rm -f ~/kuiper-actions-runner.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_install_upload_command_windows() {
+        // Expand-Archive only takes a .zip
+        let builder = RunnerConfigBuilder::windows_powershell(r"C:\actions-runner");
+        assert_eq!(builder.upload_name(), "kuiper-actions-runner.zip");
+        let cmd = builder.install_upload_command();
+        assert!(cmd.contains("Join-Path $HOME 'kuiper-actions-runner.zip'"));
+        assert!(cmd.contains(r"-DestinationPath 'C:\actions-runner' -Force"));
+
+        // cmd.exe SSH shell: wrapped, like the other commands
+        let builder = RunnerConfigBuilder::windows(r"C:\actions-runner");
+        assert!(
+            builder
+                .install_upload_command()
+                .starts_with("powershell -EncodedCommand ")
+        );
     }
 
     #[test]

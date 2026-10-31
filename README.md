@@ -141,6 +141,10 @@ export KUIPER_GRPC__LISTEN_ADDR=0.0.0.0:9443
 
 See `examples/` for sample configuration files.
 
+Agents keep a copy of each runner download and upload it to VMs over SSH, so only the first VM after
+a new runner release pays for the download. `runner_version = "latest"` is looked up at most once per
+`runner_cache.version_ttl_secs` (an hour by default). See the example agent configs.
+
 ## Provisioning Modes
 
 - **Fixed Capacity** (default) - Maintains a constant pool of ready runners, sized per image/template mapping with `pool`
