@@ -215,10 +215,11 @@ pub async fn ensure_runner_installed(
     );
 
     let mut session = connect(ip, config).await?;
-    if cache
+    let source = cache
         .install_github(&mut session, &commands, &version, arch)
-        .await
-    {
+        .await;
+    ctx.install_source(source);
+    if source.installed() {
         ctx.step(step::SETUP);
         return Ok(());
     }
@@ -369,10 +370,11 @@ pub async fn prepare_forgejo_runner(
                 url
             );
             let mut session = connect(ip, config).await?;
-            let cached = cache
+            let source = cache
                 .install_forgejo(&mut session, &url, version, fr_os, arch)
                 .await;
-            if !cached {
+            ctx.install_source(source);
+            if !source.installed() {
                 match ssh_exec(
                     ip,
                     config,

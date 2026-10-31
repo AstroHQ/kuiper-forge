@@ -161,13 +161,17 @@ message RunnerEvent {
 
 // Step durations for one runner, by the agent's clock
 message RunnerTimings {
-    // step name to milliseconds. Steps so far: "create" (clone the VM), "boot" (until SSH answers), "install" (download
-    // the runner), "setup" (the rest of getting the runner ready), "job" (the runner's run), "destroy". Agents can add
+    // step name to milliseconds. Steps so far: "create" (clone the VM), "boot" (until SSH answers), "install" (get
+    // the runner onto the VM), "setup" (the rest of getting the runner ready), "job" (the runner's run), "destroy". Agents can add
     // steps without a proto change. A step that didn't run is left out, 0 means it was skipped (say "install" when the
     // runner is already in the image). Time spent in a step more than once is added up
     map<string, uint64> steps_ms = 1;
     string failed_phase = 2;  // the step that failed, empty if nothing did
     string image = 3;         // the image (tart image, proxmox template) the VM came from
+    // where the runner came from: "hit" (the agent's copy), "filled" (the agent's copy, which had to be downloaded first),
+    // "vm" (the VM downloaded it, no cache), "fell_back" (the VM downloaded it, the cache didn't work out). Empty if the
+    // image has it
+    string install_source = 4;
 }
 
 message CommandResult {

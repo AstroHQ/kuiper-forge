@@ -337,7 +337,19 @@ fn mock_run(
     let boot = step(rng, 35_000.0);
     let setup = step(rng, 9_000.0);
     let cached = rng.random_bool(agent.runner_cached);
-    let install = if cached { 0 } else { step(rng, 25_000.0) };
+    // the last few days have the agents' cache, before that VMs downloaded the runner and nothing said so
+    let has_cache = requested > now - 3 * 24 * 3600 * 1000;
+    let (install, source) = match rng.random_range(0..100) {
+        _ if cached => (0, None),
+        _ if !has_cache => (step(rng, 25_000.0), None),
+        0..90 => (step(rng, 4_000.0), Some("hit")),
+        90..95 => (step(rng, 9_000.0), Some("filled")),
+        95..98 => (step(rng, 30_000.0), Some("fell_back")),
+        _ => (step(rng, 25_000.0), Some("vm")),
+    };
+    if agent.image.is_some() {
+        run.install_source = source.map(String::from);
+    }
     let job_ms = exp(rng, 420_000.0).max(15_000.0) as i64;
     let destroy = normal(rng, 4_000.0, 700.0).max(500.0) as i64;
 

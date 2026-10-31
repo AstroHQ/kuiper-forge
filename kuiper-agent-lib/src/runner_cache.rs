@@ -157,8 +157,51 @@ fn checksums(notes: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Locked during a download, holds when the last one failed.
-type DownloadSlot = Arc<Mutex<Option<Instant>>>;
+/// Where a VM's runner came from, for the metrics page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallSource {
+    /// Uploaded from the agent's copy
+    Hit,
+    /// Uploaded from the agent's copy, which this job had to wait for
+    Filled,
+    /// The VM downloads it, the cache is off
+    Vm,
+    /// The VM downloads it, the cache didn't work out
+    FellBack,
+}
+
+impl InstallSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstallSource::Hit => "hit",
+            InstallSource::Filled => "filled",
+            InstallSource::Vm => "vm",
+            InstallSource::FellBack => "fell_back",
+        }
+    }
+
+    /// Whether the runner is on the VM, otherwise the VM still has to download it.
+    pub fn installed(self) -> bool {
+        matches!(self, InstallSource::Hit | InstallSource::Filled)
+    }
+}
+
+/// A good copy in the cache.
+#[derive(Debug)]
+struct CachedCopy {
+    path: PathBuf,
+    source: InstallSource,
+}
+
+/// When a platform's last download ended.
+#[derive(Default)]
+struct DownloadState {
+    failed_at: Option<Instant>,
+    finished_at: Option<Instant>,
+}
+
+/// Locked during a download.
+type DownloadSlot = Arc<Mutex<DownloadState>>;
 
 /// Runner downloads kept in a directory, see the [module docs](self).
 pub struct RunnerCache {
@@ -285,23 +328,23 @@ impl RunnerCache {
             .await?)
     }
 
-    /// Install the GitHub runner on the VM from the cache, downloading it first if needed. False if
-    /// that didn't work out, in which case the VM has to download it itself.
+    /// Install the GitHub runner on the VM from the cache, downloading it first if needed. Unless
+    /// the result says it's [installed](InstallSource::installed), the VM has to download it itself.
     pub async fn install_github(
         &self,
         session: &mut SshSession,
         builder: &RunnerConfigBuilder,
         version: &str,
         arch: Arch,
-    ) -> bool {
+    ) -> InstallSource {
         if !self.enabled {
-            return false;
+            return InstallSource::Vm;
         }
         let archive = match self.github_archive(version, builder.platform(), arch).await {
             Ok(archive) => archive,
             Err(e) => {
                 warn!("No cached copy of the GitHub runner v{version}: {e}");
-                return false;
+                return InstallSource::FellBack;
             }
         };
         install(
@@ -314,7 +357,8 @@ impl RunnerCache {
     }
 
     /// Install forgejo-runner on the VM from the cache, downloading it from `url` first if needed.
-    /// False if that didn't work out, in which case the VM has to download it itself.
+    /// Unless the result says it's [installed](InstallSource::installed), the VM has to download it
+    /// itself.
     pub async fn install_forgejo(
         &self,
         session: &mut SshSession,
@@ -322,15 +366,15 @@ impl RunnerCache {
         version: &str,
         os: Os,
         arch: Arch,
-    ) -> bool {
+    ) -> InstallSource {
         if !self.enabled {
-            return false;
+            return InstallSource::Vm;
         }
         let binary = match self.forgejo_binary(url, version, os, arch).await {
             Ok(binary) => binary,
             Err(e) => {
                 warn!("No cached copy of forgejo-runner v{version}: {e}");
-                return false;
+                return InstallSource::FellBack;
             }
         };
         let command = match os {
@@ -347,7 +391,7 @@ impl RunnerCache {
         version: &str,
         platform: Platform,
         arch: Arch,
-    ) -> Result<PathBuf> {
+    ) -> Result<CachedCopy> {
         let key = github_platform(platform, arch);
         let path = self
             .dir
@@ -402,7 +446,7 @@ impl RunnerCache {
         version: &str,
         os: Os,
         arch: Arch,
-    ) -> Result<PathBuf> {
+    ) -> Result<CachedCopy> {
         let path = self
             .dir
             .join("forgejo")
@@ -434,23 +478,36 @@ impl RunnerCache {
         path: PathBuf,
         url: &str,
         sha256: impl Future<Output = Result<String>>,
-    ) -> Result<PathBuf> {
+    ) -> Result<CachedCopy> {
+        let queued = Instant::now();
         let dir = path.parent().unwrap_or(&self.dir).to_path_buf();
         let slot = self.downloads.lock().await.entry(dir).or_default().clone();
-        let mut last_failure = slot.lock().await;
+        let mut state = slot.lock().await;
 
         if intact(&path).await {
             debug!("Using cached {}", path.display());
-            return Ok(path);
+            // waiting out another job's download costs a job just the same
+            let waited = state.finished_at.is_some_and(|at| at > queued);
+            let source = if waited {
+                InstallSource::Filled
+            } else {
+                InstallSource::Hit
+            };
+            return Ok(CachedCopy { path, source });
         }
-        if let Some(failed) = *last_failure
+        if let Some(failed) = state.failed_at
             && failed.elapsed() < self.retry_download_after
         {
             return Err(CacheError::RecentlyFailed);
         }
         let downloaded = async { self.download(url, &sha256.await?, &path).await }.await;
-        *last_failure = downloaded.is_err().then(Instant::now);
-        downloaded.map(|()| path)
+        state.failed_at = downloaded.is_err().then(Instant::now);
+        downloaded?;
+        state.finished_at = Some(Instant::now());
+        Ok(CachedCopy {
+            path,
+            source: InstallSource::Filled,
+        })
     }
 
     /// Download `url` to `path`, which with its checksum is all that's left in its directory after.
@@ -554,12 +611,18 @@ async fn file_sha256(path: &Path) -> std::io::Result<String> {
     }
 }
 
-/// Upload `file` to the VM as `upload_name` and run `command` to install it.
-async fn install(session: &mut SshSession, file: &Path, upload_name: &str, command: &str) -> bool {
+/// Upload `copy` to the VM as `upload_name` and run `command` to install it.
+async fn install(
+    session: &mut SshSession,
+    copy: &CachedCopy,
+    upload_name: &str,
+    command: &str,
+) -> InstallSource {
+    let file = &copy.path;
     let started = Instant::now();
     if let Err(e) = session.upload(file, upload_name).await {
         warn!("Failed to upload {}: {e}", file.display());
-        return false;
+        return InstallSource::FellBack;
     }
     let uploaded = started.elapsed();
     match session.execute(command).await {
@@ -569,7 +632,7 @@ async fn install(session: &mut SshSession, file: &Path, upload_name: &str, comma
                 started.elapsed().as_secs_f64(),
                 uploaded.as_secs_f64()
             );
-            true
+            copy.source
         }
         Ok(output) => {
             warn!(
@@ -583,11 +646,11 @@ async fn install(session: &mut SshSession, file: &Path, upload_name: &str, comma
                 output.stdout.trim(),
                 output.stderr.trim()
             );
-            false
+            InstallSource::FellBack
         }
         Err(e) => {
             warn!("Installing cached {} failed: {e}", file.display());
-            false
+            InstallSource::FellBack
         }
     }
 }
@@ -858,9 +921,55 @@ mod tests {
                 .cached(path.clone(), &server.url, async { Ok(sha256(b"runner")) })
                 .await
                 .unwrap();
-            assert_eq!(std::fs::read(got).unwrap(), b"runner");
+            assert_eq!(std::fs::read(got.path).unwrap(), b"runner");
         }
         assert_eq!(server.requests(), 1);
+    }
+
+    #[test]
+    fn test_install_source_names_match_the_proto() {
+        assert_eq!(InstallSource::Hit.as_str(), "hit");
+        assert_eq!(InstallSource::Filled.as_str(), "filled");
+        assert_eq!(InstallSource::Vm.as_str(), "vm");
+        assert_eq!(InstallSource::FellBack.as_str(), "fell_back");
+    }
+
+    #[test]
+    fn test_only_the_cache_installs() {
+        assert!(InstallSource::Hit.installed());
+        assert!(InstallSource::Filled.installed());
+        assert!(!InstallSource::Vm.installed());
+        assert!(!InstallSource::FellBack.installed());
+    }
+
+    #[tokio::test]
+    async fn test_source_tells_a_download_from_a_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start(|_| (200, b"runner".to_vec())).await;
+        let cache = cache(dir.path(), "", 3600);
+        let path = dir.path().join("linux-x64/runner");
+        let get = || cache.cached(path.clone(), &server.url, async { Ok(sha256(b"runner")) });
+
+        assert_eq!(get().await.unwrap().source, InstallSource::Filled);
+        assert_eq!(get().await.unwrap().source, InstallSource::Hit);
+    }
+
+    #[tokio::test]
+    async fn test_waiting_for_another_jobs_download_isnt_a_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Server::start(|_| (200, b"runner".to_vec())).await;
+        let cache = cache(dir.path(), "", 3600);
+        let path = dir.path().join("linux-x64/runner");
+        let get = || cache.cached(path.clone(), &server.url, async { Ok(sha256(b"runner")) });
+
+        let (a, b, c) = tokio::join!(get(), get(), get());
+        for copy in [a, b, c] {
+            assert_eq!(copy.unwrap().source, InstallSource::Filled);
+        }
+        assert_eq!(server.requests(), 1);
+
+        // a job that comes along after it finished didn't wait for it
+        assert_eq!(get().await.unwrap().source, InstallSource::Hit);
     }
 
     #[tokio::test]
@@ -876,7 +985,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(got, path);
+        assert_eq!(got.path, path);
+        assert_eq!(got.source, InstallSource::Hit);
     }
 
     /// Download a runner, `damage` the copy and ask for it again. Returns what the file ends up
@@ -891,7 +1001,7 @@ mod tests {
         get().await.unwrap();
         damage(&path);
         let got = get().await.unwrap();
-        (std::fs::read(got).unwrap(), server.requests())
+        (std::fs::read(got.path).unwrap(), server.requests())
     }
 
     #[tokio::test]
@@ -1020,7 +1130,7 @@ mod tests {
             .cached(good.clone(), &server.url, async { Ok(sha256(b"runner")) })
             .await
             .unwrap();
-        assert_eq!(got, good);
+        assert_eq!(got.path, good);
     }
 
     #[tokio::test]
@@ -1090,7 +1200,8 @@ mod tests {
                 Ok(sha256(b"runner"))
             })
             .await
-            .unwrap();
+            .unwrap()
+            .path;
 
         let mut kept: Vec<_> = std::fs::read_dir(&platform)
             .unwrap()

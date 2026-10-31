@@ -155,6 +155,39 @@
         </header>
         <section>{% call group_table(images, "Image") %}{% endcall %}</section>
     </div>
+
+    {% if !installs.is_empty() %}
+    <div class="card">
+        <header>
+            <h2>Runner installs</h2>
+            <p>Where each image's runner came from and how long getting it onto the VM took</p>
+        </header>
+        <section>
+            <div class="table-scroll">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Image</th>
+                        <th>Source</th>
+                        <th>Runs</th>
+                        <th>Install</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for i in installs %}
+                    <tr>
+                        <td><code class="group-name">{{ i.image }}</code></td>
+                        <td title="{{ i.source_title }}">{{ i.source }}</td>
+                        <td>{{ i.runs }}</td>
+                        <td class="nowrap">{% call stat(i.install) %}{% endcall %}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            </div>
+        </section>
+    </div>
+    {% endif %}
     {% endif %}
 
     {% if jobs.jobs > 0 %}

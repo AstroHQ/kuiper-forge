@@ -217,11 +217,12 @@ impl<'s> Guest<'s> {
                 version,
                 arch.as_str()
             );
-            let cached = versions
+            let source = versions
                 .cache
                 .install_github(self.session, &builder, &version, arch)
                 .await;
-            if !cached {
+            ctx.install_source(source);
+            if !source.installed() {
                 let sha256 = versions
                     .cache
                     .github_checksum(&version, builder.platform(), arch)
@@ -520,11 +521,12 @@ impl<'s> Guest<'s> {
                 arch.as_str(),
                 url
             );
-            let cached = versions
+            let source = versions
                 .cache
                 .install_forgejo(self.session, &url, &version, os, arch)
                 .await;
-            if !cached {
+            ctx.install_source(source);
+            if !source.installed() {
                 let install_cmd = if is_windows {
                     forgejo_runner::windows_install_command(&url, win_dir)
                 } else {
