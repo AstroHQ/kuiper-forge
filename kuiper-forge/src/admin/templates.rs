@@ -262,6 +262,52 @@ pub struct FailureSummary {
     pub message: String,
 }
 
+/// Recent errors page across all agents
+#[derive(Template)]
+#[template(path = "admin/errors.html")]
+pub struct ErrorsTemplate {
+    pub base: BaseContext,
+    /// Selected `FailureKind::as_str` filter, empty for all
+    pub kind: String,
+    /// Selected agent filter, empty for all
+    pub agent: String,
+    /// `(value, label)` for every failure kind, in column order
+    pub kinds: Vec<(&'static str, &'static str)>,
+    /// `(agent_id, hostname)` for the agent filter
+    pub agents: Vec<(String, String)>,
+    /// Agents with failures in the last 24 hours, most first
+    pub last_day: Vec<ErrorCountRow>,
+    /// Totals for `last_day`, one per kind
+    pub last_day_totals: Vec<i64>,
+    pub failures: Vec<AgentFailureView>,
+    /// Most rows shown, to say when the list was cut off
+    pub limit: usize,
+}
+
+impl ErrorsTemplate {
+    /// Total for all agents in the last 24 hours, kinds this build doesn't know included
+    pub fn last_day_total(&self) -> i64 {
+        self.last_day.iter().map(|r| r.total).sum()
+    }
+}
+
+/// One agent's failure counts by kind
+pub struct ErrorCountRow {
+    pub agent_id: String,
+    pub hostname: String,
+    pub total: i64,
+    /// One per kind, in `ErrorsTemplate::kinds` order
+    pub counts: Vec<i64>,
+}
+
+/// A failure with the agent it came from
+pub struct AgentFailureView {
+    pub agent_id: String,
+    /// Registered hostname, or the agent ID when it's gone
+    pub hostname: String,
+    pub failure: FailureSummary,
+}
+
 /// Admin user row for the users page
 pub struct UserSummary {
     pub username: String,

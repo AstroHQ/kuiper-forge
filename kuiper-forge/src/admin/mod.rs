@@ -11,6 +11,7 @@ pub mod api;
 mod api_token_routes;
 pub mod api_tokens;
 pub mod auth;
+mod error_routes;
 mod metrics_routes;
 pub mod middleware;
 pub mod routes;

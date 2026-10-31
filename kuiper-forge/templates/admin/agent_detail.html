@@ -149,7 +149,7 @@
     </div>
 
     <div class="card">
-        <header><h2>Recent Failures ({{ failures.len() }})</h2></header>
+        <header><h2>Recent Failures ({{ failures.len() }})</h2><p><a href="/admin/errors?agent={{ agent.agent_id }}">Filter on the errors page</a> &middot; <a href="/admin/errors">All agents</a></p></header>
         <section>
         {% if failures.is_empty() %}
         <p class="empty-text">No failures recorded for this agent.</p>
