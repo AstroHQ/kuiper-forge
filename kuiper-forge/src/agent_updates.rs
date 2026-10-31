@@ -1,12 +1,14 @@
 //! Newest agent releases on GitHub, so the admin UI can flag agents running an older version.
 //!
 //! Each agent crate is released under its own tag, e.g. `kuiper-proxmox-agent-v0.5.0`. A background task polls the
-//! repository's releases and keeps the newest version of each.
+//! repository's releases (every page, since the agents share the repo with the other crates) and keeps the newest
+//! version of each.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use semver::Version;
 use serde::Deserialize;
@@ -16,6 +18,8 @@ const RELEASES_URL: &str =
     "https://api.github.com/repos/AstroHQ/kuiper-forge/releases?per_page=100";
 const REFRESH_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
+/// Stop following `next` links after this many pages (5,000 releases at 100 a page).
+const MAX_PAGES: usize = 50;
 
 /// Newest release of an agent crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +77,23 @@ impl AgentUpdates {
         *self.latest.write().unwrap() = releases;
     }
 
+    /// Fetch every page of releases from `url` and replace what's known. When any page fails, what's known stays
+    /// as it was, so a partial list never replaces a full one.
+    async fn refresh(&self, client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+        let started = Instant::now();
+        let releases = fetch(client, url).await?;
+        info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            latest = ?releases
+                .iter()
+                .map(|(name, r)| format!("{name} {}", r.version))
+                .collect::<Vec<_>>(),
+            "Checked GitHub for agent releases"
+        );
+        self.set(releases);
+        Ok(())
+    }
+
     /// Poll GitHub releases forever. Keeps the last good answer when a check fails.
     pub async fn run(self: std::sync::Arc<Self>) {
         let client = match reqwest::Client::builder()
@@ -89,19 +110,8 @@ impl AgentUpdates {
 
         loop {
             let started = Instant::now();
-            let wait = match fetch(&client, RELEASES_URL).await {
-                Ok(releases) => {
-                    info!(
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        latest = ?releases
-                            .iter()
-                            .map(|(name, r)| format!("{name} {}", r.version))
-                            .collect::<Vec<_>>(),
-                        "Checked GitHub for agent releases"
-                    );
-                    self.set(releases);
-                    REFRESH_EVERY
-                }
+            let wait = match self.refresh(&client, RELEASES_URL).await {
+                Ok(()) => REFRESH_EVERY,
                 Err(e) => {
                     warn!(
                         url = RELEASES_URL,
@@ -122,10 +132,50 @@ fn crate_name(agent_type: &str) -> String {
     format!("kuiper-{agent_type}-agent")
 }
 
+/// Every release, following GitHub's `Link: rel="next"` pages from `url`. Fails if any page does.
 async fn fetch(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<HashMap<String, AgentRelease>> {
+    let mut releases = Vec::new();
+    let mut next = Some(url.to_owned());
+    let mut page = 0;
+    while let Some(url) = next.take() {
+        page += 1;
+        if page > MAX_PAGES {
+            warn!(
+                max_pages = MAX_PAGES,
+                next_url = %url,
+                fetched = releases.len(),
+                "Stopped following GitHub release pages at the cap; older releases are ignored"
+            );
+            break;
+        }
+        let started = Instant::now();
+        let (batch, next_url) = fetch_page(client, &url).await.with_context(|| {
+            format!(
+                "page {page} ({url}) after {}ms",
+                started.elapsed().as_millis()
+            )
+        })?;
+        debug!(
+            page,
+            count = batch.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            has_next = next_url.is_some(),
+            "Fetched a page of GitHub releases"
+        );
+        releases.extend(batch);
+        next = next_url;
+    }
+    Ok(newest_agent_releases(releases))
+}
+
+/// One page of releases and the URL of the next page, if any.
+async fn fetch_page(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<(Vec<Release>, Option<String>)> {
     let response = client
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -139,9 +189,36 @@ async fn fetch(
             body.chars().take(200).collect::<String>()
         );
     }
-    let releases: Vec<Release> = response.json().await?;
-    debug!(count = releases.len(), "Fetched GitHub releases");
-    Ok(newest_agent_releases(releases))
+    let next = response
+        .headers()
+        .get(reqwest::header::LINK)
+        .and_then(|v| v.to_str().ok())
+        .and_then(next_link);
+    let releases: Vec<Release> = response
+        .json()
+        .await
+        .with_context(|| format!("decoding releases ({status})"))?;
+    Ok((releases, next))
+}
+
+/// The `rel="next"` URL from a `Link` header like `<https://..?page=2>; rel="next", <https://..?page=5>; rel="last"`.
+fn next_link(header: &str) -> Option<String> {
+    header.split(',').find_map(|link| {
+        let (target, params) = link.split_once(';')?;
+        params
+            .split(';')
+            .any(|p| {
+                let p = p.trim();
+                p == r#"rel="next""# || p == "rel=next"
+            })
+            .then(|| {
+                target
+                    .trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_owned()
+            })
+    })
 }
 
 /// Newest non-draft, non-prerelease version of each `kuiper-*-agent` crate.
@@ -235,5 +312,153 @@ mod tests {
         assert!(updates.check("proxmox", None).is_none());
         assert!(updates.check("proxmox", Some("garbage")).is_none());
         assert!(updates.check("unknown", Some("0.0.1")).is_none());
+    }
+
+    /// A pretend GitHub releases API on a local port. `pages[n]` is served for `?page=n+1` (page 1 when there's no
+    /// `page` param) as `(status, body)`, with a `Link: rel="next"` header on every page but the last.
+    async fn mock_github(pages: Vec<(u16, String)>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for_task = base.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = sock.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let request = String::from_utf8_lossy(&buf);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let page: usize = path
+                    .split(['?', '&'])
+                    .find_map(|kv| kv.strip_prefix("page="))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(1);
+                let (status, body) = pages.get(page - 1).cloned().unwrap_or((404, "{}".into()));
+                let link = if page < pages.len() {
+                    format!(
+                        "Link: <{base_for_task}/releases?per_page=100&page={}>; rel=\"next\", <{base_for_task}/releases?per_page=100&page={}>; rel=\"last\"\r\n",
+                        page + 1,
+                        pages.len()
+                    )
+                } else {
+                    String::new()
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{link}Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("{base}/releases?per_page=100")
+    }
+
+    fn release_json(tag: &str) -> String {
+        format!(
+            r#"[{{"tag_name": "{tag}", "html_url": "u-{tag}", "draft": false, "prerelease": false, "published_at": null}}]"#
+        )
+    }
+
+    #[tokio::test]
+    async fn test_fetch_follows_pagination() {
+        // an agent whose only release is past the first page of a busy multi-crate repo
+        let url = mock_github(vec![
+            (200, release_json("kuiper-tart-agent-v0.6.0")),
+            (200, release_json("kuiper-forge-v0.8.0")),
+            (200, release_json("kuiper-proxmox-agent-v0.5.0")),
+        ])
+        .await;
+        let client = reqwest::Client::new();
+        let newest = fetch(&client, &url).await.unwrap();
+        assert_eq!(newest["kuiper-tart-agent"].version, Version::new(0, 6, 0));
+        assert_eq!(
+            newest
+                .get("kuiper-proxmox-agent")
+                .map(|r| r.version.clone()),
+            Some(Version::new(0, 5, 0)),
+            "release on page 3 was missed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_page_keeps_last_good_releases() {
+        let updates = AgentUpdates::new();
+        updates.set(newest_agent_releases(releases(RELEASES)));
+
+        let url = mock_github(vec![
+            (200, release_json("kuiper-proxmox-agent-v0.9.0")),
+            (500, "boom".into()),
+        ])
+        .await;
+        let err = updates
+            .refresh(&reqwest::Client::new(), &url)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("page 2"), "{err:#}");
+        // still the old answer, not page 1 on its own
+        assert_eq!(
+            updates.check("proxmox", Some("0.4.3")).unwrap().latest,
+            "0.5.0"
+        );
+        assert!(updates.check("tart", Some("0.5.9")).is_some());
+
+        // a page that isn't a release list fails the same way
+        let url = mock_github(vec![
+            (200, release_json("kuiper-proxmox-agent-v0.9.0")),
+            (200, r#"{"message": "nope"}"#.into()),
+        ])
+        .await;
+        assert!(
+            updates
+                .refresh(&reqwest::Client::new(), &url)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            updates.check("proxmox", Some("0.4.3")).unwrap().latest,
+            "0.5.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_replaces_releases() {
+        let updates = AgentUpdates::new();
+        updates.set(newest_agent_releases(releases(RELEASES)));
+        let url = mock_github(vec![
+            (200, release_json("kuiper-forge-v0.9.0")),
+            (200, release_json("kuiper-proxmox-agent-v0.9.0")),
+        ])
+        .await;
+        updates
+            .refresh(&reqwest::Client::new(), &url)
+            .await
+            .unwrap();
+        assert_eq!(
+            updates.check("proxmox", Some("0.5.0")).unwrap().latest,
+            "0.9.0"
+        );
+    }
+
+    #[test]
+    fn test_next_link() {
+        let header = r#"<https://api.github.com/repositories/1/releases?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/1/releases?per_page=100&page=4>; rel="last""#;
+        assert_eq!(
+            next_link(header).as_deref(),
+            Some("https://api.github.com/repositories/1/releases?per_page=100&page=2")
+        );
+        let last_page =
+            r#"<https://x/releases?page=1>; rel="prev", <https://x/releases?page=1>; rel="first""#;
+        assert_eq!(next_link(last_page), None);
+        assert_eq!(next_link(""), None);
     }
 }
