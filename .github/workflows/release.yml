@@ -6,6 +6,7 @@ on:
       - "kuiper-forge-v*"
       - "kuiper-tart-agent-v*"
       - "kuiper-proxmox-agent-v*"
+      - "kuiper-libvirt-agent-v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -58,6 +59,13 @@ jobs:
                 {"target":"x86_64-apple-darwin","runner":"macos-latest","cross":false,"archive":"tar.gz"},
                 {"target":"aarch64-apple-darwin","runner":"macos-latest","cross":false,"archive":"tar.gz"},
                 {"target":"x86_64-pc-windows-msvc","runner":"windows-latest","cross":false,"archive":"zip"}
+              ]'
+              ;;
+            # runs on the libvirt host itself, so Linux only
+            kuiper-libvirt-agent)
+              MATRIX='[
+                {"target":"x86_64-unknown-linux-musl","runner":"ubuntu-latest","cross":true,"archive":"tar.gz"},
+                {"target":"aarch64-unknown-linux-musl","runner":"ubuntu-latest","cross":true,"archive":"tar.gz"}
               ]'
               ;;
             *)
@@ -141,13 +149,14 @@ jobs:
           Set-Content -NoNewline -Path "$archive.sha256" -Value "$hash  $archive"
           echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
 
-      # Build .deb/.rpm for the proxmox agent's Linux targets via nfpm (run from
-      # the goreleaser/nfpm image, mirroring scripts/package-proxmox-agent.sh).
+      # Build .deb/.rpm for the Linux agents' musl targets via nfpm (run from
+      # the goreleaser/nfpm image, mirroring scripts/package-agent.sh).
       - name: Package (deb/rpm)
-        if: ${{ needs.setup.outputs.binary == 'kuiper-proxmox-agent' && endsWith(matrix.target, '-linux-musl') }}
+        if: ${{ contains(fromJson('["kuiper-proxmox-agent","kuiper-libvirt-agent"]'), needs.setup.outputs.binary) && endsWith(matrix.target, '-linux-musl') }}
         shell: bash
         run: |
           set -euo pipefail
+          BINARY="${{ needs.setup.outputs.binary }}"
           export VERSION="${{ needs.setup.outputs.version }}"
           TARGET="${{ matrix.target }}"
           case "$TARGET" in
@@ -158,7 +167,7 @@ jobs:
 
           # Stage the built binary at the fixed path nfpm.yaml references.
           mkdir -p target/nfpm target/packages
-          cp "target/${TARGET}/release/kuiper-proxmox-agent" target/nfpm/kuiper-proxmox-agent
+          cp "target/${TARGET}/release/${BINARY}" "target/nfpm/${BINARY}"
 
           for pkg in deb rpm; do
             docker run --rm \
@@ -166,7 +175,7 @@ jobs:
               -v "$PWD":/work -w /work \
               -e VERSION -e ARCH \
               ghcr.io/goreleaser/nfpm:latest \
-              package --config kuiper-proxmox-agent/packaging/nfpm.yaml --packager "$pkg" --target target/packages
+              package --config "${BINARY}/packaging/nfpm.yaml" --packager "$pkg" --target target/packages
           done
 
           # Move packages to the repo root so they upload flat (no target/packages/

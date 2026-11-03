@@ -91,25 +91,27 @@ systemctl daemon-reload && systemctl enable --now kuiper-proxmox-agent
 
 #### Linux packages (deb/rpm)
 
-The proxmox agent can be packaged with [nfpm](https://nfpm.goreleaser.com). The
-package installs the binary to `/usr/bin`, a `--system` systemd unit to
+The proxmox and libvirt agents can be packaged with [nfpm](https://nfpm.goreleaser.com).
+The package installs the binary to `/usr/bin`, a `--system` systemd unit to
 `/usr/lib/systemd/system`, and (via maintainer scripts) creates a dedicated
 `kuiper` user plus `/etc`, `/var/lib`, and `/var/log` directories. Config is
-defined in `kuiper-proxmox-agent/packaging/`.
+defined in `<agent>/packaging/`. The libvirt package also depends on virsh and
+qemu-img, and adds the `kuiper` user to the `libvirt` group if it exists.
 
 `.deb` and `.rpm` (x86_64 and arm64) are built and attached automatically to
-`kuiper-proxmox-agent-v*` GitHub releases — grab them from the release page. To
-build one locally instead:
+`kuiper-proxmox-agent-v*` and `kuiper-libvirt-agent-v*` GitHub releases — grab
+them from the release page. To build one locally instead:
 
 ```bash
-# Build a package locally for testing (mirrors build-proxmox-agent-musl.sh).
+# Build a package locally for testing (mirrors build-agent-musl.sh).
 # Requires Docker for the cross build; nfpm runs natively (brew install nfpm).
 mise run package:proxmox-agent             # x86_64, deb + rpm -> target/packages/
 mise run package:proxmox-agent arm64       # arm64
 PACKAGERS="deb rpm" mise run package:proxmox-agent
+mise run package:libvirt-agent             # same for the libvirt agent
 
 # Equivalent to calling the script directly:
-scripts/package-proxmox-agent.sh arm64
+scripts/package-agent.sh kuiper-proxmox-agent arm64
 ```
 
 > **Alpine (apk) not supported yet.** nfpm can emit `apk`, and the maintainer

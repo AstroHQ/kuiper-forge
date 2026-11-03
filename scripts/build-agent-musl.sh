@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build kuiper-proxmox-agent for Linux musl targets (arm64 and x86_64)
+# Build a Linux agent for musl targets (arm64 and x86_64)
+# Usage: scripts/build-agent-musl.sh <agent>   (kuiper-proxmox-agent | kuiper-libvirt-agent)
 # Requires: cross (cargo install cross --git https://github.com/cross-rs/cross)
 # Requires: Docker running
 #
@@ -11,6 +12,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="${PROJECT_ROOT}/target/musl-release"
+
+AGENT="${1:-}"
+if [[ -z "$AGENT" || ! -f "$PROJECT_ROOT/$AGENT/Cargo.toml" ]]; then
+    echo "Usage: $0 <agent>   (e.g. kuiper-proxmox-agent, kuiper-libvirt-agent)" >&2
+    exit 1
+fi
 
 TARGETS=(
     "x86_64-unknown-linux-musl"
@@ -32,7 +39,7 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "Building kuiper-proxmox-agent for musl targets..."
+echo "Building $AGENT for musl targets..."
 echo ""
 
 for target in "${TARGETS[@]}"; do
@@ -41,11 +48,11 @@ for target in "${TARGETS[@]}"; do
     cross build \
         --release \
         --target "$target" \
-        --package kuiper-proxmox-agent \
+        --package "$AGENT" \
         --manifest-path "$PROJECT_ROOT/Cargo.toml"
 
     # Copy binary to output directory with target suffix
-    src_binary="$PROJECT_ROOT/target/$target/release/kuiper-proxmox-agent"
+    src_binary="$PROJECT_ROOT/target/$target/release/$AGENT"
 
     # Determine architecture suffix for output filename
     case "$target" in
@@ -57,7 +64,7 @@ for target in "${TARGETS[@]}"; do
             ;;
     esac
 
-    dest_binary="$OUTPUT_DIR/kuiper-proxmox-agent-linux-musl-$arch"
+    dest_binary="$OUTPUT_DIR/$AGENT-linux-musl-$arch"
     cp "$src_binary" "$dest_binary"
 
     echo "Built: $dest_binary"
@@ -66,4 +73,4 @@ done
 
 echo "=== Build complete ==="
 echo "Binaries available in: $OUTPUT_DIR"
-ls -lh "$OUTPUT_DIR"/kuiper-proxmox-agent-*
+ls -lh "$OUTPUT_DIR"/"$AGENT"-*

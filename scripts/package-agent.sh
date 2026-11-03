@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build a kuiper-proxmox-agent Linux package locally for testing.
+# Build a Linux agent package locally for testing.
 #
-# Mirrors scripts/build-proxmox-agent-musl.sh: builds the static musl binary
-# with `cross`, then runs `nfpm` to produce deb/rpm/... from one config.
+# Mirrors scripts/build-agent-musl.sh: builds the static musl binary with
+# `cross`, then runs `nfpm` to produce deb/rpm/... from the agent's config.
 #
 # Usage:
-#   scripts/package-proxmox-agent.sh [arch]
-#     arch: x86_64 (default) | arm64
+#   scripts/package-agent.sh <agent> [arch]
+#     agent: kuiper-proxmox-agent | kuiper-libvirt-agent
+#     arch:  x86_64 (default) | arm64
 #
 # Env:
 #   PACKAGERS  space-separated nfpm packagers (default: "deb rpm")
@@ -22,11 +23,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-ARCH_INPUT="${1:-x86_64}"
+AGENT="${1:-}"
+ARCH_INPUT="${2:-x86_64}"
 PACKAGERS="${PACKAGERS:-deb rpm}"
-NFPM_CONFIG="kuiper-proxmox-agent/packaging/nfpm.yaml"
+NFPM_CONFIG="${AGENT}/packaging/nfpm.yaml"
 OUTPUT_REL="target/packages"
 OUTPUT_ABS="$PROJECT_ROOT/$OUTPUT_REL"
+
+if [[ -z "$AGENT" || ! -f "$NFPM_CONFIG" ]]; then
+    echo "Usage: $0 <agent> [arch]" >&2
+    echo "  agent: a crate with packaging/nfpm.yaml:" $(ls -d kuiper-*/packaging/nfpm.yaml | cut -d/ -f1) >&2
+    exit 1
+fi
 
 case "$ARCH_INPUT" in
     x86_64 | amd64)
@@ -47,10 +55,10 @@ esac
 # contents[].src, so we stage the built binary at a fixed, arch-independent path
 # (STAGE_BIN) that the config references. All paths are repo-relative so they
 # resolve for a local nfpm (run from PROJECT_ROOT) and inside Docker (/work).
-VERSION="$(grep -m1 '^version' kuiper-proxmox-agent/Cargo.toml | cut -d'"' -f2)"
+VERSION="$(grep -m1 '^version' "${AGENT}/Cargo.toml" | cut -d'"' -f2)"
 export VERSION
-BUILT_BIN="target/${RUST_TARGET}/release/kuiper-proxmox-agent"
-STAGE_BIN="target/nfpm/kuiper-proxmox-agent"
+BUILT_BIN="target/${RUST_TARGET}/release/${AGENT}"
+STAGE_BIN="target/nfpm/${AGENT}"
 
 if ! command -v cross >/dev/null 2>&1; then
     echo "Error: 'cross' is not installed." >&2
@@ -62,8 +70,8 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Building kuiper-proxmox-agent v${VERSION} for ${RUST_TARGET} (${ARCH}) ==="
-cross build --release --target "$RUST_TARGET" --package kuiper-proxmox-agent
+echo "=== Building ${AGENT} v${VERSION} for ${RUST_TARGET} (${ARCH}) ==="
+cross build --release --target "$RUST_TARGET" --package "$AGENT"
 # Best-effort strip; the host strip can't touch a Linux ELF, so ignore failures.
 strip "$BUILT_BIN" 2>/dev/null || true
 

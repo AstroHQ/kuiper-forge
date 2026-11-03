@@ -15,11 +15,19 @@ run = "cargo clippy --all-targets --fix --allow-dirty -- -D clippy::uninlined_fo
 
 [tasks."build:proxmox-musl"]
 description = "Cross-build kuiper-proxmox-agent static musl binaries (x86_64 + arm64). Needs Docker."
-run = "scripts/build-proxmox-agent-musl.sh"
+run = "scripts/build-agent-musl.sh kuiper-proxmox-agent"
+
+[tasks."build:libvirt-musl"]
+description = "Cross-build kuiper-libvirt-agent static musl binaries (x86_64 + arm64). Needs Docker."
+run = "scripts/build-agent-musl.sh kuiper-libvirt-agent"
 
 [tasks."package:proxmox-agent"]
 description = "Build a kuiper-proxmox-agent Linux package. Append 'arm64' for arm; set PACKAGERS to pick formats. Needs Docker + nfpm."
-run = "scripts/package-proxmox-agent.sh"
+run = "scripts/package-agent.sh kuiper-proxmox-agent"
+
+[tasks."package:libvirt-agent"]
+description = "Build a kuiper-libvirt-agent Linux package. Append 'arm64' for arm; set PACKAGERS to pick formats. Needs Docker + nfpm."
+run = "scripts/package-agent.sh kuiper-libvirt-agent"
 
 [tasks."seed:metrics"]
 description = "Fill the local coordinator database with mock runner/job history for the metrics page. Pass --clear to remove it, --help for options"

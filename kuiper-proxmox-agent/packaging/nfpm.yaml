@@ -4,7 +4,7 @@
 # Alpine uses OpenRC, so there's no managed service there until an OpenRC init
 # script is added.)
 #
-# Built via scripts/package-proxmox-agent.sh, which exports VERSION and ARCH and
+# Built via scripts/package-agent.sh, which exports VERSION and ARCH and
 # stages the target binary at target/nfpm/kuiper-proxmox-agent before running
 # nfpm from the repository root (so all `src` paths below are repo-relative).
 #

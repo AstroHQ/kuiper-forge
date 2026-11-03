@@ -1,0 +1,34 @@
+[Unit]
+Description=Kuiper libvirt Agent (ephemeral CI runner VMs)
+Documentation=https://github.com/AstroHQ/kuiper-forge
+# libvirtd on older distros, the modular virtqemud on newer ones. Ordering on a unit that isn't installed is a no-op
+After=network-online.target libvirtd.service virtqemud.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --system uses FHS paths: config /etc, logs /var/log, data/certs/VM disks /var/lib.
+ExecStart=/usr/bin/kuiper-libvirt-agent --system
+Restart=on-failure
+RestartSec=5
+# The agent destroys all managed VMs on SIGTERM, first waiting out any still being created; give cleanup time to
+# finish (each virsh/qemu-img step has its own timeout).
+TimeoutStopSec=360
+
+# Run as the dedicated system user created by the package's postinstall script. It reaches qemu:///system through
+# its `libvirt` group membership (also added by postinstall), not SupplementaryGroups=: Fedora's polkit rule checks
+# the user's groups in /etc/group, not the process's.
+User=kuiper
+Group=kuiper
+
+# systemd creates and owns these for the service user. They match the --system
+# paths (/var/lib/kuiper-libvirt-agent and /var/log/kuiper-libvirt-agent).
+# The state dir has to be traversable by others: the VM overlays live in its vms/ and QEMU runs as libvirt's own
+# user (libvirt-qemu or qemu). The certs dir under it is 0700 on its own.
+StateDirectory=kuiper-libvirt-agent
+StateDirectoryMode=0711
+LogsDirectory=kuiper-libvirt-agent
+LogsDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
