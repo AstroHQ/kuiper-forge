@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.1 - 2026-11-03
+#### Bug Fixes
+- lack of packaging of libvirt agent - (1896055) - *jfro*
+
+- - -
 ## v0.6.0 - 2026-10-31
 #### Features
 - **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
