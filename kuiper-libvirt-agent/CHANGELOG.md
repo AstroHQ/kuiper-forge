@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## v0.3.1 - 2026-11-03
+#### Bug Fixes
+- lack of packaging of libvirt agent - (1896055) - *jfro*
+
+- - -
 ## v0.3.0 - 2026-10-31
 #### Features
 - **(agents)** [**breaking**] cache runner downloads and the latest runner version - (eb2d321) - *jfro*
