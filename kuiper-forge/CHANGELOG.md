@@ -2,6 +2,15 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.9.1 - 2026-11-15
+#### Features
+- Forgejo webhook mode (workflow_job_* from Forgejo 17) - (8b727f2) - *jfro*
+
+#### Bug Fixes
+- **(setup)** pick the webhook steps from the webhook's forge, not the first one - (e94a543) - *jfro*
+- Infallible router errors in server.rs (unreachable call on newer stable Rust) - (9dc0953) - *jfro*
+
+- - -
 ## v0.9.0 - 2026-10-31
 #### Features
 - **(admin)** flag agents running an out-of-date version - (0707562) - *jfro*
