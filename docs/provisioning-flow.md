@@ -129,7 +129,7 @@ repos can exhaust the GitHub App's API rate limit; the coordinator warns below 6
 
 | Aspect | Fixed Capacity | Webhook | Polling |
 |--------|---------------|---------|---------|
-| **Trigger** | 30s reconciliation loop | GitHub webhook event | API scan every `interval_secs` |
+| **Trigger** | 30s reconciliation loop | GitHub or Forgejo (17+) webhook event | API scan every `interval_secs` |
 | **Pre-provisioning** | Yes - maintains pool | No - just-in-time | No - just-in-time |
 | **Job latency** | Low (runners ready) | Higher (VM boot time) | Higher (scan interval + VM boot) |
 | **Resource usage** | Constant | On-demand | On-demand |
