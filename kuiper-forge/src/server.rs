@@ -1123,7 +1123,8 @@ pub async fn run_server(
                                     .boxed_unsync();
                                 Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::other(e.to_string())),
+                            // the router's error is Infallible
+                            Err(never) => match never {},
                         }
                     } else {
                         // Route to HTTP (webhook) using axum
@@ -1139,7 +1140,7 @@ pub async fn run_server(
                                     .boxed_unsync();
                                 Ok(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::other(e)),
+                            Err(never) => match never {},
                         }
                     }
                 }
@@ -1313,7 +1314,8 @@ async fn run_grpc_only_server(
                                     .boxed_unsync();
                                 Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::other(e.to_string())),
+                            // the router's error is Infallible
+                            Err(never) => match never {},
                         }
                     }
                 });
