@@ -126,7 +126,7 @@ name = "my-org"
 # =============================================================================
 # Controls how runners are created:
 # - "fixed_capacity" (default): Maintain a constant pool of runners
-# - "webhook": Create runners on-demand via GitHub webhooks
+# - "webhook": Create runners on-demand via GitHub webhooks, or Forgejo 17+ job webhooks
 
 [provisioning]
 mode = "fixed_capacity"  # Options: "fixed_capacity" or "webhook"
@@ -141,9 +141,18 @@ mode = "fixed_capacity"  # Options: "fixed_capacity" or "webhook"
 # # Webhook endpoint path (default: "/webhook")
 # path = "/webhook"
 #
-# # GitHub webhook secret for validating X-Hub-Signature-256 headers
-# # This secret must match the secret configured in your GitHub webhook settings
-# secret = "your-github-webhook-secret"
+# # Webhook secret: validates GitHub's X-Hub-Signature-256 header, or
+# # X-Forgejo-Signature for a Forgejo forge. Must match the secret in the
+# # GitHub App's or Forgejo webhook's settings
+# secret = "your-webhook-secret"
+#
+# # Forge the deliveries come from (default: the first GitHub forge, else the first
+# # forge). For a Forgejo forge (17+), add a Forgejo webhook in the org's (or repo's)
+# # Settings > Webhooks: target https://<coordinator>/webhook, POST, application/json,
+# # this secret, custom events: every Workflow job event. (Forgejo's API can't set
+# # those events, so use the web UI.) Other forges' jobs are found by the 5-minute
+# # recovery scan.
+# forge = "github"
 #
 # # Label mappings: map workflow job labels to runner scopes
 # # When a workflow_job webhook arrives, the coordinator checks each mapping

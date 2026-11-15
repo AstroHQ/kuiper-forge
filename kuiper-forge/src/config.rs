@@ -63,7 +63,8 @@ pub enum ProvisioningMode {
 
     /// Webhook-driven dynamic mode: create runners on-demand.
     ///
-    /// Runners are created in response to GitHub webhook events (workflow_job).
+    /// Runners are created in response to webhook events: GitHub's `workflow_job`,
+    /// or Forgejo 17's `workflow_job_*` for a Forgejo webhook forge.
     /// The job's labels determine which agent/VM base to use. No runners are
     /// pre-provisioned; they are created just-in-time when jobs are queued.
     Webhook,
@@ -169,7 +170,7 @@ impl Default for ProvisioningConfig {
 /// Webhook configuration for dynamic runner provisioning.
 ///
 /// This is used when `provisioning.mode = "webhook"`. The coordinator will
-/// listen for GitHub webhook events and create runners on-demand.
+/// listen for GitHub or Forgejo webhook events and create runners on-demand.
 ///
 /// Webhooks are served on the same port as the gRPC server (configured in `[grpc]`).
 /// The server multiplexes based on content-type:
@@ -183,10 +184,11 @@ pub struct WebhookConfig {
     #[serde(default = "default_webhook_path")]
     pub path: String,
 
-    /// The webhook secret for validating GitHub webhook signatures.
+    /// The webhook secret for validating webhook signatures.
     ///
-    /// GitHub signs webhook payloads with HMAC-SHA256 using this secret.
-    /// The coordinator validates the `X-Hub-Signature-256` header.
+    /// The forge signs webhook payloads with HMAC-SHA256 using this secret. The
+    /// coordinator validates GitHub's `X-Hub-Signature-256` header, or Forgejo's
+    /// `X-Forgejo-Signature` for a Forgejo webhook forge.
     pub secret: String,
 
     /// Required labels that ALL jobs must have to be accepted (default: ["self-hosted"]).
@@ -223,8 +225,11 @@ pub struct WebhookConfig {
     #[serde(default = "default_queued_scan_lookback_hours")]
     pub queued_scan_lookback_hours: u64,
 
-    /// Configured name of the GitHub forge these webhooks come from (default:
-    /// the first GitHub forge). Webhook deliveries are GitHub-only for now.
+    /// Configured name of the forge these webhooks come from (default: the first
+    /// GitHub forge, else the first forge). A GitHub forge gets `workflow_job`
+    /// deliveries from its GitHub App; a Forgejo forge (17 or newer) gets
+    /// `workflow_job_*` deliveries from a Forgejo webhook on the org, user or repo.
+    /// Other forges' jobs are found by the recovery scan.
     #[serde(default)]
     pub forge: Option<String>,
 }
@@ -379,7 +384,7 @@ pub struct Config {
     ///
     /// Controls how runners are created:
     /// - `fixed_capacity` (default): Maintain a constant pool of runners
-    /// - `webhook`: Create runners on-demand via GitHub webhooks
+    /// - `webhook`: Create runners on-demand via GitHub or Forgejo (17+) webhooks
     #[serde(default)]
     pub provisioning: ProvisioningConfig,
 
@@ -425,7 +430,8 @@ pub struct ForgeConfig {
 pub enum ForgeKindConfig {
     /// GitHub, authenticated as a GitHub App.
     Github(GitHubConfig),
-    /// Forgejo (15 or newer), authenticated with an access token. Polling mode only.
+    /// Forgejo (15 or newer), authenticated with an access token. Polling mode, or
+    /// webhook mode on Forgejo 17 or newer.
     Forgejo(ForgejoConfig),
 }
 
@@ -623,6 +629,33 @@ impl Config {
             );
         }
         Ok(forges)
+    }
+}
+
+impl Config {
+    /// The forge webhook deliveries come from: `[provisioning.webhook] forge`, or
+    /// else the first GitHub forge, or else the first forge. GitHub forges get
+    /// `workflow_job` deliveries; Forgejo forges (17+) get `workflow_job_*` ones.
+    pub fn webhook_forge(&self, webhook: &WebhookConfig) -> Result<ForgeConfig> {
+        let forges = self.resolved_forges()?;
+        let found = match &webhook.forge {
+            Some(name) => forges.iter().find(|f| &f.name == name),
+            None => forges
+                .iter()
+                .find(|f| matches!(f.kind, ForgeKindConfig::Github(_)))
+                .or_else(|| forges.first()),
+        };
+        match found {
+            Some(forge) => Ok(forge.clone()),
+            None => anyhow::bail!(
+                "provisioning.webhook.forge must name a configured forge{}",
+                webhook
+                    .forge
+                    .as_deref()
+                    .map(|n| format!(" ('{n}' isn't one)"))
+                    .unwrap_or_default()
+            ),
+        }
     }
 }
 
@@ -1087,8 +1120,9 @@ private_key_path = "{data_dir_str}/github-app.pem"
 # app_id = 123456
 # private_key_path = "{data_dir_str}/github-app.pem"
 #
-# A Forgejo (15+) forge is polled for queued jobs, so it needs
-# [provisioning] mode = "polling". Its runners are one-job runners, on agents
+# A Forgejo (15+) forge needs [provisioning] mode = "polling", or "webhook" with
+# [provisioning.webhook] forge = "<its name>" on Forgejo 17+ (a Forgejo webhook
+# on the org/user/repo, JSON, Workflow job events). Its runners are one-job runners, on agents
 # that support them (proxmox Linux/Windows VMs, tart VMs). Scopes, and what the
 # token needs:
 #   "org"         the org's repos     org owner, write:organization + read:repository
@@ -1202,7 +1236,7 @@ enabled = false
 #   Use the [[runners]] sections below to define pools with target counts.
 #   The coordinator ensures the target number of runners is always available.
 #
-# - "webhook": Create runners on-demand via GitHub webhook events.
+# - "webhook": Create runners on-demand via GitHub (or Forgejo 17+) webhook events.
 #   Runners are created just-in-time when workflow jobs are queued.
 #   Use [provisioning.webhook] to configure the webhook listener.
 #
@@ -1226,7 +1260,8 @@ mode = "fixed_capacity"
 #
 # [provisioning.webhook]
 # path = "/webhook"                    # Webhook endpoint path (default: /webhook)
-# secret = "your-github-webhook-secret" # For validating X-Hub-Signature-256
+# secret = "your-webhook-secret"       # For X-Hub-Signature-256 (GitHub) or X-Forgejo-Signature
+# forge = "github"                     # Forge sending them (default: first GitHub forge)
 #
 # # Required labels pre-filter (default: ["self-hosted"])
 # # Jobs must have ALL these labels to be considered. This prevents accepting

@@ -35,6 +35,7 @@ use kuiper_forge::runner_state;
 use kuiper_forge::server::{ServerConfig, run_server};
 use kuiper_forge::setup::{self, SetupArgs};
 use kuiper_forge::tls::build_server_trust;
+use kuiper_forge::webhook::WebhookSource;
 
 /// CI Runner Coordinator - Manages ephemeral GitHub Actions runners
 #[derive(Parser)]
@@ -397,9 +398,24 @@ async fn serve(
                         "Forgejo API validation failed for forge '{}'. Fix the configuration or use --dry-run to skip forge integration.",
                         forge_config.name
                     ))?;
-                    if config.provisioning.mode != ProvisioningMode::Polling {
+                    if config.provisioning.mode == ProvisioningMode::FixedCapacity {
                         warn!(
-                            "Forge '{}' is Forgejo but provisioning mode isn't \"polling\": its jobs are only found by the {}-minute recovery scan",
+                            "Forge '{}' is Forgejo, whose jobs fixed-capacity pools don't serve: use mode \"polling\" or \"webhook\"",
+                            forge_config.name
+                        );
+                    }
+                    // in webhook mode a Forgejo forge that isn't the webhook forge is
+                    // only found by the recovery scan
+                    if config.provisioning.mode == ProvisioningMode::Webhook
+                        && config
+                            .provisioning
+                            .webhook
+                            .as_ref()
+                            .and_then(|w| config.webhook_forge(w).ok())
+                            .is_none_or(|f| f.name != forge_config.name)
+                    {
+                        warn!(
+                            "Forge '{}' is Forgejo but isn't the webhook forge: its jobs are only found by the {}-minute recovery scan",
                             forge_config.name,
                             fleet::RECOVERY_SCAN_INTERVAL.as_secs() / 60
                         );
@@ -473,13 +489,18 @@ async fn serve(
     ) {
         (ProvisioningMode::Webhook, Some(wh_config), Some(wh_notifier)) => {
             let mut wh_config = wh_config.clone();
-            let forge_name = webhook_forge(&config, &wh_config, &forges)?;
+            let (forge_name, source) = webhook_forge(&config, &wh_config, &forges)?;
             info!(
-                "Webhook mode enabled - webhook endpoint at {} for forge '{}'",
-                wh_config.path, forge_name
+                "Webhook mode enabled - webhook endpoint at {} for {} forge '{}'",
+                wh_config.path,
+                match source {
+                    WebhookSource::Github => "GitHub",
+                    WebhookSource::Forgejo { .. } => "Forgejo",
+                },
+                forge_name
             );
             wh_config.forge = Some(forge_name);
-            Some((wh_config, wh_notifier))
+            Some((wh_config, wh_notifier, source))
         }
         _ => None,
     };
@@ -1157,38 +1178,20 @@ fn parse_duration(s: &str) -> Result<Duration> {
     }
 }
 
-/// The forge webhook deliveries belong to: the configured `forge`, or the first
-/// GitHub forge. Webhooks are GitHub-only for now.
+/// The forge webhook deliveries belong to (see [`Config::webhook_forge`]), which
+/// must also be in the registry, and how its deliveries look.
 fn webhook_forge(
     config: &Config,
     webhook: &WebhookConfig,
     forges: &ForgeRegistry,
-) -> Result<String> {
-    let name = match &webhook.forge {
-        Some(name) => name.clone(),
-        None => config
-            .resolved_forges()
-            .ok()
-            .and_then(|list| {
-                list.into_iter()
-                    .find(|f| matches!(f.kind, ForgeKindConfig::Github(_)))
-                    .map(|f| f.name)
-            })
-            .unwrap_or_else(|| forges.default_name().to_string()),
-    };
+) -> Result<(String, WebhookSource)> {
+    let forge = config.webhook_forge(webhook)?;
     forges
-        .get(&name)
+        .get(&forge.name)
         .with_context(|| "provisioning.webhook.forge must name a configured forge")?;
-    let is_github = config.resolved_forges().is_ok_and(|list| {
-        list.iter()
-            .any(|f| f.name == name && matches!(f.kind, ForgeKindConfig::Github(_)))
-    });
-    if !is_github {
-        anyhow::bail!(
-            "provisioning.webhook.forge '{name}' must be a GitHub forge; Forgejo forges use polling"
-        );
-    }
-    Ok(name)
+    let source = WebhookSource::for_forge(&forge)
+        .with_context(|| format!("Invalid webhook forge '{}'", forge.name))?;
+    Ok((forge.name, source))
 }
 
 #[cfg(test)]

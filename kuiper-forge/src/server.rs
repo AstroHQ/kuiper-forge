@@ -3,7 +3,7 @@
 //! Provides:
 //! - RegistrationService: Token-based agent registration (no client cert required)
 //! - AgentService: Bidirectional streaming for agent communication (client cert required)
-//! - Webhook endpoint: HTTP endpoint for GitHub webhooks (webhook mode only)
+//! - Webhook endpoint: HTTP endpoint for GitHub or Forgejo webhooks (webhook mode only)
 //!
 //! Security model:
 //! - Single port with optional client certificate verification
@@ -47,7 +47,7 @@ use crate::metrics::MetricsStore;
 use crate::pending_jobs::PendingJobStore;
 use crate::runner_state::RunnerStateStore;
 use crate::tls::ServerTrust;
-use crate::webhook::{self, WebhookNotifier, WebhookState};
+use crate::webhook::{self, WebhookNotifier, WebhookSource, WebhookState};
 
 /// How long a disconnected agent gets to come back before its in-flight runners are failed over.
 /// Short blips (agent restart, tls hiccup) reconnect well inside this.
@@ -886,7 +886,7 @@ pub async fn run_server(
     fleet_notifier: Option<FleetNotifier>,
     runner_state: Option<Arc<RunnerStateStore>>,
     pending_job_store: Option<Arc<PendingJobStore>>,
-    webhook_config: Option<(WebhookConfig, WebhookNotifier)>,
+    webhook_config: Option<(WebhookConfig, WebhookNotifier, WebhookSource)>,
     admin_state: Option<Arc<AdminState>>,
 ) -> Result<()> {
     // If no webhook config and no admin state, use the simple gRPC-only path
@@ -905,7 +905,7 @@ pub async fn run_server(
     // Build HTTP router based on what's enabled
     let (http_router, wh_path_for_log, pending_job_store_for_grpc) =
         match (webhook_config, admin_state.clone()) {
-            (Some((wh_config, wh_notifier)), admin) => {
+            (Some((wh_config, wh_notifier, source)), admin) => {
                 // Webhook mode (with optional admin)
                 let pjs = pending_job_store.expect("pending_job_store required in webhook mode");
                 let webhook_state = Arc::new(WebhookState {
@@ -913,6 +913,7 @@ pub async fn run_server(
                         .forge
                         .clone()
                         .unwrap_or_else(|| crate::forge::LEGACY_GITHUB_FORGE.to_string()),
+                    source,
                     config: wh_config.clone(),
                     notifier: wh_notifier,
                     pending_job_store: pjs.clone(),
@@ -1122,7 +1123,8 @@ pub async fn run_server(
                                     .boxed_unsync();
                                 Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::other(e.to_string())),
+                            // the router's error is Infallible
+                            Err(never) => match never {},
                         }
                     } else {
                         // Route to HTTP (webhook) using axum
@@ -1138,7 +1140,7 @@ pub async fn run_server(
                                     .boxed_unsync();
                                 Ok(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::other(e)),
+                            Err(never) => match never {},
                         }
                     }
                 }
@@ -1312,7 +1314,8 @@ async fn run_grpc_only_server(
                                     .boxed_unsync();
                                 Ok::<_, std::io::Error>(hyper::Response::from_parts(parts, body))
                             }
-                            Err(e) => Err(std::io::Error::other(e.to_string())),
+                            // the router's error is Infallible
+                            Err(never) => match never {},
                         }
                     }
                 });

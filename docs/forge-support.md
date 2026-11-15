@@ -20,7 +20,7 @@ polling, whichever it supports.
 | 3 | Forgejo backend + `forgejo-runner one-job --handle` on proxmox Linux VMs | **Done** |
 | 4 | Idle runner timeout (job listed as waiting but never starts) | **Done** |
 | 5 | End-to-end tests against Forgejo 16 and 17 in Docker | **Done** |
-| 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | Later, after this PR ships |
+| 6 | Forgejo 17 job webhooks (`workflow_job_*`) into the same queue | **Done** (webhook mode with a Forgejo webhook forge) |
 | – | Gitea backend (webhook, or polling via its 1.25+ jobs API) | Later, after this PR ships |
 | – | Forgejo user (`@name`) and instance (`*`) scopes | **Done** |
 | – | forgejo-runner builds for every platform, published on kuiper-forge | **Done** ([forgejo-runner-v13.2.0](https://github.com/AstroHQ/kuiper-forge/releases/tag/forgejo-runner-v13.2.0)) |
@@ -36,8 +36,6 @@ These are tabled for follow-up work:
   tested under PowerShell for Linux, but it hasn't run on a real Windows VM. Testing it
   (and fixing what turns up) comes after this PR ships; see
   [Testing on real hosts](#testing-on-real-hosts).
-- **Forgejo 17 job webhooks** (step 6). Polling covers Forgejo 15+; webhooks only help
-  once the instance runs 17, and git.knope.dev is on 16.
 - **Gitea.** A Gitea backend, by webhook or by polling its 1.25+ jobs API.
 
 ### Done
@@ -51,6 +49,47 @@ silently skips repos whose API calls fail. The GitHub scan reads every page of w
 runs, of each run's jobs, and of App installations, so large matrix runs aren't stuck
 behind the first page. See [polling-mode.md](polling-mode.md) and
 [provisioning-flow.md](provisioning-flow.md).
+
+**Forgejo webhook mode (step 6).** `mode = "webhook"` with `[provisioning.webhook]
+forge = "<a Forgejo forge>"` (or a lone Forgejo forge, which is the default) takes
+Forgejo 17's `workflow_job_*` deliveries into the same pending queue.
+
+- `webhook.rs`: `WebhookSource` (GitHub, or Forgejo with the forge's scopes) picks the
+  handler. Forgejo deliveries are checked against `X-Forgejo-Signature` (plain hex, constant
+  time) and read `X-Forgejo-Event`; a missing or bad signature gets 401, and the GitHub-style
+  headers Forgejo also sends aren't used. GitHub deliveries are handled as before.
+- `waiting` queues the job keyed `<forge>:<handle>`, the same key the poller uses, so a
+  redelivery or the recovery scan finding it too never queues it twice. Its scope is the
+  configured scope covering the repository (the repo itself, else its org or user, else
+  `*`); a repository no scope covers is ignored, since the token can't register runners
+  there. `required_labels` and `label_mappings` apply through `resolve_runner_scope`.
+  `blocked` waits for the job's `waiting` delivery.
+- `running` sets the job's start in the history; `success`, `failure`, `cancelled` and
+  `skipped` its finish and conclusion, and clean up as GitHub's `completed` does. Forgejo
+  sends no times, so they're when the delivery arrives.
+- The recovery scan keeps running every 5 minutes (and at startup) as the backup for
+  missed deliveries, as it does for GitHub webhooks.
+- `Config::webhook_forge` picks the forge (`forge`, else the first GitHub forge, else the
+  first forge). `kuiper-forge setup` offers webhook mode for a Forgejo forge and prints
+  how to add the hook.
+
+Setting it up: in the org's (or user's, or repo's) Settings → Webhooks, add a **Forgejo**
+webhook with target `https://<coordinator>/webhook`, POST, `application/json`, the config's
+secret, and custom events: every Workflow job event. Forgejo 17 or newer.
+The endpoint is on the coordinator's TLS port, so Forgejo has to trust its certificate:
+put a proxy with a public certificate in front (as for GitHub), or add kuiper's CA to the
+Forgejo host's trust store. The e2e below used `[webhook] SKIP_TLS_VERIFY = true` on a
+throwaway instance.
+
+**Tested.** 12 integration tests (`kuiper-forge/tests/forgejo_webhook.rs`) feed the
+captured deliveries through the router. End to end on a fresh Forgejo 17.0.0 in Docker, the coordinator in webhook mode with an org
+forge and the throwaway shell agent, 12/12: a job pushed while the coordinator was down
+was recovered by the startup scan and succeeded; a `build` + `needs:` run went through
+real signed deliveries (each job queued from its `waiting` delivery) and succeeded with
+one runner per job; deliveries with a bad, missing or GitHub-only signature got 401 and
+queued nothing; every job had a start, finish and conclusion in the history; nothing was
+left pending or registered on Forgejo. An earlier run on an instance with older workflows
+still in the repo ran 9 jobs at once, one runner each.
 
 **Multi-forge groundwork.**
 
@@ -82,10 +121,10 @@ behind the first page. See [polling-mode.md](polling-mode.md) and
   not.
 - `[runner_scope]` is optional now and only used (and required) in fixed-capacity
   mode, for pool runners; a polling-only Forgejo config leaves it out.
-- Polling mode only: Forgejo can't be the first forge in fixed-capacity mode (pools
-  register long-lived runners there), and `[provisioning.webhook].forge` must be a
-  GitHub forge. In webhook mode a Forgejo forge is only picked up by the 5-minute
-  recovery scan (a warning says so).
+- Polling or webhook mode: Forgejo can't be the first forge in fixed-capacity mode
+  (pools register long-lived runners there). In webhook mode a Forgejo forge that
+  isn't `[provisioning.webhook].forge` is only picked up by the 5-minute recovery scan
+  (a warning says so); see Forgejo webhook mode above.
 - `forgejo.rs`: `ForgejoClient` implements `Forge`. It lists
   `…/actions/runners/jobs` per scope and keeps `status == "waiting"`; a job's key is its
   `handle`. Repo names come from `/repositories/{id}`, cached. Forgejo answers `null`
@@ -216,6 +255,21 @@ Verified against Forgejo source (v16.0.5, v17.0.0) and a live 17.0.0 instance.
   `JobKey` for Forgejo will be the `handle` (one per attempt, so reruns are new jobs).
 - **Job webhooks:** only from Forgejo 17.0 (events `workflow_job_waiting`, `_running`,
   `_success`, `_failure`, `_cancelled`, `_blocked`, `_skipped`). 15/16 need polling.
+  Captured from a live 17.0.0 (`kuiper-forge/tests/fixtures/forgejo-17/`):
+  - Headers: `X-Forgejo-Event` (and `X-Gitea-`/`X-Gogs-`/`X-GitHub-Event`, all the same
+    `workflow_job_<status>`), `X-Forgejo-Signature` = plain hex HMAC-SHA256 of the body
+    (same value in `X-Gitea-`/`X-Gogs-Signature`), plus GitHub-style
+    `X-Hub-Signature-256: sha256=<hex>` and `X-Hub-Signature: sha1=…`.
+  - Body `{action, job, run}`: `action` is `new_job_attempt`, `job_status_changed` or
+    `job_completed`; `job` has `id`, `run_id`, `attempt`, `handle`, `name`, `runs_on`,
+    `needs`, `task_id`, `status`, and no timestamps or runner name; `run` has the
+    `repository` (with `owner.login`, `full_name`), `workflow_id` (the file), `title`.
+  - A job held by `needs:` arrives as `new_job_attempt` + `blocked`, then
+    `job_status_changed` + `waiting`; a job with no `needs` as `new_job_attempt` +
+    `waiting`. So `waiting` is what queues a job, whatever the action.
+  - The API's hook `events` field ignores `workflow_job_*` (it comes back `[]`); make
+    the hook in the web UI (Settings → Webhooks → Add webhook → Forgejo, custom events,
+    every Workflow job event).
 - **Token permissions** (tested, 8 tokens × 8 endpoints):
 
   | Runners at | Token scope | User must be |
