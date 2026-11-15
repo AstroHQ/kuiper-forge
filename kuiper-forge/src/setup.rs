@@ -1027,6 +1027,17 @@ async fn admin_step(ask: &Ask, args: &SetupArgs, config: &Config, data_dir: &Pat
     Ok(())
 }
 
+/// Whether the forge the webhook serves is Forgejo, so setup prints Forgejo's webhook steps.
+/// That's `[provisioning.webhook] forge`, not the first forge: a config can list GitHub and Forgejo.
+fn webhook_forge_is_forgejo(config: &Config) -> bool {
+    config
+        .provisioning
+        .webhook
+        .as_ref()
+        .and_then(|webhook| config.webhook_forge(webhook).ok())
+        .is_some_and(|forge| matches!(forge.kind, ForgeKindConfig::Forgejo(_)))
+}
+
 /// Print what to do next. Paths are spelled out when they aren't the defaults, so the commands work as pasted.
 fn next_steps(
     config: &Config,
@@ -1055,12 +1066,7 @@ fn next_steps(
         println!("Admin UI:          {url}/admin");
     }
     if let Some(secret) = webhook {
-        let forgejo = config.resolved_forges().is_ok_and(|forges| {
-            forges
-                .first()
-                .is_some_and(|f| matches!(f.kind, ForgeKindConfig::Forgejo(_)))
-        });
-        if forgejo {
+        if webhook_forge_is_forgejo(config) {
             println!(
                 "\nAdd a Forgejo webhook in your org's (or repo's) settings, Webhooks > Add > Forgejo:"
             );
@@ -1139,6 +1145,52 @@ pub async fn run(args: SetupArgs, config_path: &Path, data_dir: &Path) -> Result
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn mixed_forge_config(webhook_forge: &str) -> Config {
+        use figment::Figment;
+        use figment::providers::{Format, Toml};
+        let toml = format!(
+            r#"
+[tls]
+ca_cert = "/ca.crt"
+ca_key = "/ca.key"
+server_cert = "/server.crt"
+server_key = "/server.key"
+
+[provisioning]
+mode = "webhook"
+
+[provisioning.webhook]
+secret = "s"
+forge = "{webhook_forge}"
+
+[[forges]]
+name = "knope"
+type = "forgejo"
+url = "https://git.knope.dev"
+token = "abc"
+scopes = ["lodge"]
+
+[[forges]]
+name = "gh"
+type = "github"
+app_id = 7
+private_key_path = "/k.pem"
+
+[runner_scope]
+type = "organization"
+name = "test-org"
+"#
+        );
+        Figment::new().merge(Toml::string(&toml)).extract().unwrap()
+    }
+
+    #[test]
+    fn test_next_steps_follow_the_webhook_forge() {
+        // Forgejo listed first, but the webhook is GitHub's: GitHub App steps
+        assert!(!webhook_forge_is_forgejo(&mixed_forge_config("gh")));
+        assert!(webhook_forge_is_forgejo(&mixed_forge_config("knope")));
+    }
 
     fn any_value(_: &str) -> Result<(), String> {
         Ok(())
