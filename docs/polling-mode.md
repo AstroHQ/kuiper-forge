@@ -24,9 +24,8 @@ per job, exactly like webhook mode.
 ## Motivation
 
 - **Forgejo 15/16 has no job webhooks.** Workflow job webhook events first shipped in
-  Forgejo 17.0 (2026-10-15). Instances that can't or won't upgrade yet (ours is on
-  16.0.5) need another way to learn about queued jobs. Forgejo 15+ does expose a cheap
-  queued-jobs API (see [Forgejo specifics](#forgejo-specifics)).
+  Forgejo 17.0 (2026-10-15). Instances that can't or won't upgrade yet need another
+  way to learn about queued jobs. Forgejo 15+ does expose a cheap queued-jobs API (see [Forgejo specifics](#forgejo-specifics)).
 - **Coordinators that webhooks can't reach.** A coordinator behind NAT or on a private
   network can poll outbound without exposing an HTTP endpoint to the forge.
 - **Most of the machinery already exists.** Webhook mode already has a DB-backed
