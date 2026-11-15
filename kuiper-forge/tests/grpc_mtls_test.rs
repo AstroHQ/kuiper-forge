@@ -132,7 +132,14 @@ impl TestFixture {
             };
             let pending_store =
                 Arc::new(kuiper_forge::pending_jobs::PendingJobStore::new(db.pool()));
-            (Some((wh_config, webhook_notifier)), Some(pending_store))
+            (
+                Some((
+                    wh_config,
+                    webhook_notifier,
+                    kuiper_forge::webhook::WebhookSource::Github,
+                )),
+                Some(pending_store),
+            )
         } else {
             (None, None)
         };

@@ -94,7 +94,7 @@ pub struct SetupArgs {
     #[arg(long = "forgejo-scope")]
     pub forgejo_scopes: Vec<String>,
 
-    /// How runners get created. Forgejo only supports polling
+    /// How runners get created. Forgejo supports polling, and webhook on Forgejo 17+
     #[arg(long, value_enum)]
     pub mode: Option<ModeChoice>,
 
@@ -677,11 +677,25 @@ fn mode_step(ask: &Ask, args: &SetupArgs, forge: Option<&ForgeConfig>) -> Result
         .as_ref()
         .map(|_| ModeChoice::FixedCapacity));
     match (mode, forge, &ask.theme) {
-        (Some(mode), Some(_), _) if !github && mode != ModeChoice::Polling => {
-            bail!("Forgejo only supports polling, leave out --mode and --runner-scope")
+        (Some(ModeChoice::FixedCapacity), Some(_), _) if !github => {
+            bail!(
+                "Forgejo supports polling or webhook, not fixed capacity: leave out --runner-scope"
+            )
         }
         (Some(mode), _, _) => Ok(mode),
-        // a forge can be added later without changing this, and it's all Forgejo can do
+        (None, Some(_), Some(theme)) if !github => {
+            let choices = [ModeChoice::Polling, ModeChoice::Webhook];
+            let picked = ask.select(
+                theme,
+                "How should runners get created?",
+                &[
+                    "Polling: scan for queued jobs, nothing has to reach this host",
+                    "Webhook: Forgejo 17+ tells us about jobs, needs to reach this host",
+                ],
+            )?;
+            Ok(choices[picked])
+        }
+        // a forge can be added later without changing this
         (None, _, Some(theme)) if github => {
             let choices = [
                 ModeChoice::Polling,
@@ -1041,10 +1055,26 @@ fn next_steps(
         println!("Admin UI:          {url}/admin");
     }
     if let Some(secret) = webhook {
-        println!(
-            "\nPoint your GitHub App's webhook at {url}/webhook, subscribed to Workflow jobs,"
-        );
-        println!("with this secret (it's in the config too): {secret}");
+        let forgejo = config.resolved_forges().is_ok_and(|forges| {
+            forges
+                .first()
+                .is_some_and(|f| matches!(f.kind, ForgeKindConfig::Forgejo(_)))
+        });
+        if forgejo {
+            println!(
+                "\nAdd a Forgejo webhook in your org's (or repo's) settings, Webhooks > Add > Forgejo:"
+            );
+            println!(
+                "target {url}/webhook, POST, application/json, custom events: every Workflow job event,"
+            );
+            println!("with this secret (it's in the config too): {secret}");
+            println!("(Forgejo 17+; its API can't set those events, so use the web UI)");
+        } else {
+            println!(
+                "\nPoint your GitHub App's webhook at {url}/webhook, subscribed to Workflow jobs,"
+            );
+            println!("with this secret (it's in the config too): {secret}");
+        }
     }
 }
 
@@ -1359,6 +1389,20 @@ mod tests {
             mode_step(&ask, &args, Some(&forgejo())).unwrap(),
             ModeChoice::Polling
         );
+        // Forgejo 17+ can deliver job webhooks
+        let webhook = SetupArgs {
+            mode: Some(ModeChoice::Webhook),
+            ..Default::default()
+        };
+        assert_eq!(
+            mode_step(&ask, &webhook, Some(&forgejo())).unwrap(),
+            ModeChoice::Webhook
+        );
+        let fixed = SetupArgs {
+            mode: Some(ModeChoice::FixedCapacity),
+            ..Default::default()
+        };
+        assert!(mode_step(&ask, &fixed, Some(&forgejo())).is_err());
     }
 
     /// Every combination setup can write has to load and pass validation.
@@ -1372,6 +1416,7 @@ mod tests {
             (Some(github()), ModeChoice::Webhook, None),
             (Some(github()), ModeChoice::FixedCapacity, Some(scope)),
             (Some(forgejo()), ModeChoice::Polling, None),
+            (Some(forgejo()), ModeChoice::Webhook, None),
             (None, ModeChoice::Polling, None),
         ];
         for (forge, mode, scope) in cases {
@@ -1399,6 +1444,9 @@ mod tests {
             assert_eq!(loaded.tls.ca_cert, config.tls.ca_cert);
             if has_forge {
                 assert_eq!(loaded.resolved_forges().unwrap().len(), 1);
+                if let Some(webhook) = &loaded.provisioning.webhook {
+                    loaded.webhook_forge(webhook).unwrap();
+                }
             }
         }
     }

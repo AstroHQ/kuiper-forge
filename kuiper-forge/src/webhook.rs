@@ -1,9 +1,10 @@
 //! Webhook handler for dynamic runner provisioning.
 //!
-//! Handles GitHub `workflow_job` webhook events to create runners on-demand.
-//! This module provides:
-//! - GitHub webhook payload parsing
-//! - HMAC-SHA256 signature validation
+//! Handles GitHub `workflow_job` and Forgejo (17+) `workflow_job_*` webhook events
+//! to create runners on-demand. This module provides:
+//! - GitHub and Forgejo webhook payload parsing
+//! - HMAC-SHA256 signature validation (GitHub's `X-Hub-Signature-256`, Forgejo's
+//!   `X-Forgejo-Signature`)
 //! - Label matching against configured mappings
 //! - Axum HTTP handlers for the webhook endpoint
 
@@ -23,13 +24,62 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::config::{LabelMapping, RunnerScope, WebhookConfig};
+use crate::config::{ForgeConfig, ForgeKindConfig, LabelMapping, RunnerScope, WebhookConfig};
 use crate::forge::JobKey;
 use crate::metrics::MetricsStore;
 use crate::pending_jobs::PendingJobStore;
 
 /// GitHub webhook event types we care about
 const WORKFLOW_JOB_EVENT: &str = "workflow_job";
+
+/// Prefix of Forgejo's job events: `workflow_job_waiting`, `_running`, `_success`, ...
+const FORGEJO_JOB_EVENT_PREFIX: &str = "workflow_job_";
+
+/// Forgejo `workflow_job_*` webhook payload (Forgejo 17+, partial - only fields we need).
+///
+/// `action` is `new_job_attempt`, `job_status_changed` or `job_completed`; the job's
+/// state is in `job.status` (and the event name). A job held by `needs:` arrives as a
+/// `new_job_attempt` that's `blocked`, then as `job_status_changed` to `waiting`.
+#[derive(Debug, Deserialize)]
+pub struct ForgejoJobEvent {
+    pub action: String,
+    pub job: ForgejoJob,
+    pub run: ForgejoRun,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgejoJob {
+    pub id: i64,
+    /// One per attempt; the poller keys jobs by it and `forgejo-runner one-job
+    /// --handle` runs exactly this attempt
+    #[serde(default)]
+    pub handle: String,
+    pub name: String,
+    #[serde(default)]
+    pub runs_on: Vec<String>,
+    /// waiting, blocked, running, success, failure, cancelled, skipped
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgejoRun {
+    pub repository: ForgejoRepository,
+    /// The workflow file, like `ci.yml`
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgejoRepository {
+    pub full_name: String,
+    pub name: String,
+    pub owner: ForgejoOwner,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForgejoOwner {
+    pub login: String,
+}
 
 /// GitHub workflow_job webhook payload (partial - only fields we need)
 #[derive(Debug, Deserialize)]
@@ -141,11 +191,36 @@ impl WebhookNotifier {
     }
 }
 
+/// What kind of forge webhook deliveries come from, which decides the headers,
+/// signature and payload the handler expects.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebhookSource {
+    /// GitHub: `X-GitHub-Event: workflow_job`, `X-Hub-Signature-256: sha256=<hex>`
+    Github,
+    /// Forgejo 17+: `X-Forgejo-Event: workflow_job_*`, `X-Forgejo-Signature: <hex>`.
+    /// `scopes` are the forge's configured scopes, where its runners can register.
+    Forgejo { scopes: Vec<RunnerScope> },
+}
+
+impl WebhookSource {
+    /// The source for the webhook forge's config.
+    pub fn for_forge(forge: &ForgeConfig) -> anyhow::Result<Self> {
+        Ok(match &forge.kind {
+            ForgeKindConfig::Github(_) => WebhookSource::Github,
+            ForgeKindConfig::Forgejo(forgejo) => WebhookSource::Forgejo {
+                scopes: forgejo.runner_scopes()?,
+            },
+        })
+    }
+}
+
 /// Shared state for webhook handlers
 pub struct WebhookState {
     pub config: WebhookConfig,
-    /// Configured name of the GitHub forge these webhooks come from
+    /// Configured name of the forge these webhooks come from
     pub forge: String,
+    /// Which kind of forge that is
+    pub source: WebhookSource,
     pub notifier: WebhookNotifier,
     /// Persistent store for pending jobs - webhook handler writes directly to DB
     pub pending_job_store: Arc<PendingJobStore>,
@@ -175,6 +250,41 @@ pub fn validate_signature(secret: &str, payload: &[u8], signature_header: &str) 
 
     mac.update(payload);
     mac.verify_slice(&signature_bytes).is_ok()
+}
+
+/// Validate a Forgejo webhook signature.
+///
+/// Forgejo sends `X-Forgejo-Signature` as the plain hex HMAC-SHA256 of the body,
+/// without GitHub's `sha256=` prefix. Compared in constant time.
+pub fn validate_forgejo_signature(secret: &str, payload: &[u8], signature_header: &str) -> bool {
+    let Ok(signature_bytes) = hex::decode(signature_header) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(payload);
+    mac.verify_slice(&signature_bytes).is_ok()
+}
+
+/// The configured Forgejo scope a job in `owner/repo` registers its runner in: the
+/// repository itself if it's configured, else its owner (org or user), else the
+/// instance. `None` if no configured scope covers the repository, so the forge's
+/// token can't register a runner for it. The poller uses whichever scope listed the
+/// job; either way the job key is the handle, so a job is only queued once.
+pub fn forgejo_job_scope(scopes: &[RunnerScope], owner: &str, repo: &str) -> Option<RunnerScope> {
+    let repo_scope = scopes.iter().find(|s| {
+        matches!(s, RunnerScope::Repository { owner: o, repo: r }
+            if o.eq_ignore_ascii_case(owner) && r.eq_ignore_ascii_case(repo))
+    });
+    let owner_scope = || {
+        scopes.iter().find(|s| {
+            matches!(s, RunnerScope::Organization { name } | RunnerScope::User { name }
+                if name.eq_ignore_ascii_case(owner))
+        })
+    };
+    let instance = || scopes.iter().find(|s| matches!(s, RunnerScope::Instance));
+    repo_scope.or_else(owner_scope).or_else(instance).cloned()
 }
 
 /// Check if job labels contain all required labels (case-insensitive).
@@ -301,12 +411,20 @@ pub fn admin_only_router(admin_state: Arc<crate::admin::AdminState>) -> Router {
         .nest("/api/v1", crate::admin::api_router(admin_state))
 }
 
-/// Handle incoming GitHub webhook.
+/// Handle an incoming webhook from the webhook forge.
 async fn handle_webhook(
     State(state): State<Arc<WebhookState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    match &state.source {
+        WebhookSource::Github => handle_github(&state, &headers, &body).await,
+        WebhookSource::Forgejo { scopes } => handle_forgejo(&state, scopes, &headers, &body).await,
+    }
+}
+
+/// Handle a GitHub `workflow_job` delivery.
+async fn handle_github(state: &WebhookState, headers: &HeaderMap, body: &Bytes) -> StatusCode {
     // Get event type
     let event_type = headers
         .get("X-GitHub-Event")
@@ -325,13 +443,13 @@ async fn handle_webhook(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !validate_signature(&state.config.secret, &body, signature) {
+    if !validate_signature(&state.config.secret, body, signature) {
         warn!("Webhook signature validation failed");
         return StatusCode::UNAUTHORIZED;
     }
 
     // Parse payload
-    let event: WorkflowJobEvent = match serde_json::from_slice(&body) {
+    let event: WorkflowJobEvent = match serde_json::from_slice(body) {
         Ok(e) => e,
         Err(e) => {
             warn!("Failed to parse webhook payload: {}", e);
@@ -449,6 +567,131 @@ async fn handle_webhook(
     }
 
     // Always return 200 OK quickly - runner creation is async
+    StatusCode::OK
+}
+
+/// Handle a Forgejo (17+) `workflow_job_*` delivery.
+///
+/// `waiting` queues the job (keyed by its handle, like the poller, so the recovery
+/// scan finding it too can't make a second runner); `running` and the finished
+/// states fill the job history and clean up, as GitHub's `in_progress` and
+/// `completed` do. `blocked` (held by `needs:` or a concurrency group) waits for its
+/// `waiting` delivery.
+async fn handle_forgejo(
+    state: &WebhookState,
+    scopes: &[RunnerScope],
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> StatusCode {
+    let event_type = headers
+        .get("X-Forgejo-Event")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(status) = event_type.strip_prefix(FORGEJO_JOB_EVENT_PREFIX) else {
+        debug!("Ignoring Forgejo webhook event type: {}", event_type);
+        return StatusCode::OK;
+    };
+
+    let signature = headers
+        .get("X-Forgejo-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !validate_forgejo_signature(&state.config.secret, body, signature) {
+        warn!(
+            "Forgejo webhook signature validation failed for {} on forge '{}'",
+            event_type, state.forge
+        );
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    let event: ForgejoJobEvent = match serde_json::from_slice(body) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Failed to parse Forgejo {} payload: {}", event_type, e);
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+    let job = &event.job;
+    if job.handle.is_empty() {
+        warn!(
+            "Forgejo job {} ('{}') has no handle - ignoring {}",
+            job.id, job.name, event_type
+        );
+        return StatusCode::OK;
+    }
+    let job_key = JobKey::new(&state.forge, job.handle.clone());
+    let repo = &event.run.repository;
+
+    match status {
+        "waiting" => {
+            info!(
+                "Received Forgejo {} ({}) for job {} ('{}' in {}) with labels {:?}",
+                event_type, event.action, job_key, job.name, repo.full_name, job.runs_on
+            );
+            if !has_required_labels(&job.runs_on, &state.config.required_labels) {
+                info!(
+                    "Job {} missing required labels {:?} (has {:?}) - ignoring",
+                    job_key, state.config.required_labels, job.runs_on
+                );
+                return StatusCode::OK;
+            }
+            let Some(scope) = forgejo_job_scope(scopes, &repo.owner.login, &repo.name) else {
+                info!(
+                    "Job {} is in {}, which none of forge '{}' scopes {:?} cover - ignoring",
+                    job_key, repo.full_name, state.forge, scopes
+                );
+                return StatusCode::OK;
+            };
+            let Some((runner_scope, runner_group)) =
+                resolve_runner_scope(&job_key, &job.runs_on, &state.config.label_mappings, || {
+                    scope
+                })
+            else {
+                return StatusCode::OK;
+            };
+            let request = WebhookRunnerRequest {
+                job_labels: job.runs_on.clone(),
+                agent_labels: job.runs_on.clone(),
+                runner_scope,
+                runner_group,
+                job_id: job_key.clone(),
+                repository: Some(repo.full_name.clone()),
+                job_name: Some(job.name.clone()),
+                workflow_name: event.run.workflow_id.clone(),
+                // the payload has no job created time
+                queued_at: None,
+            };
+            // a job already queued (redelivery, or found by the recovery scan) is kept as is
+            if !state.pending_job_store.add_job(&request).await {
+                warn!(
+                    "Failed to persist job {} to database - returning 503 for retry",
+                    job_key
+                );
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
+            info!("Persisted job {} to pending queue", job_key);
+            let _ = state.notifier.send(WebhookEvent::NewJobAvailable).await;
+        }
+        "running" => {
+            // Forgejo's payload names no runner and no start time
+            debug!("Forgejo job {} is running", job_key);
+            state.metrics.job_started(&job_key, None, Utc::now()).await;
+        }
+        "success" | "failure" | "cancelled" | "skipped" => {
+            debug!("Forgejo job {} finished: {}", job_key, status);
+            state
+                .metrics
+                .job_completed(&job_key, Some(status), Utc::now())
+                .await;
+            let _ = state
+                .notifier
+                .send(WebhookEvent::JobCompleted { job_id: job_key })
+                .await;
+        }
+        _ => {
+            debug!("Ignoring Forgejo {} for job {}", event_type, job_key);
+        }
+    }
     StatusCode::OK
 }
 

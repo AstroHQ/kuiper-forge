@@ -388,7 +388,7 @@ impl FleetManager {
             }
             ProvisioningMode::Webhook => {
                 info!("Fleet manager started in WEBHOOK mode");
-                info!("Runners will be created on-demand via GitHub webhook events");
+                info!("Runners will be created on-demand via webhook events");
                 if self.config.provisioning.webhook.is_none() {
                     warn!("Webhook mode enabled but no webhook configuration found!");
                     warn!(

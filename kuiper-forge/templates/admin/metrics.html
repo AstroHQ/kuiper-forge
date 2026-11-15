@@ -110,7 +110,7 @@
             <section>
                 <div class="stat-label">Queue Wait, p50</div>
                 <div class="stat-value">{{ wait_p50 }}</div>
-                {% if jobs.wait.count == 0 %}<div class="muted stat-detail">needs GitHub webhooks</div>{% endif %}
+                {% if jobs.wait.count == 0 %}<div class="muted stat-detail">needs GitHub or Forgejo webhooks</div>{% endif %}
             </section>
         </div>
     </div>
@@ -199,7 +199,7 @@
             </header>
             <section>
                 {% if jobs.wait.count == 0 %}
-                <p class="empty-text">Needs the forge to say when a job starts, which only GitHub webhooks do.</p>
+                <p class="empty-text">Needs the forge to say when a job starts, which only webhook mode does (GitHub, or Forgejo 17+).</p>
                 {% else %}
                 <div class="chart-box"><canvas id="chart-wait" role="img" aria-label="p50 and p95 queue wait over time"></canvas></div>
                 {% endif %}
