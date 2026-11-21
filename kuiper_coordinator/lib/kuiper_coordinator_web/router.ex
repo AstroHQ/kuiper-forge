@@ -46,6 +46,8 @@ defmodule KuiperCoordinatorWeb.Router do
       live "/dashboard", Admin.DashboardLive
       live "/users", Admin.UsersLive
       live "/api-tokens", Admin.ApiTokensLive
+      live "/agents/:agent_id", Admin.AgentLive
+      live "/agents/:agent_id/logs", Admin.AgentLogsLive
     end
   end
 
