@@ -11,13 +11,19 @@ defmodule KuiperCoordinator.Runners do
   @fields ~w(runner_name agent_id vm_name runner_scope forge job_key job_name repository
              workflow_name pool labels)a
 
-  @doc "Writes the row for a runner about to be created (before CreateRunner is sent, F3)."
+  @doc """
+  Writes the row for a runner about to be created (before CreateRunner is sent, F3).
+  A database error comes back as `{:error, exception}` rather than raising, so callers can give
+  the reserved slot back (F8; Rust add_runner logs and carries on).
+  """
   @spec add_runner(map()) :: {:ok, Runner.t()} | {:error, term()}
   def add_runner(attrs) do
     %Runner{}
     |> Ecto.Changeset.cast(Map.new(attrs), @fields)
     |> Ecto.Changeset.validate_required(~w(runner_name agent_id vm_name runner_scope forge)a)
     |> Repo.insert()
+  rescue
+    e in [DBConnection.ConnectionError, Postgrex.Error] -> {:error, e}
   end
 
   def get_runner(name), do: Repo.get(Runner, name)

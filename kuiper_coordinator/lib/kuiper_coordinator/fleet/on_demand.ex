@@ -118,38 +118,60 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
            job_id(job)
          ) do
       {:ok, {:github_jit, jit}} ->
-        {:ok, _} =
-          Runners.add_runner(%{
-            runner_name: name,
-            agent_id: agent_id,
-            vm_name: name,
-            runner_scope: job.runner_scope,
-            forge: job.forge,
-            job_key: job.job_key,
-            job_name: job.job_name,
-            repository: job.repository,
-            workflow_name: job.workflow_name,
-            labels: job.agent_labels
-          })
-
-        cmd = %CreateRunnerCommand{
+        Runners.add_runner(%{
+          runner_name: name,
+          agent_id: agent_id,
           vm_name: name,
-          registration_token: "",
-          labels: job.agent_labels,
-          runner_scope_url: Forge.scope_url(forge, job.runner_scope),
-          jit_config: jit,
-          # the agent picks by job labels
-          label_set_id: ""
-        }
-
-        Logger.info("Sending CreateRunner to #{agent_id} for #{name} (job #{job.job_key})")
-        send_create(forge, job, agent_id, cmd, ctx)
-        :created
+          runner_scope: job.runner_scope,
+          forge: job.forge,
+          job_key: job.job_key,
+          job_name: job.job_name,
+          repository: job.repository,
+          workflow_name: job.workflow_name,
+          labels: job.agent_labels
+        })
+        |> case do
+          {:ok, _} -> send_jit(forge, job, agent_id, name, jit, ctx)
+          {:error, reason} -> row_failed(forge, job, agent_id, name, reason)
+        end
 
       {:error, _} = err ->
         AgentDispatch.release_slot(agent_id, name)
         err
     end
+  end
+
+  defp send_jit(forge, job, agent_id, name, jit, ctx) do
+    cmd = %CreateRunnerCommand{
+      vm_name: name,
+      registration_token: "",
+      labels: job.agent_labels,
+      runner_scope_url: Forge.scope_url(forge, job.runner_scope),
+      jit_config: jit,
+      # the agent picks by job labels
+      label_set_id: ""
+    }
+
+    Logger.info("Sending CreateRunner to #{agent_id} for #{name} (job #{job.job_key})")
+    send_create(forge, job, agent_id, cmd, ctx)
+    :created
+  end
+
+  # F8: the row couldn't be written. No CreateRunner without a row (F3): give the slot back and
+  # remove the JIT runner just registered. Not the job's fault, so no retry is counted.
+  defp row_failed(forge, job, agent_id, name, reason) do
+    Logger.error("Job #{job.job_key}: could not record runner #{name}: #{inspect(reason)}")
+    AgentDispatch.release_slot(agent_id, name)
+
+    case Forge.remove_runner(forge, job.runner_scope, name) do
+      :ok ->
+        :ok
+
+      {:error, e} ->
+        Logger.warning("Could not remove runner #{name} from its forge: #{inspect(e)}")
+    end
+
+    :skipped
   end
 
   defp send_create(forge, job, agent_id, cmd, ctx) do
