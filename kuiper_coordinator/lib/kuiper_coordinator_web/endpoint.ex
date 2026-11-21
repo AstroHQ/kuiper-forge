@@ -43,6 +43,9 @@ defmodule KuiperCoordinatorWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # Forge webhooks read the raw body for their HMAC, so they go before the parsers
+  plug KuiperCoordinatorWeb.Plugs.GitHubWebhook
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
