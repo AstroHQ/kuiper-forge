@@ -86,18 +86,18 @@ defmodule KuiperCoordinator.Fleet.FixedCapacity do
               agent_id: agent_id,
               set_id: pool.label_set_id
             )},
-         {:token, {:ok, token}} <- {:token, token(ctx, agent_id, name)} do
-      {:ok, _} =
-        Runners.add_runner(%{
-          runner_name: name,
-          agent_id: agent_id,
-          vm_name: name,
-          runner_scope: ctx.scope,
-          forge: ctx.forge_name,
-          labels: pool.labels,
-          pool: if(PoolDefinition.explicit?(pool), do: PoolDefinition.key(pool))
-        })
-
+         {:token, {:ok, token}} <- {:token, token(ctx, agent_id, name)},
+         {:row, {:ok, _}, _, _} <-
+           {:row,
+            Runners.add_runner(%{
+              runner_name: name,
+              agent_id: agent_id,
+              vm_name: name,
+              runner_scope: ctx.scope,
+              forge: ctx.forge_name,
+              labels: pool.labels,
+              pool: if(PoolDefinition.explicit?(pool), do: PoolDefinition.key(pool))
+            }), agent_id, name} do
       cmd = %CreateRunnerCommand{
         vm_name: name,
         registration_token: token,
@@ -119,6 +119,15 @@ defmodule KuiperCoordinator.Fleet.FixedCapacity do
         :next
 
       {:token, _} ->
+        :stop
+
+      # F8: no row, no CreateRunner; the slot goes back so the agent keeps its capacity
+      {:row, {:error, reason}, agent_id, name} ->
+        Logger.error(
+          "pool #{inspect(pool.labels)}: could not record runner #{name}: #{inspect(reason)}"
+        )
+
+        AgentDispatch.release_slot(agent_id, name)
         :stop
     end
   end
