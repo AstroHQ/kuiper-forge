@@ -1478,12 +1478,14 @@ dependencies = [
 name = "kuiper-agent-probe"
 version = "0.0.0"
 dependencies = [
+ "hyper-util",
  "kuiper-agent-lib",
  "kuiper-agent-proto",
  "rustls",
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower",
  "tracing-subscriber",
  "url",
 ]

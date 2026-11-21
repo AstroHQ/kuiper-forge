@@ -49,6 +49,16 @@ if config_env() != :test do
     server_trust_mode: System.get_env("KUIPER_SERVER_TRUST_MODE", "ca"),
     # the name agents and browsers use; the server cert is checked against it at startup
     server_hostname: System.get_env("KUIPER_SERVER_HOSTNAME") || System.get_env("PHX_HOST")
+
+  # Management gRPC (management.proto) for the CLI's token/agent commands, on a Unix socket.
+  # Its own path beside the Rust coordinator's <data_dir>/coordinator.sock (parity M6). On
+  # with agent gRPC unless KUIPER_MANAGEMENT says otherwise (tokens are for registration).
+  config :kuiper_coordinator, :management,
+    enabled:
+      System.get_env("KUIPER_MANAGEMENT", System.get_env("KUIPER_AGENT_GRPC", "false")) in ~w(true 1),
+    socket:
+      System.get_env("KUIPER_MANAGEMENT_SOCKET") ||
+        Path.join(data_dir, "phoenix-coordinator.sock")
 end
 
 # Forges and provisioning settings live in Postgres and are edited in the admin UI (D39); the

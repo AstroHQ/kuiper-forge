@@ -92,7 +92,8 @@ jobs:
 
   rust-agent:
     # A real kuiper-agent-lib agent (test/rust_agent_probe) registers, streams and uploads logs
-    # against the Phoenix agent port.
+    # against the Phoenix agent port, and the Rust CLI's management client uses the Phoenix
+    # management socket.
     name: Real Rust agent
     runs-on: ubuntu-latest
     services:
@@ -123,7 +124,7 @@ jobs:
         with:
           workspaces: kuiper_coordinator/test/rust_agent_probe
 
-      - name: Build the agent probe
+      - name: Build the agent and management probes
         run: cargo build --locked --manifest-path test/rust_agent_probe/Cargo.toml
 
       - name: Set up Elixir
@@ -147,4 +148,5 @@ jobs:
       - name: Test with the real agent
         env:
           KUIPER_AGENT_PROBE: test/rust_agent_probe/target/debug/kuiper-agent-probe
+          KUIPER_MANAGEMENT_PROBE: test/rust_agent_probe/target/debug/kuiper-management-probe
         run: mix test --only rust_agent

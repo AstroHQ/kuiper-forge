@@ -21,6 +21,7 @@ defmodule KuiperCoordinator.Application do
         KuiperCoordinator.Agents.Janitor
       ] ++
         KuiperCoordinator.AgentGrpc.children() ++
+        KuiperCoordinator.Management.children() ++
         [
           fleet_child(),
           # Start to serve requests, typically the last entry

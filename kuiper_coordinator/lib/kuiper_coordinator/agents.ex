@@ -99,6 +99,17 @@ defmodule KuiperCoordinator.Agents do
     end
   end
 
+  @doc "Every registration token, oldest first, in plaintext (management.rs ListTokens, M2)."
+  def list_registration_tokens do
+    Repo.all(from(t in RegistrationToken, order_by: [asc: t.inserted_at, asc: t.token]))
+  end
+
+  @doc "Deletes a registration token; true when one was there."
+  def delete_registration_token(token) when is_binary(token) do
+    {count, _} = Repo.delete_all(from(t in RegistrationToken, where: t.token == ^token))
+    count == 1
+  end
+
   defp consume_token(token) do
     case Repo.delete_all(from(t in RegistrationToken, where: t.token == ^token, select: t)) do
       {1, [reg]} -> {:ok, reg}
@@ -113,6 +124,11 @@ defmodule KuiperCoordinator.Agents do
   ## Agents
 
   def get_agent(agent_id), do: Repo.get(Agent, agent_id)
+
+  @doc "Every registered agent, revoked ones too, newest first (auth.rs list_agents)."
+  def list_agents do
+    Repo.all(from(a in Agent, order_by: [desc: a.inserted_at, asc: a.agent_id]))
+  end
 
   @doc "Exists, not revoked, cert not expired (auth.rs is_agent_valid)."
   def valid_agent?(agent_id) when is_binary(agent_id) do
