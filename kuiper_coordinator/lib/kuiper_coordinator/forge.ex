@@ -43,6 +43,13 @@ defmodule KuiperCoordinator.Forge do
               {:ok, String.t() | nil} | {:error, term()}
 
   @doc """
+  A job's status looked up in a runner scope's jobs rather than a repository's (for runners
+  without a repository, #48). Forgejo only; GitHub answers an error.
+  """
+  @callback scope_job_status(client :: term(), RunnerScope.t(), job_id :: String.t()) ::
+              {:ok, String.t() | nil} | {:error, term()}
+
+  @doc """
   Every job waiting for a runner that the forge can see (recovery scan, parity G9). Failures
   in one installation, repo or run are logged and skipped, never fail the whole scan.
   """
@@ -59,4 +66,7 @@ defmodule KuiperCoordinator.Forge do
     do: mod.create_job_runner(client, scope, name, labels, group, job_id)
 
   def job_status({mod, client}, repo, job_id), do: mod.job_status(client, repo, job_id)
+
+  def scope_job_status({mod, client}, scope, job_id),
+    do: mod.scope_job_status(client, scope, job_id)
 end

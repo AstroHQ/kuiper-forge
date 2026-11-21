@@ -14,7 +14,9 @@ defmodule KuiperCoordinator.Fleet.Manager do
   `Fleet.Forges`, fatal like Rust; or ready-made `%{name => Forge.t()}`), `:default_forge` (the
   forge for fixed capacity; default the first spec), `:validate_forges` (default true), `:runner_scope`, `:tick_ms` (default 30 s, Rust's tick), `:scan_ms`
   (default 5 min, Rust RECOVERY_SCAN_INTERVAL; the poll interval in polling mode), `:webhook` (label filters for the scan;
-  default `config :kuiper_coordinator, :webhook`), `:name`.
+  default `config :kuiper_coordinator, :webhook`), `:idle_runner_timeout_s` (on-demand modes:
+  Forgejo one-job runners idle past it are torn down, `Fleet.Idle`; default 600, 0 off, at
+  least 120), `:name`.
   Started by the application only when `config :kuiper_coordinator, :fleet` is set.
   """
   use GenServer
@@ -22,7 +24,7 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
   alias Cirunner.Agent.RunnerEvent
   alias KuiperCoordinator.{AgentRegistry, Runners}
-  alias KuiperCoordinator.Fleet.{FixedCapacity, Forges, OnDemand, Recovery, RunnerEvents}
+  alias KuiperCoordinator.Fleet.{FixedCapacity, Forges, Idle, OnDemand, Recovery, RunnerEvents}
 
   @modes [:fixed_capacity, :webhook, :polling]
   @on_demand [:webhook, :polling]
@@ -64,6 +66,12 @@ defmodule KuiperCoordinator.Fleet.Manager do
         grace_ms: Keyword.get(opts, :disconnect_grace_ms, @disconnect_grace_ms),
         # agent_id => the stamp of its latest disconnect, until it reconnects or fails over
         disconnects: %{},
+        # idle teardown of one-job runners (F13-F15); nil when off or in fixed capacity
+        idle:
+          if(mode in @on_demand,
+            do: Idle.new(Keyword.get(opts, :idle_runner_timeout_s)),
+            else: nil
+          ),
         ctx: %{
           forges: forges,
           forge_name: default_name,
@@ -142,6 +150,7 @@ defmodule KuiperCoordinator.Fleet.Manager do
   @impl true
   def handle_info(:tick, state) do
     run_pass(state)
+    state = check_idle(state)
     state = if scan_due?(state), do: scan(state), else: state
     schedule(state)
     {:noreply, state}
@@ -169,11 +178,37 @@ defmodule KuiperCoordinator.Fleet.Manager do
   # Rust only records job_started in metrics; the fleet has nothing to do.
 
   def handle_info({:agent_event, agent_id, {:runner_event, %RunnerEvent{} = ev}}, state) do
-    case RunnerEvents.handle(state.ctx, agent_id, ev) do
-      :pass -> run_pass(state)
-      :ok -> :ok
-    end
+    name = if ev.runner_name in [nil, ""], do: ev.vm_id, else: ev.runner_name
+    now = System.monotonic_time(:millisecond)
 
+    {result, idle} =
+      cond do
+        name in [nil, ""] ->
+          {RunnerEvents.handle(state.ctx, agent_id, ev), state.idle}
+
+        ev.event_type == :STARTED ->
+          {RunnerEvents.handle(state.ctx, agent_id, ev),
+           Idle.runner_started(state.idle, name, now)}
+
+        ev.event_type in [:COMPLETED, :FAILED, :DESTROYED] ->
+          case Idle.on_terminal(state.idle, name, now) do
+            {:idled, idle} ->
+              {RunnerEvents.idled(state.ctx, agent_id, name), idle}
+
+            {:late, idle} ->
+              Logger.debug("Late #{ev.event_type} for torn-down idle runner #{name}, ignoring")
+              {:ok, idle}
+
+            {:normal, idle} ->
+              {RunnerEvents.handle(state.ctx, agent_id, ev), idle}
+          end
+
+        true ->
+          {RunnerEvents.handle(state.ctx, agent_id, ev), state.idle}
+      end
+
+    state = %{state | idle: idle}
+    if result == :pass, do: run_pass(state)
     {:noreply, state}
   rescue
     e ->
@@ -246,8 +281,26 @@ defmodule KuiperCoordinator.Fleet.Manager do
     {:noreply, state}
   end
 
+  # A check that raises is logged and keeps the old state; the next tick tries again.
+  defp check_idle(%{idle: nil} = state), do: state
+
+  defp check_idle(state) do
+    %{state | idle: Idle.check(state.idle, state.ctx, System.monotonic_time(:millisecond))}
+  rescue
+    e ->
+      Logger.error("fleet idle check failed: " <> Exception.format(:error, e, __STACKTRACE__))
+      state
+  end
+
   # A pass that raises is logged; the next tick tries again.
-  defp run_pass(%{mode: mode, ctx: ctx}) do
+  defp run_pass(%{mode: mode, ctx: ctx} = state) do
+    ctx =
+      Map.put(
+        ctx,
+        :backing_off,
+        Idle.backing_off(Map.get(state, :idle), System.monotonic_time(:millisecond))
+      )
+
     case mode do
       :fixed_capacity -> FixedCapacity.reconcile(ctx)
       m when m in @on_demand -> OnDemand.process_pending(ctx)

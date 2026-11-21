@@ -409,6 +409,20 @@ defmodule KuiperCoordinator.Forgejo.Client do
     end
   end
 
+  @doc """
+  A job's status in one scope's job list (#48: runners without a repository, org/user/instance
+  scopes), in GitHub's terms; nil when the handle isn't listed.
+  """
+  @impl KuiperCoordinator.Forge
+  def scope_job_status(c, scope, handle) do
+    with {:ok, jobs} <- list_scope_jobs(c, scope) do
+      {:ok,
+       Enum.find_value(jobs, fn job ->
+         job["handle"] == handle && github_status(job["status"])
+       end)}
+    end
+  end
+
   defp github_status("waiting"), do: "queued"
   defp github_status("running"), do: "in_progress"
   defp github_status(other), do: other

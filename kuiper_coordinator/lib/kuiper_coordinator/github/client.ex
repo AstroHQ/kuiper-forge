@@ -197,6 +197,10 @@ defmodule KuiperCoordinator.GitHub.Client do
     end
   end
 
+  @doc "GitHub jobs are looked up by repository only; JIT runners aren't idle-checked."
+  @impl KuiperCoordinator.Forge
+  def scope_job_status(_c, _scope, _job_id), do: {:error, :unsupported}
+
   @doc "A workflow job's status (`queued`, `in_progress`, ...); nil when GitHub returns 404 (G8)."
   @impl KuiperCoordinator.Forge
   @spec job_status(t(), String.t(), integer() | String.t()) ::
