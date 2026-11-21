@@ -195,7 +195,7 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
             <tbody>
               <tr :for={a <- @dash.agents} id={"agent-#{a.agent_id}"}>
                 <td>
-                  {a.hostname}
+                  <.link navigate={~p"/admin/agents/#{a.agent_id}"} class="link">{a.hostname}</.link>
                   <div class="text-xs opacity-60">{a.agent_id}</div>
                 </td>
                 <td>{a.agent_type}</td>
