@@ -19,7 +19,7 @@ defmodule KuiperCoordinator.AgentDispatch do
   Picks a connected agent whose labels cover `labels` and reserves a slot on it for
   `runner_name`, in one atomic call. Options: `:avoid` (agent ids that already failed this job,
   parity R4/J4), `:agent_id` (a specific agent, for explicit pools), `:set_id` (the pool or
-  runner set). `{:error, :no_available_agent}` means wait for capacity, not a failure (parity J3).
+  runner set), `:kind` (`"forgejo"` only matches agents listing it in runner_kinds, R5). `{:error, :no_available_agent}` means wait for capacity, not a failure (parity J3).
   """
   @callback reserve_slot(labels :: [String.t()], runner_name(), opts :: keyword()) ::
               {:ok, agent_id()} | {:error, :no_available_agent}

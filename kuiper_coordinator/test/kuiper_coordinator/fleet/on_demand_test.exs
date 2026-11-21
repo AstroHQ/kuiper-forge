@@ -4,7 +4,7 @@ defmodule KuiperCoordinator.Fleet.OnDemandTest do
 
   alias KuiperCoordinator.{AgentDispatchMock, ForgeMock, Jobs, Runners}
   alias KuiperCoordinator.Fleet.OnDemand
-  alias Cirunner.Agent.{CommandResult, CreateRunnerCommand}
+  alias Cirunner.Agent.{CommandResult, CreateRunnerCommand, ForgejoRunner}
 
   setup :verify_on_exit!
 
@@ -14,6 +14,7 @@ defmodule KuiperCoordinator.Fleet.OnDemandTest do
 
   setup do
     Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, "fleet")
+    stub(ForgeMock, :runner_kind, fn _ -> "github" end)
     :ok
   end
 
@@ -90,6 +91,66 @@ defmodule KuiperCoordinator.Fleet.OnDemandTest do
     # job stays pending until its runner finishes
     assert Jobs.get_pending(key)
     assert [%{job_key: ^key}] = Runners.list_runners()
+  end
+
+  test "a Forgejo job gets a one-job runner on a forgejo-kind agent (R5, FJ2)" do
+    fj_scope = {:org, "lodge"}
+    ctx = %{forges: %{"fj" => {ForgeMock, :fj}}, async: false}
+
+    {:ok, :inserted} =
+      Jobs.add_pending(%{
+        job_key: "fj:h-wait",
+        forge: "fj",
+        job_labels: ["linux"],
+        agent_labels: ["linux"],
+        runner_scope: fj_scope,
+        repository: "lodge/app",
+        job_name: "build"
+      })
+
+    stub(ForgeMock, :runner_kind, fn :fj -> "forgejo" end)
+
+    expect(AgentDispatchMock, :select_agent, fn ["linux"], opts ->
+      assert opts[:kind] == "forgejo"
+      {:ok, "a2"}
+    end)
+
+    expect(AgentDispatchMock, :hostname, fn "a2" -> "pve1" end)
+
+    expect(AgentDispatchMock, :reserve_slot, fn ["linux"], _name, opts ->
+      assert opts[:agent_id] == "a2"
+      assert opts[:kind] == "forgejo"
+      {:ok, "a2"}
+    end)
+
+    expect(ForgeMock, :job_status, fn :fj, "lodge/app", "h-wait" -> {:ok, "queued"} end)
+
+    expect(ForgeMock, :create_job_runner, fn :fj, ^fj_scope, name, ["linux"], nil, "h-wait" ->
+      assert name =~ ~r/^pve1-/
+
+      {:ok,
+       {:forgejo, %{instance_url: "https://fj.test", uuid: "u-1", token: "t-1", handle: "h-wait"}}}
+    end)
+
+    expect(AgentDispatchMock, :dispatch_create, fn "a2", %CreateRunnerCommand{} = cmd ->
+      assert cmd.forgejo == %ForgejoRunner{
+               instance_url: "https://fj.test",
+               uuid: "u-1",
+               token: "t-1",
+               handle: "h-wait"
+             }
+
+      # the GitHub fields are unused for Forgejo runners
+      assert %{jit_config: "", registration_token: "", runner_scope_url: ""} = cmd
+      assert cmd.labels == ["linux"]
+
+      assert %{job_key: "fj:h-wait", agent_id: "a2", forge: "fj"} =
+               Runners.get_runner(cmd.vm_name)
+
+      :ok
+    end)
+
+    assert OnDemand.process_pending(ctx) == %{created: 1}
   end
 
   test "a job that already has a runner is skipped" do

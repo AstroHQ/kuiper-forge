@@ -180,14 +180,18 @@ defmodule KuiperCoordinator.AgentRegistry do
       case Keyword.fetch(opts, :agent_id) do
         {:ok, id} ->
           with %{capacity: %Capacity{} = cap} <- lookup(id),
-               true <- Capacity.matches_labels?(cap, labels) do
+               true <- Capacity.matches_labels?(cap, labels),
+               true <- Capacity.kind_filter(Keyword.get(opts, :kind)).(cap) do
             {:ok, id}
           else
             _ -> :none
           end
 
         :error ->
-          Capacity.select(capacities(), labels, avoid: Keyword.get(opts, :avoid, []))
+          Capacity.select(capacities(), labels,
+            avoid: Keyword.get(opts, :avoid, []),
+            include: Capacity.kind_filter(Keyword.get(opts, :kind))
+          )
       end
 
     with {:ok, id} <- target,

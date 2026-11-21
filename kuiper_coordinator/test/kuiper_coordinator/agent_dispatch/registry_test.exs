@@ -24,6 +24,7 @@ defmodule KuiperCoordinator.AgentDispatch.RegistryTest do
       active_vms: Keyword.get(opts, :active, 0),
       labels: labels,
       label_sets: Keyword.get(opts, :sets, []),
+      runner_kinds: Keyword.get(opts, :kinds, []),
       vms: Enum.map(Keyword.get(opts, :vms, []), &%VmInfo{name: &1, vm_id: &1})
     }
   end
@@ -127,6 +128,24 @@ defmodule KuiperCoordinator.AgentDispatch.RegistryTest do
     assert {:error, :no_available_agent} = Dispatch.reserve_slot(["macos"], "w", agent_id: "gone")
     assert Dispatch.hostname(b) == "host"
     assert Dispatch.hostname("gone") == nil
+  end
+
+  test "Forgejo runners only go to agents listing the forgejo runner kind (R5)" do
+    tart = fake_agent(uid("a"), status(4, ["macos"]))
+    fj = fake_agent(uid("b"), status(1, ["macos"], kinds: ["Forgejo"]))
+
+    # GitHub runs everywhere, so the least-loaded agent wins
+    assert {:ok, ^tart} = Dispatch.select_agent(["macos"], kind: "github")
+    assert {:ok, ^tart} = Dispatch.select_agent(["macos"], [])
+    # forgejo: only the agent that lists it (case-insensitive), even with less room
+    assert {:ok, ^fj} = Dispatch.select_agent(["macos"], kind: "forgejo")
+
+    assert {:error, :no_available_agent} =
+             Dispatch.reserve_slot(["macos"], "f0", agent_id: tart, kind: "forgejo")
+
+    assert {:ok, ^fj} = Dispatch.reserve_slot(["macos"], "f1", kind: "forgejo")
+    assert {:error, :no_available_agent} = Dispatch.reserve_slot(["macos"], "f2", kind: "forgejo")
+    assert {:error, :no_available_agent} = Dispatch.select_agent(["macos"], kind: "forgejo")
   end
 
   test "a reservation settles once the VM shows up in a status, without double counting" do

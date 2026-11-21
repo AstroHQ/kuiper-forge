@@ -190,6 +190,10 @@ defmodule KuiperCoordinator.AgentDispatch.Capacity do
   def runs?(_cap, "github"), do: true
   def runs?(%__MODULE__{runner_kinds: kinds}, kind), do: Enum.any?(kinds, &ieq?(&1, kind))
 
+  @doc "A `select/3` `:include` filter for agents that can run `kind` runners (nil or github: all)."
+  def kind_filter(kind) when kind in [nil, "github"], do: fn _ -> true end
+  def kind_filter(kind), do: &runs?(&1, kind)
+
   @doc "True if the agent is in the legacy pool with these (normalized) labels."
   @spec in_legacy_pool?(t(), [String.t()]) :: boolean()
   def in_legacy_pool?(%__MODULE__{} = cap, pool_labels),
