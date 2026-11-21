@@ -2,7 +2,7 @@ defmodule KuiperCoordinator.Fleet.OnDemandTest do
   use KuiperCoordinator.DataCase, async: false
   import Mox
 
-  alias KuiperCoordinator.{AgentDispatchMock, ForgeMock, Jobs, Runners}
+  alias KuiperCoordinator.{AgentDispatchMock, AgentFailures, ForgeMock, Jobs, Runners}
   alias KuiperCoordinator.Fleet.OnDemand
   alias Cirunner.Agent.{CommandResult, CreateRunnerCommand, ForgejoRunner}
 
@@ -345,6 +345,33 @@ defmodule KuiperCoordinator.Fleet.OnDemandTest do
       OnDemand.process_pending(@ctx)
       assert %{retry_count: 1, failed_agents: ["a1"]} = Jobs.get_pending(key)
       assert Runners.list_runners() == []
+    end
+
+    for {label, reply, kind, message} <- [
+          {"rejection", {:error, {:rejected, "full"}}, "command_rejected", "full"},
+          {"timeout", {:error, :timeout}, "command_failed", "CreateRunner: :timeout"},
+          {"legacy failure", {:ok, %CommandResult{success: false, error: "vm boot"}},
+           "runner_failed", "vm boot"}
+        ] do
+      test "a #{label} is recorded as an agent failure with its runner and job (#33)", %{
+        key: key
+      } do
+        expect(AgentDispatchMock, :dispatch_create, fn _, _ -> unquote(Macro.escape(reply)) end)
+        expect_cleanup()
+        OnDemand.process_pending(@ctx)
+
+        assert [%{agent_id: "a1", kind: unquote(kind), message: unquote(message)} = f] =
+                 AgentFailures.recent("a1", 10)
+
+        assert f.job_key == key
+        assert f.runner_name
+      end
+    end
+
+    test "an accepted CreateRunner records no failure" do
+      expect(AgentDispatchMock, :dispatch_create, fn _, _ -> :ok end)
+      OnDemand.process_pending(@ctx)
+      assert AgentFailures.recent("a1", 10) == []
     end
   end
 end

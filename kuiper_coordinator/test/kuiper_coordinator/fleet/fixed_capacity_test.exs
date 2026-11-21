@@ -2,7 +2,7 @@ defmodule KuiperCoordinator.Fleet.FixedCapacityTest do
   use KuiperCoordinator.DataCase, async: true
   import Mox
 
-  alias KuiperCoordinator.{AgentDispatchMock, ForgeMock, Runners}
+  alias KuiperCoordinator.{AgentDispatchMock, AgentFailures, ForgeMock, Runners}
   alias KuiperCoordinator.Fleet.{FixedCapacity, PoolDefinition}
   alias Cirunner.Agent.CreateRunnerCommand
 
@@ -158,10 +158,16 @@ defmodule KuiperCoordinator.Fleet.FixedCapacityTest do
   end
 
   for {label, reply} <- [
-        rejected: {:error, {:rejected, "at capacity"}},
-        timeout: {:error, :timeout},
-        disconnected: {:error, :disconnected}
+        rejected: {{:error, {:rejected, "at capacity"}}, {"command_rejected", "at capacity"}},
+        timeout: {{:error, :timeout}, {"command_failed", "CreateRunner: :timeout"}},
+        disconnected:
+          {{:error, :disconnected}, {"command_failed", "CreateRunner: :disconnected"}},
+        legacy_failure:
+          {{:ok, %Cirunner.Agent.CommandResult{success: false, error: "boot"}},
+           {"runner_failed", "boot"}}
       ] do
+    {reply, {kind, message}} = reply
+
     test "a #{label} CreateRunner releases the slot, removes the forge runner and the row (P5)" do
       stub_forge()
       pool = legacy(1)
@@ -187,6 +193,10 @@ defmodule KuiperCoordinator.Fleet.FixedCapacityTest do
       assert_received {:released, name}
       assert_received {:forge_removed, ^name}
       assert Runners.list_runners() == []
+
+      # recorded for the agent's Errors page, no job in fixed capacity (#33)
+      assert [%{kind: unquote(kind), message: unquote(message), job_key: nil, runner_name: ^name}] =
+               AgentFailures.recent("a1", 10)
     end
   end
 

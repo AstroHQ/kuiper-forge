@@ -5,7 +5,16 @@ defmodule KuiperCoordinator.Fleet.RunnerEventsTest do
   import Mox
 
   alias Cirunner.Agent.RunnerEvent
-  alias KuiperCoordinator.{AgentDispatchMock, AgentRegistry, ForgeMock, Jobs, Runners}
+
+  alias KuiperCoordinator.{
+    AgentDispatchMock,
+    AgentFailures,
+    AgentRegistry,
+    ForgeMock,
+    Jobs,
+    Runners
+  }
+
   alias KuiperCoordinator.Fleet.{Manager, RunnerEvents}
 
   setup :set_mox_global
@@ -105,6 +114,51 @@ defmodule KuiperCoordinator.Fleet.RunnerEventsTest do
       expect_cleanup("a1", "p1")
       assert :pass = RunnerEvents.handle(@ctx, "a1", event("p1", :DESTROYED))
       assert Runners.get_runner("p1") == nil
+    end
+  end
+
+  describe "agent failures (Rust fleet.rs 1800-1888, #33)" do
+    defp failures,
+      do:
+        AgentFailures.recent_all(nil, nil, 10)
+        |> Enum.map(&{&1.agent_id, &1.kind, &1.runner_name, &1.job_key, &1.message})
+        |> Enum.sort()
+
+    test "Failed is runner_failed, with its job; Destroyed mid-job or with an error is runner_lost" do
+      key = job(1)
+      runner("r1", "a1", key)
+      expect_cleanup("a1", "r1")
+      RunnerEvents.handle(@ctx, "a1", event("r1", :FAILED, "vm crashed"))
+
+      runner("r2", "a2", key)
+      expect_cleanup("a2", "r2")
+      RunnerEvents.handle(@ctx, "a2", event("r2", :DESTROYED))
+
+      runner("p1", "a3", nil)
+      expect_cleanup("a3", "p1")
+      RunnerEvents.handle(@ctx, "a3", event("p1", :DESTROYED, "disk gone"))
+
+      assert failures() == [
+               {"a1", "runner_failed", "r1", key, "vm crashed"},
+               {"a2", "runner_lost", "r2", key, "runner destroyed before finishing"},
+               {"a3", "runner_lost", "p1", nil, "disk gone"}
+             ]
+    end
+
+    test "a plain Destroyed of a jobless runner and a Completed record nothing" do
+      runner("p1", "a1", nil)
+      expect_cleanup("a1", "p1")
+      RunnerEvents.handle(@ctx, "a1", event("p1", :DESTROYED))
+      runner("p2", "a1", nil)
+      expect_cleanup("a1", "p2")
+      RunnerEvents.handle(@ctx, "a1", event("p2", :COMPLETED))
+      assert failures() == []
+    end
+
+    test "Failed for a runner already cleaned up is still recorded; Destroyed is not" do
+      RunnerEvents.handle(@ctx, "a1", event("gone", :FAILED, "destroy failed"))
+      RunnerEvents.handle(@ctx, "a1", event("gone2", :DESTROYED, "late"))
+      assert failures() == [{"a1", "runner_failed", "gone", nil, "destroy failed"}]
     end
   end
 
