@@ -45,13 +45,23 @@ defmodule KuiperCoordinatorWeb.Router do
     live_session :admin, on_mount: {KuiperCoordinatorWeb.AdminAuth, :require_admin} do
       live "/dashboard", Admin.DashboardLive
       live "/users", Admin.UsersLive
+      live "/api-tokens", Admin.ApiTokensLive
     end
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", KuiperCoordinatorWeb do
-  #   pipe_through :api
-  # end
+  pipeline :api_token do
+    plug :require_admin_enabled
+    plug KuiperCoordinatorWeb.Plugs.ApiAuth
+  end
+
+  # Read-only JSON API (parity API1-API4): bearer kfapi_ tokens only, served with the admin UI.
+  scope "/api/v1", KuiperCoordinatorWeb do
+    pipe_through [:api, :api_token]
+
+    get "/status", ApiController, :status
+    get "/agents", ApiController, :agents
+    get "/agents/:agent_id/logs", ApiController, :agent_logs
+  end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:kuiper_coordinator, :dev_routes) do
