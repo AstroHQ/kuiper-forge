@@ -4,6 +4,7 @@ defmodule KuiperCoordinator.GitHub.Client do
   (parity G1-G8). Auth with an App JWT, an installation per account, installation tokens
   cached until 5 minutes before they expire.
   """
+  @behaviour KuiperCoordinator.Forge
   require Logger
 
   alias KuiperCoordinator.Forge.RunnerScope
@@ -57,6 +58,7 @@ defmodule KuiperCoordinator.GitHub.Client do
   end
 
   @doc "A runner registration token for the scope (fixed-capacity pools)."
+  @impl KuiperCoordinator.Forge
   @spec registration_token(t(), scope()) :: {:ok, String.t()} | {:error, term()}
   def registration_token(c, scope) do
     with {:ok, token} <- scope_token(c, scope),
@@ -148,7 +150,12 @@ defmodule KuiperCoordinator.GitHub.Client do
     end
   end
 
+  @doc "The scope's URL the runner registers against (forge.rs scope_url)."
+  @impl KuiperCoordinator.Forge
+  def scope_url(_c, scope), do: RunnerScope.github_url(scope)
+
   @doc "Removes a runner by name; absent is fine, busy (422) is an error."
+  @impl KuiperCoordinator.Forge
   @spec remove_runner(t(), scope(), String.t()) :: :ok | {:error, term()}
   def remove_runner(c, scope, name) do
     with {:ok, token} <- scope_token(c, scope),
