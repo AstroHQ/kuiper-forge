@@ -74,7 +74,9 @@ defmodule KuiperCoordinator.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:protobuf, "~> 0.17"},
-      {:grpc, "~> 1.1"}
+      {:grpc, "~> 1.1"},
+      {:grpc_server, "~> 1.1"},
+      {:x509, "~> 0.9"}
     ]
   end
 
