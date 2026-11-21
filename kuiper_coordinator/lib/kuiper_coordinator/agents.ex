@@ -182,6 +182,11 @@ defmodule KuiperCoordinator.Agents do
     if count == 1, do: :ok, else: {:error, :not_found}
   end
 
+  @doc "Ids of agents switched off on the dashboard (`unavailable_at` set)."
+  def unavailable_agent_ids do
+    Repo.all(from(a in Agent, where: not is_nil(a.unavailable_at), select: a.agent_id))
+  end
+
   @doc """
   Marks an agent unavailable (no new runners; running ones finish) or available again
   (Rust set_agent_unavailable, parity #40). The DB is written first, then `{:agent_availability,
