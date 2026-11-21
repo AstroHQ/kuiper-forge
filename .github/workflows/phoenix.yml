@@ -150,3 +150,47 @@ jobs:
           KUIPER_AGENT_PROBE: test/rust_agent_probe/target/debug/kuiper-agent-probe
           KUIPER_MANAGEMENT_PROBE: test/rust_agent_probe/target/debug/kuiper-management-probe
         run: mix test --only rust_agent
+
+  release:
+    # The prod release boots the way docs/verify-real-agents.md runs it: migrate, then bin/server
+    # with HTTP and the agent gRPC TLS listener on their own ports.
+    name: Release smoke test
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: prod
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            kuiper_coordinator/deps
+            kuiper_coordinator/_build
+          key: mix-prod-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('kuiper_coordinator/mix.lock') }}
+          restore-keys: mix-prod-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Build and boot the release
+        env:
+          DATABASE_URL: ecto://postgres:postgres@localhost:5432/kuiper_coordinator_smoke
+        run: bash scripts/release_smoke.sh
