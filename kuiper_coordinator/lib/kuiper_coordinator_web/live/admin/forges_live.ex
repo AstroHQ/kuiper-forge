@@ -72,6 +72,9 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
           <.link navigate={~p"/admin/forges/forgejo/new"} class="btn btn-sm">
             Add Forgejo forge
           </.link>
+          <.link navigate={~p"/admin/forges/provisioning"} class="btn btn-sm" id="provisioning-link">
+            Provisioning
+          </.link>
         </:actions>
       </.header>
 
