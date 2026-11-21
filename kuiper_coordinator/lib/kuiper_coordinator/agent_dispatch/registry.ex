@@ -36,6 +36,9 @@ defmodule KuiperCoordinator.AgentDispatch.Registry do
     end
   end
 
+  @doc "Free slots for `labels` across available agents, reservations counted (for the dashboard)."
+  def available_capacity(labels), do: AgentRegistry.available_capacity(labels)
+
   @impl true
   def pool_definitions, do: Capacity.pool_definitions(AgentRegistry.capacities())
 
