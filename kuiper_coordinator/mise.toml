@@ -1,0 +1,4 @@
+# keep in sync with .github/workflows/phoenix.yml
+[tools]
+erlang = "28.5"
+elixir = "1.19.6-otp-28"

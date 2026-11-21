@@ -1,0 +1,87 @@
+name: Phoenix coordinator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "kuiper_coordinator/**"
+      - "kuiper-agent-proto/proto/**"
+      - ".github/workflows/phoenix.yml"
+  pull_request:
+    paths:
+      - "kuiper_coordinator/**"
+      - "kuiper-agent-proto/proto/**"
+      - ".github/workflows/phoenix.yml"
+
+permissions:
+  contents: read
+
+env:
+  MIX_ENV: test
+  # keep in sync with kuiper_coordinator/mise.toml
+  OTP_VERSION: "28.5"
+  ELIXIR_VERSION: "1.19.6-otp-28"
+
+defaults:
+  run:
+    working-directory: kuiper_coordinator
+
+jobs:
+  test:
+    name: Format, compile, test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            kuiper_coordinator/deps
+            kuiper_coordinator/_build
+          key: mix-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('kuiper_coordinator/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Get deps
+        run: mix deps.get --check-locked
+
+      - name: Formatting
+        run: mix format --check-formatted
+
+      - name: Compile
+        run: mix compile --warnings-as-errors
+
+      - name: Generated protos are up to date
+        run: |
+          mix proto.gen
+          git add -N lib/kuiper_coordinator/proto
+          git diff --exit-code -- lib/kuiper_coordinator/proto || {
+            echo "::error::Generated proto modules are stale. Run 'mix proto.gen' in kuiper_coordinator/ and commit the result."
+            exit 1
+          }
+
+      - name: Test
+        run: mix test
