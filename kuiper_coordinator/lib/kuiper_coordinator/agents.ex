@@ -182,6 +182,26 @@ defmodule KuiperCoordinator.Agents do
     if count == 1, do: :ok, else: {:error, :not_found}
   end
 
+  @doc """
+  Marks an agent unavailable (no new runners; running ones finish) or available again
+  (Rust set_agent_unavailable, parity #40). The DB is written first, then `{:agent_availability,
+  agent_id, available?}` goes out on PubSub "agents" so scheduling follows.
+  """
+  def set_unavailable(agent_id, unavailable?) when is_boolean(unavailable?) do
+    value = if unavailable?, do: DateTime.utc_now()
+
+    {count, _} =
+      from(a in Agent, where: a.agent_id == ^agent_id)
+      |> Repo.update_all(set: [unavailable_at: value, updated_at: DateTime.utc_now()])
+
+    if count == 1 do
+      AgentRegistry.broadcast({:agent_availability, agent_id, not unavailable?})
+      :ok
+    else
+      {:error, :not_found}
+    end
+  end
+
   @doc "Hourly housekeeping (A13): drop expired tokens and agents revoked more than 7 days ago."
   def purge_expired do
     now = DateTime.utc_now()

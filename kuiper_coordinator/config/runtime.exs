@@ -96,7 +96,9 @@ if config_env() != :test do
   config :kuiper_coordinator, :admin,
     enabled: System.get_env("KUIPER_ADMIN", "false") in ~w(true 1),
     session_timeout_secs:
-      String.to_integer(System.get_env("KUIPER_ADMIN_SESSION_TIMEOUT", "3600"))
+      String.to_integer(System.get_env("KUIPER_ADMIN_SESSION_TIMEOUT", "3600")),
+    # agent-facing URL in registration bundles (Rust [admin] coordinator_url)
+    coordinator_url: System.get_env("KUIPER_COORDINATOR_URL", "https://localhost:9543")
 end
 
 if config_env() == :dev do
