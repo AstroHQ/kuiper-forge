@@ -40,6 +40,9 @@ defmodule KuiperCoordinator.Forges.GitHubManifest do
           client_secret: String.t() | nil
         }
 
+  @doc "Test and deploy overrides: `:github_url`, `:base_url`, `:req_options`, `:sink`."
+  def config, do: Application.get_env(:kuiper_coordinator, :github_manifest, [])
+
   def permissions, do: @permissions
   def events, do: @events
 
