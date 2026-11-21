@@ -20,11 +20,15 @@ defmodule KuiperCoordinator.Fleet.Manager do
   use GenServer
   require Logger
 
-  alias KuiperCoordinator.Fleet.{FixedCapacity, Forges, OnDemand, Recovery}
+  alias Cirunner.Agent.RunnerEvent
+  alias KuiperCoordinator.{AgentRegistry, Runners}
+  alias KuiperCoordinator.Fleet.{FixedCapacity, Forges, OnDemand, Recovery, RunnerEvents}
 
   @modes [:fixed_capacity, :webhook, :polling]
   @on_demand [:webhook, :polling]
   @default_tick_ms 30_000
+  # Rust server.rs AGENT_DISCONNECT_GRACE (S9)
+  @disconnect_grace_ms 30_000
 
   def start_link(opts) do
     case Keyword.get(opts, :name, __MODULE__) do
@@ -57,6 +61,9 @@ defmodule KuiperCoordinator.Fleet.Manager do
         tick_ms: Keyword.get(opts, :tick_ms, default_tick),
         scan_ms: scan_ms,
         last_scan: nil,
+        grace_ms: Keyword.get(opts, :disconnect_grace_ms, @disconnect_grace_ms),
+        # agent_id => the stamp of its latest disconnect, until it reconnects or fails over
+        disconnects: %{},
         ctx: %{
           forges: forges,
           forge_name: default_name,
@@ -74,6 +81,9 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
       if mode in @on_demand,
         do: Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, "fleet")
+
+      # runner events, connects and disconnects (F5, F7, P2, S4, S9)
+      Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, AgentRegistry.topic())
 
       schedule(state)
       {:ok, state, {:continue, :startup}}
@@ -157,7 +167,79 @@ defmodule KuiperCoordinator.Fleet.Manager do
   end
 
   # Rust only records job_started in metrics; the fleet has nothing to do.
+
+  def handle_info({:agent_event, agent_id, {:runner_event, %RunnerEvent{} = ev}}, state) do
+    case RunnerEvents.handle(state.ctx, agent_id, ev) do
+      :pass -> run_pass(state)
+      :ok -> :ok
+    end
+
+    {:noreply, state}
+  rescue
+    e ->
+      Logger.error(
+        "runner event from #{agent_id} failed: " <> Exception.format(:error, e, __STACKTRACE__)
+      )
+
+      {:noreply, state}
+  end
+
+  # A (re)connect cancels a pending failover and may bring capacity: a pass (Rust notify, S4, P2).
+  def handle_info({:agent_connected, agent_id, _info}, state) do
+    state = %{state | disconnects: Map.delete(state.disconnects, agent_id)}
+    pass(state)
+  end
+
+  # S9: if the agent is still gone after the grace, its runners with jobs are failed over
+  # (Destroyed "agent disconnected"), so their jobs can move to other agents.
+  def handle_info({:agent_disconnected, agent_id, _reason}, state) do
+    stamp = make_ref()
+    Process.send_after(self(), {:failover, agent_id, stamp}, state.grace_ms)
+    {:noreply, put_in(state, [:disconnects, agent_id], stamp)}
+  end
+
+  def handle_info({:failover, agent_id, stamp}, state) do
+    # snapshot first, claim second (Rust): runners created after a reconnect aren't in it
+    orphaned = Runners.job_runners_for_agent(agent_id)
+
+    if Map.get(state.disconnects, agent_id) == stamp and not AgentRegistry.connected?(agent_id) do
+      state = %{state | disconnects: Map.delete(state.disconnects, agent_id)}
+      failover(state, agent_id, orphaned)
+      {:noreply, state}
+    else
+      # reconnected, or dropped again and that timer owns the grace
+      {:noreply, state}
+    end
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
+
+  defp failover(_state, _agent_id, []), do: :ok
+
+  defp failover(state, agent_id, names) do
+    Logger.warning(
+      "Agent #{agent_id} still offline after #{state.grace_ms} ms - failing its " <>
+        "#{length(names)} runner(s) so their jobs can move"
+    )
+
+    for name <- names do
+      ev = %RunnerEvent{
+        runner_name: name,
+        vm_id: name,
+        event_type: :DESTROYED,
+        error: "agent disconnected"
+      }
+
+      RunnerEvents.handle(state.ctx, agent_id, ev)
+    end
+
+    run_pass(state)
+  rescue
+    e ->
+      Logger.error(
+        "failover of #{agent_id} failed: " <> Exception.format(:error, e, __STACKTRACE__)
+      )
+  end
 
   defp pass(state) do
     run_pass(state)
