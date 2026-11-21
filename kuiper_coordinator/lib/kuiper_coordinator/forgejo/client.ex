@@ -24,7 +24,8 @@ defmodule KuiperCoordinator.Forgejo.Client do
   @doc """
   Options: `:url` (http or https), the token from `:token_env` (an env var name), else
   `:token_path` (a file), else `:token`; `:scopes` (config strings, at least one);
-  `:req_options` (extra `Req` options, e.g. a test plug).
+  `:req_options` (extra `Req` options, e.g. a test plug); `:cache` (an Agent pid or name for
+  the repo-name cache; the fleet passes a supervised one).
   """
   @spec new(keyword()) :: {:ok, t()} | {:error, String.t()}
   def new(opts) do
@@ -45,7 +46,17 @@ defmodule KuiperCoordinator.Forgejo.Client do
         )
         |> Req.merge(Keyword.get(opts, :req_options, []))
 
-      {:ok, names} = Agent.start_link(fn -> %{} end)
+      # The repo-name cache must outlive whoever calls new/1 (a config load, a Task): use the
+      # fleet's supervised cache when given, else an unlinked Agent.
+      names =
+        case Keyword.fetch(opts, :cache) do
+          {:ok, cache} ->
+            cache
+
+          :error ->
+            {:ok, pid} = Agent.start(fn -> %{} end)
+            pid
+        end
 
       {:ok,
        %__MODULE__{base_url: base_url, token: token, scopes: scopes, req: req, repo_names: names}}
@@ -441,15 +452,31 @@ defmodule KuiperCoordinator.Forgejo.Client do
 
   defp request(c, method, path, what, opts \\ []) do
     case raw(c, method, path, opts) do
-      {:ok, %{status: s, body: body}} when s in 200..299 -> {:ok, decode(body)}
-      {:ok, resp} -> {:error, error_for(what, resp)}
-      {:error, e} -> {:error, transport(what, e)}
+      {:ok, %{status: s, body: body}} when s in 200..299 ->
+        case decode(body) do
+          {:ok, data} -> {:ok, data}
+          :error -> {:error, "Failed to parse #{what} response: not JSON"}
+        end
+
+      {:ok, resp} ->
+        {:error, error_for(what, resp)}
+
+      {:error, e} ->
+        {:error, transport(what, e)}
     end
   end
 
-  defp decode(""), do: nil
-  defp decode(body) when is_binary(body), do: Jason.decode!(body)
-  defp decode(body), do: body
+  # A 2xx that isn't JSON (a proxy's HTML page) is an error, as in Rust ("Failed to parse ...").
+  defp decode(""), do: {:ok, nil}
+
+  defp decode(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, data} -> {:ok, data}
+      {:error, _} -> :error
+    end
+  end
+
+  defp decode(body), do: {:ok, body}
 
   defp raw(c, method, path, opts \\ []) do
     Req.request(c.req, [method: method, url: "/" <> path] ++ opts)
