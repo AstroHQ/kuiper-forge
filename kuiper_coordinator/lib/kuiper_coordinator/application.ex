@@ -21,9 +21,12 @@ defmodule KuiperCoordinator.Application do
       ] ++
         KuiperCoordinator.AgentGrpc.children() ++
         [
+          fleet_child(),
           # Start to serve requests, typically the last entry
           KuiperCoordinatorWeb.Endpoint
         ]
+
+    children = Enum.reject(children, &is_nil/1)
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
@@ -37,5 +40,13 @@ defmodule KuiperCoordinator.Application do
   def config_change(changed, _new, removed) do
     KuiperCoordinatorWeb.Endpoint.config_change(changed, removed)
     :ok
+  end
+
+  # Provisioning runs only once a fleet is configured (forges, mode).
+  defp fleet_child do
+    case Application.get_env(:kuiper_coordinator, :fleet) do
+      nil -> nil
+      opts -> {KuiperCoordinator.Fleet.Manager, opts}
+    end
   end
 end
