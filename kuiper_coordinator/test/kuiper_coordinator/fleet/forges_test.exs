@@ -81,6 +81,18 @@ defmodule KuiperCoordinator.Fleet.ForgesTest do
     assert msg =~ "private key"
   end
 
+  test "an inline GitHub key wins over a key file, as in Rust (F12)" do
+    gh = [
+      name: "github",
+      type: :github,
+      app_id: 42,
+      private_key: pem(),
+      private_key_path: "/nonexistent/app.pem"
+    ]
+
+    assert {:ok, [{"github", {GitHub, _}}]} = Forges.build([gh], validate: false)
+  end
+
   test "names are unique and colon-free, types known, at least one forge (C2)" do
     assert {:error, msg} = Forges.build([@fj, @fj], validate: false)
     assert msg =~ "unique"
