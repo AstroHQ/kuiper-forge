@@ -15,7 +15,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
   alias KuiperCoordinator.{AgentDispatch, Forge, Jobs, Runners}
   alias KuiperCoordinator.Jobs.PendingJob
   alias KuiperCoordinator.Runners.Naming
-  alias Cirunner.Agent.{CommandResult, CreateRunnerCommand}
+  alias Cirunner.Agent.{CommandResult, CreateRunnerCommand, ForgejoRunner}
 
   @pending_statuses ["queued", "waiting"]
 
@@ -37,6 +37,11 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
         Logger.warning("Pending job #{job.job_key} exceeded max retries (#{max}), abandoning")
         Jobs.remove_pending(job.job_key)
         :abandoned
+
+      # its last runner idled (F13): no new one until the delay is up
+      MapSet.member?(Map.get(ctx, :backing_off, MapSet.new()), job.job_key) ->
+        Logger.debug("Pending job #{job.job_key} is backing off after an idle runner")
+        :skipped
 
       (runners = Runners.for_job(job.job_key)) != [] ->
         if length(runners) > 1,
@@ -66,10 +71,12 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
 
   defp create_for_job(job, ctx) do
     with {:ok, forge} <- forge_for(job, ctx),
-         {:ok, agent_id} <- AgentDispatch.select_agent(job.agent_labels, avoid: job.failed_agents),
+         kind = Forge.runner_kind(forge),
+         {:ok, agent_id} <-
+           AgentDispatch.select_agent(job.agent_labels, avoid: job.failed_agents, kind: kind),
          name = Naming.new(AgentDispatch.hostname(agent_id)),
          {:ok, ^agent_id} <-
-           AgentDispatch.reserve_slot(job.agent_labels, name, agent_id: agent_id) do
+           AgentDispatch.reserve_slot(job.agent_labels, name, agent_id: agent_id, kind: kind) do
       case still_wanted(forge, job) do
         :yes ->
           launch(forge, job, agent_id, name, ctx)
@@ -117,7 +124,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
            job.runner_group,
            job_id(job)
          ) do
-      {:ok, {:github_jit, jit}} ->
+      {:ok, launch} when elem(launch, 0) in [:github_jit, :forgejo] ->
         Runners.add_runner(%{
           runner_name: name,
           agent_id: agent_id,
@@ -131,7 +138,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
           labels: job.agent_labels
         })
         |> case do
-          {:ok, _} -> send_jit(forge, job, agent_id, name, jit, ctx)
+          {:ok, _} -> send_launch(forge, job, agent_id, name, launch, ctx)
           {:error, reason} -> row_failed(forge, job, agent_id, name, reason)
         end
 
@@ -141,8 +148,16 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
     end
   end
 
-  defp send_jit(forge, job, agent_id, name, jit, ctx) do
-    cmd = %CreateRunnerCommand{
+  defp send_launch(forge, job, agent_id, name, launch, ctx) do
+    cmd = create_command(forge, job, name, launch)
+
+    Logger.info("Sending CreateRunner to #{agent_id} for #{name} (job #{job.job_key})")
+    send_create(forge, job, agent_id, cmd, ctx)
+    :created
+  end
+
+  defp create_command(forge, job, name, {:github_jit, jit}) do
+    %CreateRunnerCommand{
       vm_name: name,
       registration_token: "",
       labels: job.agent_labels,
@@ -151,10 +166,24 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
       # the agent picks by job labels
       label_set_id: ""
     }
+  end
 
-    Logger.info("Sending CreateRunner to #{agent_id} for #{name} (job #{job.job_key})")
-    send_create(forge, job, agent_id, cmd, ctx)
-    :created
+  # Forgejo one-job runner (agent.proto ForgejoRunner): the GitHub fields stay empty.
+  defp create_command(_forge, job, name, {:forgejo, fj}) do
+    %CreateRunnerCommand{
+      vm_name: name,
+      registration_token: "",
+      labels: job.agent_labels,
+      runner_scope_url: "",
+      jit_config: "",
+      label_set_id: "",
+      forgejo: %ForgejoRunner{
+        instance_url: fj.instance_url,
+        uuid: fj.uuid,
+        token: fj.token,
+        handle: fj.handle
+      }
+    }
   end
 
   # F8: the row couldn't be written. No CreateRunner without a row (F3): give the slot back and

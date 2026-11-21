@@ -9,6 +9,11 @@ defmodule KuiperCoordinator.Fleet.RunnerRowErrorTest do
 
   setup :verify_on_exit!
 
+  setup do
+    stub(ForgeMock, :runner_kind, fn _ -> "github" end)
+    :ok
+  end
+
   @scope {:org, "astro"}
 
   defp break_runners_table, do: Repo.query!("ALTER TABLE runners RENAME TO runners_gone")

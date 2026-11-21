@@ -8,7 +8,8 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
   (GitHub redelivers). A persisted job is announced on PubSub topic `"fleet"`.
 
   Config (`config :kuiper_coordinator, :webhook`): `:secret` (required to enable it), `:path`
-  (default `/webhook`), `:forge` (default `github`), `:required_labels` (default
+  (default `/webhook`), `:source` (`:github`, the default, or `:forgejo`, handled by
+  `KuiperCoordinatorWeb.Plugs.ForgejoWebhook`), `:forge` (default `github`), `:required_labels` (default
   `["self-hosted"]`), `:label_mappings`, `:max_body` (bytes, default 25 MB; larger is 413).
   """
   @behaviour Plug
@@ -27,7 +28,10 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
     config = Application.get_env(:kuiper_coordinator, :webhook, [])
 
     if config[:secret] && conn.request_path == Keyword.get(config, :path, "/webhook") do
-      conn |> handle(config) |> halt()
+      case Keyword.get(config, :source, :github) do
+        :forgejo -> conn |> KuiperCoordinatorWeb.Plugs.ForgejoWebhook.handle(config) |> halt()
+        _ -> conn |> handle(config) |> halt()
+      end
     else
       conn
     end
@@ -207,7 +211,8 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
     end
   end
 
-  defp read_full_body(conn, max, acc \\ []) do
+  @doc false
+  def read_full_body(conn, max, acc \\ []) do
     case read_body(conn) do
       {:ok, chunk, conn} ->
         if IO.iodata_length([acc, chunk]) > max,
