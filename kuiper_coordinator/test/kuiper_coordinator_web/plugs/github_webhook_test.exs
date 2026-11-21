@@ -95,6 +95,34 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhookTest do
     assert Jobs.list_pending() == []
   end
 
+  test "a missing or malformed signature header is 401 (W3)", %{conn: conn} do
+    body = event("queued", 1, ["self-hosted", "macOS"])
+
+    no_header =
+      conn
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "workflow_job")
+      |> post("/webhook", body)
+
+    assert no_header.status == 401
+    assert deliver(build_conn(), body, sig: "sha1=abc").status == 401
+    assert deliver(build_conn(), body, sig: "sha256=not-hex").status == 401
+    assert Jobs.list_pending() == []
+  end
+
+  test "a body over the cap is 413, even when it arrives in one chunk", %{conn: conn} do
+    Application.put_env(
+      :kuiper_coordinator,
+      :webhook,
+      Keyword.put(Application.get_env(:kuiper_coordinator, :webhook), :max_body, 64)
+    )
+
+    body = event("queued", 1, ["self-hosted", "macOS"])
+    assert byte_size(body) > 64
+    assert deliver(conn, body).status == 413
+    assert Jobs.list_pending() == []
+  end
+
   test "bad JSON with a good signature is 400 (W2)", %{conn: conn} do
     assert deliver(conn, "{not json").status == 400
   end

@@ -170,10 +170,19 @@ defmodule KuiperCoordinator.GitHub.Client do
     case String.split(repo, "/") do
       [owner, _name] ->
         with {:ok, token} <- account_token(c, owner) do
-          case request(c, token, :get, "/repos/#{repo}/actions/jobs/#{job_id}", [200, 404]) do
-            {:ok, %{"status" => status}} -> {:ok, status}
-            {:ok, _not_found} -> {:ok, nil}
-            err -> err
+          # Match on the HTTP status first: GitHub's 404 body also has a "status" key ("404").
+          case raw(c, token, :get, "/repos/#{repo}/actions/jobs/#{job_id}", []) do
+            {:ok, %{status: 404}} ->
+              {:ok, nil}
+
+            {:ok, %{status: 200, body: %{"status" => status}}} when is_binary(status) ->
+              {:ok, status}
+
+            {:ok, %{status: s, body: body}} ->
+              {:error, {:http, s, body}}
+
+            {:error, e} ->
+              {:error, e}
           end
         end
 
@@ -262,9 +271,13 @@ defmodule KuiperCoordinator.GitHub.Client do
     with {:ok, jwt} <- jwt(c),
          {:ok, %{"token" => token, "expires_at" => exp}} <-
            request(c, jwt, :post, "/app/installations/#{id}/access_tokens", [201]),
+         true <- is_binary(token) and is_binary(exp),
          {:ok, expires_at, _} <- DateTime.from_iso8601(exp) do
       Cache.put_token(c.cache, id, token, expires_at)
       {:ok, token}
+    else
+      {:error, _} = err -> err
+      other -> {:error, {:malformed_token_response, other}}
     end
   end
 
