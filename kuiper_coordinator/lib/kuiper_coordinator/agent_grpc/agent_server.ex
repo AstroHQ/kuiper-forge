@@ -195,6 +195,8 @@ defmodule KuiperCoordinator.AgentGrpc.AgentServer do
   defp handle_agent_msg(%AgentMessage{payload: {:status, status}}, agent_id, pending) do
     Agents.sync_metadata(agent_id, status.labels, status.max_vms, status.agent_version)
     AgentRegistry.touch(agent_id, status)
+    # leaked reservations: acked but the runner row is already gone (Rust, 60 s grace)
+    AgentRegistry.reconcile(agent_id, KuiperCoordinator.Runners.names_for_agent(agent_id))
     pending
   end
 
@@ -215,8 +217,21 @@ defmodule KuiperCoordinator.AgentGrpc.AgentServer do
     end
   end
 
+  # A legacy agent answers CreateRunner with a full CommandResult instead of an Ack (fleet.rs).
+  defp handle_agent_msg(%AgentMessage{payload: {:result, result}} = msg, agent_id, pending) do
+    case Map.pop(pending, result.command_id) do
+      {{caller, ref}, pending} ->
+        send(caller, {ref, {:result, result}})
+        pending
+
+      {nil, pending} ->
+        AgentRegistry.broadcast({:agent_event, agent_id, msg.payload})
+        pending
+    end
+  end
+
   defp handle_agent_msg(%AgentMessage{payload: {kind, msg}}, agent_id, pending)
-       when kind in [:result, :runner_event] do
+       when kind in [:runner_event] do
     AgentRegistry.broadcast({:agent_event, agent_id, {kind, msg}})
     pending
   end

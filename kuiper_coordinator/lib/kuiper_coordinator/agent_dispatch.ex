@@ -91,7 +91,7 @@ defmodule KuiperCoordinator.AgentDispatch do
       Application.get_env(
         :kuiper_coordinator,
         :agent_dispatch,
-        KuiperCoordinator.AgentDispatch.None
+        KuiperCoordinator.AgentDispatch.Registry
       )
 end
 
