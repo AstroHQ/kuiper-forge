@@ -1,7 +1,7 @@
 defmodule KuiperCoordinator.Forge do
   @moduledoc """
   What provisioning needs from a forge (Rust forge.rs trait, parity T1). A forge is passed as
-  `{module, client}`; `KuiperCoordinator.GitHub.Client` implements it, Forgejo comes next.
+  `{module, client}`; `KuiperCoordinator.GitHub.Client` and `KuiperCoordinator.Forgejo.Client` implement it.
   """
   alias KuiperCoordinator.Forge.RunnerScope
 
@@ -13,8 +13,17 @@ defmodule KuiperCoordinator.Forge do
               :ok | {:error, term()}
   @callback scope_url(client :: term(), RunnerScope.t()) :: String.t()
 
-  @typedoc "How to start a single-use job runner: a GitHub JIT config (Forgejo comes next)."
-  @type launch :: {:github_jit, String.t()}
+  @doc "Which runner the forge's jobs need: \"github\" or \"forgejo\" (forge.rs runner_kind, R5)."
+  @callback runner_kind(client :: term()) :: String.t()
+
+  @typedoc """
+  How to start a single-use job runner: a GitHub JIT config, or a Forgejo one-job runner
+  (agent.proto ForgejoRunner: instance_url, uuid, token, handle).
+  """
+  @type launch ::
+          {:github_jit, String.t()}
+          | {:forgejo,
+             %{instance_url: String.t(), uuid: String.t(), token: String.t(), handle: String.t()}}
 
   @doc """
   Registers a single-use runner for one job (Rust create_job_runner). `runner_group` is the
@@ -43,6 +52,7 @@ defmodule KuiperCoordinator.Forge do
   def registration_token({mod, client}, scope), do: mod.registration_token(client, scope)
   def remove_runner({mod, client}, scope, name), do: mod.remove_runner(client, scope, name)
   def scope_url({mod, client}, scope), do: mod.scope_url(client, scope)
+  def runner_kind({mod, client}), do: mod.runner_kind(client)
   def list_queued_jobs({mod, client}), do: mod.list_queued_jobs(client)
 
   def create_job_runner({mod, client}, scope, name, labels, group, job_id),

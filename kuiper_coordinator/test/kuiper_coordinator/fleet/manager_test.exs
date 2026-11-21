@@ -9,6 +9,11 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  setup do
+    stub(ForgeMock, :runner_kind, fn _ -> "github" end)
+    :ok
+  end
+
   @scope {:org, "astro"}
   @forges %{"github" => {ForgeMock, :client}}
 

@@ -161,6 +161,9 @@ defmodule KuiperCoordinator.GitHub.Client do
     end
   end
 
+  @impl KuiperCoordinator.Forge
+  def runner_kind(_c), do: "github"
+
   @doc "The scope's URL the runner registers against (forge.rs scope_url)."
   @impl KuiperCoordinator.Forge
   def scope_url(_c, scope), do: RunnerScope.github_url(scope)

@@ -16,7 +16,10 @@ defmodule KuiperCoordinator.AgentDispatch.Registry do
 
   @impl true
   def select_agent(labels, opts) do
-    case Capacity.select(AgentRegistry.capacities(), labels, avoid: Keyword.get(opts, :avoid, [])) do
+    case Capacity.select(AgentRegistry.capacities(), labels,
+           avoid: Keyword.get(opts, :avoid, []),
+           include: Capacity.kind_filter(Keyword.get(opts, :kind))
+         ) do
       {:ok, id} -> {:ok, id}
       :none -> {:error, :no_available_agent}
     end
