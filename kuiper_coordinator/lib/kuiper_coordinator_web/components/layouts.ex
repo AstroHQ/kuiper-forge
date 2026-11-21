@@ -111,7 +111,10 @@ defmodule KuiperCoordinatorWeb.Layouts do
   end
 
   defp admin_nav do
-    [{:dashboard, "Dashboard", ~p"/admin/dashboard"}]
+    [
+      {:dashboard, "Dashboard", ~p"/admin/dashboard"},
+      {:users, "Users", ~p"/admin/users"}
+    ]
   end
 
   @doc """
