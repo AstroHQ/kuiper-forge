@@ -25,6 +25,7 @@ defmodule KuiperCoordinator.Application do
         KuiperCoordinator.Management.children() ++
         [
           fleet_child(),
+          KuiperCoordinator.AgentUpdates.child(),
           # Start to serve requests, typically the last entry
           KuiperCoordinatorWeb.Endpoint
         ]

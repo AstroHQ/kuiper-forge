@@ -70,6 +70,22 @@ again. A forge is checked against its API when it's saved and rejected if it
 doesn't work; every change reloads the fleet without a restart. With no forge
 stored, nothing is provisioned.
 
+## Admin UI
+
+Off unless `KUIPER_ADMIN=true`; served at `/admin` on the HTTP port, with the
+read-only JSON API at `/api/v1` (bearer `kfapi_` tokens made on the API tokens
+page). Create the first user with `KUIPER_ADMIN_PASSWORD=... bin/kuiper_coordinator
+eval 'KuiperCoordinator.Release.create_admin("admin")'`.
+
+- `KUIPER_ADMIN_SESSION_TIMEOUT`: session lifetime in seconds (3600), never extended.
+- `KUIPER_COORDINATOR_URL`: agent-facing URL put in registration bundles.
+- `KUIPER_METRICS_RETENTION_DAYS`: run history kept for the metrics page (90).
+- `KUIPER_UPDATE_CHECK=false`: stop checking GitHub releases for newer agents
+  (on by default; agents behind the newest release get an "available" badge).
+
+For mock metrics history in dev: `mix run priv/repo/seed_metrics.exs [--days 7]`
+(`--clear` removes it again).
+
 ## Protos
 
 `../kuiper-agent-proto/proto/{agent,management}.proto` is the contract with the
