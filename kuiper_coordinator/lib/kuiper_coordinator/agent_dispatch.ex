@@ -24,6 +24,14 @@ defmodule KuiperCoordinator.AgentDispatch do
   @callback reserve_slot(labels :: [String.t()], runner_name(), opts :: keyword()) ::
               {:ok, agent_id()} | {:error, :no_available_agent}
 
+  @doc """
+  The least-loaded connected agent whose labels cover `labels` (Rust select_agent_for_kind),
+  skipping `:avoid` (the job's failed agents, J4). Picked before the runner is named, since the
+  name carries the agent's hostname (F1); reserve with `agent_id:` after.
+  """
+  @callback select_agent(labels :: [String.t()], opts :: keyword()) ::
+              {:ok, agent_id()} | {:error, :no_available_agent}
+
   @doc "Gives back the slot reserved for `runner_name` on `agent_id`."
   @callback release_slot(agent_id(), runner_name()) :: :ok
 
@@ -68,6 +76,7 @@ defmodule KuiperCoordinator.AgentDispatch do
   def reserve_slot(labels, runner_name, opts \\ []) when is_binary(runner_name),
     do: impl().reserve_slot(labels, runner_name, opts)
 
+  def select_agent(labels, opts \\ []), do: impl().select_agent(labels, opts)
   def release_slot(agent_id, runner_name), do: impl().release_slot(agent_id, runner_name)
   def hostname(agent_id), do: impl().hostname(agent_id)
 
@@ -92,6 +101,8 @@ defmodule KuiperCoordinator.AgentDispatch.None do
 
   @impl true
   def reserve_slot(_labels, _runner_name, _opts), do: {:error, :no_available_agent}
+  @impl true
+  def select_agent(_labels, _opts), do: {:error, :no_available_agent}
   @impl true
   def release_slot(_agent_id, _runner_name), do: :ok
   @impl true

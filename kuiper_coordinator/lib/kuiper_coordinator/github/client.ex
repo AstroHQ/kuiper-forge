@@ -171,8 +171,29 @@ defmodule KuiperCoordinator.GitHub.Client do
     end
   end
 
+  @doc """
+  A single-use JIT runner for a job (forge.rs create_job_runner): resolves the job's runner
+  group (unknown name fails, D9), then generates the JIT config.
+  """
+  @impl KuiperCoordinator.Forge
+  def create_job_runner(c, scope, runner_name, labels, runner_group, _job_id) do
+    with {:ok, group_id} <- resolve_runner_group(c, scope, runner_group),
+         {:ok, jit} <- jit_config(c, scope, runner_name, labels, group_id) do
+      {:ok, {:github_jit, jit}}
+    end
+  end
+
   @doc "A workflow job's status (`queued`, `in_progress`, ...); nil when GitHub returns 404 (G8)."
-  @spec job_status(t(), String.t(), integer()) :: {:ok, String.t() | nil} | {:error, term()}
+  @impl KuiperCoordinator.Forge
+  @spec job_status(t(), String.t(), integer() | String.t()) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def job_status(c, repo, job_id) when is_binary(job_id) do
+    case Integer.parse(job_id) do
+      {id, ""} -> job_status(c, repo, id)
+      _ -> {:error, {:invalid_job_id, job_id}}
+    end
+  end
+
   def job_status(c, repo, job_id) do
     case String.split(repo, "/") do
       [owner, _name] ->
