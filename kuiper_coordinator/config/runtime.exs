@@ -20,8 +20,13 @@ if System.get_env("PHX_SERVER") do
   config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint, server: true
 end
 
+# HTTP port (admin UI, webhooks). Its own port, so it runs beside the Rust
+# coordinator (which listens on 9443) without clashing: KUIPER_HTTP_PORT,
+# else PORT, else 9480.
+http_port = System.get_env("KUIPER_HTTP_PORT") || System.get_env("PORT") || "9480"
+
 config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+  http: [port: String.to_integer(http_port)]
 
 if config_env() == :dev do
   # Reload browser tabs when matching files change.

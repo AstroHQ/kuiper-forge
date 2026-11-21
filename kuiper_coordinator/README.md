@@ -16,7 +16,7 @@ need Postgres (the dev and test configs expect `postgres`/`postgres` on
 cd kuiper_coordinator
 mise install
 mix setup          # deps, database, assets
-mix phx.server     # http://localhost:4000
+mix phx.server     # http://localhost:9480 (KUIPER_HTTP_PORT or PORT to change)
 mix test
 ```
 
