@@ -2,12 +2,12 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLive do
   @moduledoc """
   Agent detail (parity UI4): registration, live limits, label split, this agent's runners,
   revoke, and the availability switch (#40: DB first, then scheduling via PubSub; running
-  runners finish). Unknown agents are a 404. Failures and the performance card come with the
-  failures store and run history.
+  runners finish), and its last 25 failures (#33). Unknown agents are a 404. The 7-day
+  performance card comes with run history (#67).
   """
   use KuiperCoordinatorWeb, :live_view
 
-  alias KuiperCoordinator.{AgentRegistry, Agents, Runners}
+  alias KuiperCoordinator.{AgentFailures, AgentRegistry, Agents, Runners}
   alias KuiperCoordinator.Admin.Dashboard
   alias KuiperCoordinatorWeb.Admin.NotFound
 
@@ -27,11 +27,17 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLive do
     agent = Agents.get_agent(socket.assigns.agent_id) || raise NotFound
     connected = Map.new(AgentRegistry.list(), &{&1.agent_id, &1})
     runners = Enum.filter(Runners.list_runners(), &(&1.agent_id == agent.agent_id))
+    now = DateTime.utc_now()
+
+    failures =
+      for f <- AgentFailures.recent(agent.agent_id, 25),
+          do: Map.put(f, :ago, Dashboard.format_age(DateTime.diff(now, f.occurred_at)))
 
     assign(socket,
       page_title: agent.hostname,
       agent: Dashboard.agent_summary(agent, connected, runners),
-      runners: runners
+      runners: runners,
+      failures: failures
     )
   end
 
@@ -177,6 +183,26 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLive do
               </tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <section class="card bg-base-200">
+        <div class="card-body">
+          <h2 class="card-title">
+            Recent failures
+            <.link
+              navigate={~p"/admin/errors?agent=#{@agent.agent_id}"}
+              class="link text-sm font-normal"
+            >
+              all
+            </.link>
+          </h2>
+          <p :if={@failures == []} class="opacity-60">No failures recorded.</p>
+          <KuiperCoordinatorWeb.Admin.ErrorsLive.failures
+            :if={@failures != []}
+            id="agent-failures"
+            failures={@failures}
+          />
         </div>
       </section>
     </Layouts.admin>
