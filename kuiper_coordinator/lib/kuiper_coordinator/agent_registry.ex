@@ -15,6 +15,9 @@ defmodule KuiperCoordinator.AgentRegistry do
   use GenServer
   require Logger
 
+  alias Cirunner.Agent.AgentStatus
+  alias KuiperCoordinator.AgentDispatch.Capacity
+
   @topic "agents"
 
   def topic, do: @topic
@@ -36,6 +39,27 @@ defmodule KuiperCoordinator.AgentRegistry do
   def disconnect(agent_id, reason),
     do: GenServer.call(__MODULE__, {:disconnect, agent_id, reason})
 
+  @doc """
+  Reserves a slot for `runner_name` atomically (Rust reserve_slot). With `:agent_id` on that
+  agent, else on the least-loaded match (`:avoid` agents last). `:set_id` picks a label set.
+  """
+  def reserve(labels, runner_name, opts \\ []),
+    do: GenServer.call(__MODULE__, {:reserve, labels, runner_name, opts})
+
+  @doc "Gives back `runner_name`'s reserved slot on `agent_id`."
+  def release(agent_id, runner_name),
+    do: GenServer.call(__MODULE__, {:release, agent_id, runner_name})
+
+  @doc """
+  Drops `agent_id`'s reservations older than `min_age_ms` whose runner isn't in
+  `db_runner_names` (Rust reconcile_reservations, 60 s grace).
+  """
+  def reconcile(agent_id, db_runner_names, min_age_ms \\ 60_000),
+    do: GenServer.cast(__MODULE__, {:reconcile, agent_id, db_runner_names, min_age_ms})
+
+  @doc "Capacity of every connected agent that has reported a status."
+  def capacities, do: for(%{capacity: %Capacity{} = c} <- list(), do: c)
+
   def lookup(agent_id) do
     case :ets.lookup(__MODULE__, agent_id) do
       [{^agent_id, entry}] -> entry
@@ -48,8 +72,9 @@ defmodule KuiperCoordinator.AgentRegistry do
   def list, do: :ets.tab2list(__MODULE__) |> Enum.map(fn {_id, entry} -> entry end)
 
   @doc """
-  Sends a CoordinatorMessage payload to the agent's stream and waits for the CommandAck whose
-  command_id matches. The timeout starts now, not after queueing (parity S11).
+  Sends a CoordinatorMessage payload to the agent's stream and waits for the CommandAck (or,
+  from legacy agents, the CommandResult) whose command_id matches: `{:ok, ack_or_result}`.
+  The timeout starts now, not after queueing (parity S11).
   """
   def send_command(agent_id, command_id, payload, timeout \\ 30_000) do
     case lookup(agent_id) do
@@ -61,9 +86,9 @@ defmodule KuiperCoordinator.AgentRegistry do
         send(pid, {:send_command, self(), ref, command_id, payload})
 
         receive do
-          {^ref, {:ack, ack}} ->
+          {^ref, {kind, reply}} when kind in [:ack, :result] ->
             Process.demonitor(ref, [:flush])
-            {:ok, ack}
+            {:ok, reply}
 
           {:DOWN, ^ref, :process, _, _} ->
             {:error, :disconnected}
@@ -123,7 +148,8 @@ defmodule KuiperCoordinator.AgentRegistry do
         agent_id: agent_id,
         pid: pid,
         connected_at: DateTime.utc_now(),
-        last_seen: now
+        last_seen: now,
+        capacity: capacity_for(agent_id, nil, info[:status])
       })
 
     :ets.insert(__MODULE__, {agent_id, entry})
@@ -146,12 +172,61 @@ defmodule KuiperCoordinator.AgentRegistry do
     end
   end
 
+  def handle_call({:reserve, labels, runner_name, opts}, _from, state) do
+    now = System.monotonic_time(:millisecond)
+    set_id = Keyword.get(opts, :set_id, "")
+
+    target =
+      case Keyword.fetch(opts, :agent_id) do
+        {:ok, id} ->
+          with %{capacity: %Capacity{} = cap} <- lookup(id),
+               true <- Capacity.matches_labels?(cap, labels) do
+            {:ok, id}
+          else
+            _ -> :none
+          end
+
+        :error ->
+          Capacity.select(capacities(), labels, avoid: Keyword.get(opts, :avoid, []))
+      end
+
+    with {:ok, id} <- target,
+         %{capacity: cap} = entry <- lookup(id),
+         {:ok, cap} <- Capacity.reserve(cap, labels, set_id, runner_name, now) do
+      :ets.insert(__MODULE__, {id, %{entry | capacity: cap}})
+      {:reply, {:ok, id}, state}
+    else
+      _ -> {:reply, {:error, :no_available_agent}, state}
+    end
+  end
+
+  def handle_call({:release, agent_id, runner_name}, _from, state) do
+    update_capacity(agent_id, &Capacity.release(&1, runner_name))
+    {:reply, :ok, state}
+  end
+
   @impl true
+  def handle_cast({:reconcile, agent_id, names, min_age}, state) do
+    now = System.monotonic_time(:millisecond)
+    update_capacity(agent_id, &Capacity.reconcile(&1, names, min_age, now))
+    {:noreply, state}
+  end
+
   def handle_cast({:touch, agent_id, pid, status}, state) do
     case lookup(agent_id) do
       %{pid: ^pid} = entry ->
         entry = %{entry | last_seen: System.monotonic_time(:millisecond)}
-        entry = if status, do: Map.put(entry, :status, status), else: entry
+
+        entry =
+          if status,
+            do:
+              Map.merge(entry, %{
+                status: status,
+                vm_names: Enum.map(status.vms, & &1.name),
+                capacity: capacity_for(agent_id, entry[:capacity], status)
+              }),
+            else: entry
+
         :ets.insert(__MODULE__, {agent_id, entry})
         if status, do: broadcast({:agent_status, agent_id, status})
 
@@ -194,6 +269,30 @@ defmodule KuiperCoordinator.AgentRegistry do
         acc
       end
     end)
+  end
+
+  # Capacity from a status: fresh on connect, refreshed after (reservations kept), and
+  # reservations whose VM the agent now reports are settled (Rust settle_reservations).
+  defp capacity_for(_agent_id, _old, nil), do: nil
+
+  defp capacity_for(agent_id, old, %AgentStatus{} = status) do
+    cap =
+      case old do
+        %Capacity{} -> Capacity.update_status(old, status)
+        nil -> Capacity.from_status(agent_id, status)
+      end
+
+    Capacity.settle(cap, Enum.map(status.vms, & &1.name))
+  end
+
+  defp update_capacity(agent_id, fun) do
+    case lookup(agent_id) do
+      %{capacity: %Capacity{} = cap} = entry ->
+        :ets.insert(__MODULE__, {agent_id, %{entry | capacity: fun.(cap)}})
+
+      _ ->
+        :ok
+    end
   end
 
   defp drop_if_owner(state, agent_id, pid, reason) do
