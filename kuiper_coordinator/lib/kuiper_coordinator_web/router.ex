@@ -51,7 +51,10 @@ defmodule KuiperCoordinatorWeb.Router do
       live "/agents/:agent_id/logs", Admin.AgentLogsLive
       live "/errors", Admin.ErrorsLive
       live "/metrics", Admin.MetricsLive
+      live "/forges", Admin.ForgesLive
       live "/forges/github/new", Admin.GitHubAppNewLive
+      live "/forges/forgejo/new", Admin.ForgeFormLive, :new_forgejo
+      live "/forges/:id/edit", Admin.ForgeFormLive, :edit
     end
   end
 
