@@ -3,6 +3,10 @@ name: Release-plz
 on:
   push:
     branches: [main]
+    # the Phoenix coordinator isn't a cargo package; release-plz has nothing to do for it
+    paths-ignore:
+      - "kuiper_coordinator/**"
+      - ".github/workflows/phoenix.yml"
 
 env:
   CARGO_TERM_COLOR: always
