@@ -50,7 +50,9 @@ defmodule KuiperCoordinator.Admin.Dashboard do
       created_at: agent.inserted_at,
       revoked?: agent.revoked_at != nil,
       unavailable_at: agent.unavailable_at,
-      version: agent.agent_version
+      version: agent.agent_version,
+      # newest GitHub release when this agent is behind it (#75)
+      update: KuiperCoordinator.AgentUpdates.check(agent.agent_type, agent.agent_version)
     }
   end
 

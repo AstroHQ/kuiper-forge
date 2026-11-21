@@ -148,4 +148,43 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     refute Agents.get_agent("agent_a").unavailable_at
     refute html =~ ">\n                    Unavailable"
   end
+
+  describe "update badge (#75)" do
+    setup do
+      KuiperCoordinator.AgentUpdates.set(
+        KuiperCoordinator.AgentUpdates.newest_agent_releases([
+          %{
+            "tag_name" => "kuiper-tart-agent-v0.10.0",
+            "html_url" =>
+              "https://github.com/AstroHQ/kuiper-forge/releases/tag/kuiper-tart-agent-v0.10.0",
+            "published_at" => "2026-11-20T10:00:00Z"
+          }
+        ])
+      )
+
+      on_exit(fn -> KuiperCoordinator.AgentUpdates.set(%{}) end)
+    end
+
+    test "agents behind the newest release link to it; current ones don't", %{conn: conn} do
+      agent!("agent_old", %{agent_version: "0.9.1"})
+      agent!("agent_new", %{agent_version: "0.10.0"})
+      agent!("agent_unknown")
+
+      {:ok, view, _} = live(conn, ~p"/admin/dashboard")
+
+      assert has_element?(
+               view,
+               "#agent-agent_old a.update-badge[href$='kuiper-tart-agent-v0.10.0']",
+               "0.10.0 available"
+             )
+
+      refute has_element?(view, "#agent-agent_new .update-badge")
+      refute has_element?(view, "#agent-agent_unknown .update-badge")
+
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_old")
+      assert has_element?(view, "#agent-version .update-badge", "0.10.0 available")
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_new")
+      refute has_element?(view, "#agent-version .update-badge")
+    end
+  end
 end

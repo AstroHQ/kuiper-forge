@@ -116,7 +116,13 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLive do
             <dt class="opacity-60">Type</dt>
             <dd>{@agent.agent_type}</dd>
             <dt class="opacity-60">Version</dt>
-            <dd>{@agent.version || "unknown"}</dd>
+            <dd id="agent-version">
+              {@agent.version || "unknown"}
+              <KuiperCoordinatorWeb.Admin.DashboardLive.update_badge
+                :if={@agent.update}
+                agent={@agent}
+              />
+            </dd>
             <dt class="opacity-60">Registered</dt>
             <dd>{Calendar.strftime(@agent.created_at, "%Y-%m-%d %H:%M UTC")}</dd>
             <dt class="opacity-60">Capacity</dt>

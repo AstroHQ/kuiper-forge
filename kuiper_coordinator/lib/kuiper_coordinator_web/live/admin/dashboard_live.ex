@@ -205,6 +205,7 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
                     class="opacity-60"
                     title="agent doesn't report its version"
                   >unknown</span>
+                  <div :if={a.update}><.update_badge agent={a} /></div>
                 </td>
                 <td>
                   <span :if={a.revoked?} class="badge badge-neutral">Revoked</span>
@@ -300,4 +301,24 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
     <div class="text-xs opacity-60">{@j.matching_agents} matching, {@j.free_capacity} free</div>
     """
   end
+
+  attr :agent, :map, required: true
+
+  @doc "Links to the newer release when the agent is behind it (#75); shared with the agent page."
+  def update_badge(assigns) do
+    ~H"""
+    <a
+      class="badge badge-warning badge-outline badge-sm update-badge"
+      href={@agent.update.url}
+      target="_blank"
+      rel="noopener"
+      title={"kuiper-#{@agent.agent_type}-agent #{@agent.update.latest} is out#{released(@agent.update.published_at)}; this agent runs #{@agent.version}"}
+    >
+      {@agent.update.latest} available
+    </a>
+    """
+  end
+
+  defp released(nil), do: ""
+  defp released(at), do: " (released #{Calendar.strftime(at, "%Y-%m-%d")})"
 end
