@@ -235,7 +235,43 @@ defmodule KuiperCoordinator.AgentDispatch.RegistryTest do
     assert {:ok, ^e} = Dispatch.select_pool_agent(explicit)
   end
 
+  test "an agent switched off on the dashboard gets no new runners until it's back (#40)" do
+    a = fake_agent(uid("a"), status(2, ["macos"]))
+    b = fake_agent(uid("b"), status(1, ["macos"]))
+    assert Dispatch.available_capacity(["macos"]) == 3
+
+    set_available(a, false)
+    assert Dispatch.available_capacity(["macos"]) == 1
+    assert {:ok, ^b} = Dispatch.reserve_slot(["macos"], "r1", [])
+    assert {:error, :no_available_agent} = Dispatch.reserve_slot(["macos"], "r2", [])
+    assert {:error, :no_available_agent} = Dispatch.reserve_slot(["macos"], "r3", agent_id: a)
+    assert Enum.all?(Dispatch.pool_definitions(), &(a not in &1.members))
+
+    # A new status keeps it switched off
+    send_status(a, status(2, ["macos"]))
+    assert Dispatch.available_capacity(["macos"]) == 0
+
+    set_available(a, true)
+    assert Dispatch.available_capacity(["macos"]) == 2
+    assert {:ok, ^a} = Dispatch.reserve_slot(["macos"], "r4", [])
+  end
+
+  test "an agent switched off while offline stays off when it connects" do
+    id = uid("late")
+    set_available(id, false)
+    ^id = fake_agent(id, status(2, ["macos"]))
+    assert {:error, :no_available_agent} = Dispatch.reserve_slot(["macos"], "r1", agent_id: id)
+    set_available(id, true)
+    assert {:ok, ^id} = Dispatch.reserve_slot(["macos"], "r1", agent_id: id)
+  end
+
   # touch only counts from the stream process that owns the entry, so run it there
+  # What Agents.set_unavailable/2 sends (#40); the registry handles it before the next read
+  defp set_available(agent_id, available?) do
+    AgentRegistry.broadcast({:agent_availability, agent_id, available?})
+    _ = :sys.get_state(AgentRegistry)
+  end
+
   defp send_status(agent_id, st) do
     owner = AgentRegistry.lookup(agent_id).pid
     ref = make_ref()
