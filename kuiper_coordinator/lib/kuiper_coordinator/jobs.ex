@@ -3,7 +3,7 @@ defmodule KuiperCoordinator.Jobs do
   import Ecto.Query
   require Logger
 
-  alias KuiperCoordinator.Repo
+  alias KuiperCoordinator.{Repo, RunHistory}
   alias KuiperCoordinator.Jobs.PendingJob
 
   @doc "Failures (retries) after which a job is abandoned (Rust MAX_RETRIES, F7)."
@@ -32,8 +32,12 @@ defmodule KuiperCoordinator.Jobs do
         |> Map.merge(%{inserted_at: now, updated_at: now})
 
       case Repo.insert_all(PendingJob, [row], on_conflict: :nothing, conflict_target: :job_key) do
-        {1, _} -> {:ok, :inserted}
-        {0, _} -> {:ok, :duplicate}
+        {1, _} ->
+          RunHistory.job_seen(Map.from_struct(job))
+          {:ok, :inserted}
+
+        {0, _} ->
+          {:ok, :duplicate}
       end
     end
   rescue
@@ -57,6 +61,12 @@ defmodule KuiperCoordinator.Jobs do
   def remove_pending(job_key) do
     Repo.delete_all(from j in PendingJob, where: j.job_key == ^job_key)
     :ok
+  end
+
+  @doc "Removes a pending job, recording why in the run history (`:ran`, `:abandoned`, `:gone`)."
+  def remove_pending(job_key, outcome) do
+    RunHistory.job_ended(job_key, outcome)
+    remove_pending(job_key)
   end
 
   @doc """

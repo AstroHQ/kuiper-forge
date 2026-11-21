@@ -99,6 +99,10 @@ if config_env() != :test do
       String.to_integer(System.get_env("KUIPER_ADMIN_SESSION_TIMEOUT", "3600")),
     # agent-facing URL in registration bundles (Rust [admin] coordinator_url)
     coordinator_url: System.get_env("KUIPER_COORDINATOR_URL", "https://localhost:9543")
+
+  # run history for the metrics page (parity C7/MX7: [metrics] retention_days 90)
+  config :kuiper_coordinator, :metrics,
+    retention_days: String.to_integer(System.get_env("KUIPER_METRICS_RETENTION_DAYS", "90"))
 end
 
 if config_env() == :dev do

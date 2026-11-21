@@ -87,7 +87,7 @@ defmodule KuiperCoordinator.Fleet.Recovery do
   end
 
   defp drop(job) do
-    Jobs.remove_pending(job.job_key)
+    Jobs.remove_pending(job.job_key, :gone)
     :dropped
   end
 

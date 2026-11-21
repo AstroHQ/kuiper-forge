@@ -16,13 +16,13 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
 
   A terminal event for a runner no longer tracked only asks for a pass (cleanup already
   happened, so the slot isn't released twice). A runner torn down for idling (`Fleet.Idle`)
-  goes through `idled/3` instead: cleaned up, its job untouched. Drain outcomes and run
-  metrics come with their own features.
+  goes through `idled/3` instead: cleaned up, its job untouched. Every event also feeds the
+  run history (timings, started, outcome); drain outcomes come with F16.
   """
   require Logger
 
   alias Cirunner.Agent.RunnerEvent
-  alias KuiperCoordinator.{AgentDispatch, AgentFailures, Forge, Jobs, Runners}
+  alias KuiperCoordinator.{AgentDispatch, AgentFailures, Forge, Jobs, Runners, RunHistory}
   alias KuiperCoordinator.Runners.Runner
 
   @terminal [:COMPLETED, :FAILED, :DESTROYED]
@@ -36,6 +36,8 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
   @spec handle(map(), String.t(), RunnerEvent.t()) :: :ok | :pass
   def handle(ctx, agent_id, %RunnerEvent{} = ev) do
     name = if ev.runner_name in [nil, ""], do: ev.vm_id, else: ev.runner_name
+    # the event carrying the final timings can come after the one that finished the runner
+    if ev.timings && name not in [nil, ""], do: RunHistory.runner_timings(name, ev.timings)
 
     cond do
       name in [nil, ""] ->
@@ -44,6 +46,7 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
 
       ev.event_type == :STARTED ->
         Logger.info("Runner #{name} started on #{agent_id}")
+        RunHistory.runner_started(name)
         :ok
 
       ev.event_type in @terminal ->
@@ -67,6 +70,7 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
 
       %Runner{} = row ->
         AgentDispatch.release_slot(agent_id, name)
+        RunHistory.runner_finished(name, :idled, "")
         Runners.remove_runner(name)
         Logger.info("Idle runner #{name} on #{agent_id} torn down (job #{row.job_key})")
         remove_from_forge(ctx, Map.get(ctx.forges, row.forge), row)
@@ -77,6 +81,7 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
   defp terminal(ctx, agent_id, name, ev) do
     row = Runners.get_runner(name)
     record_failure(agent_id, name, row, ev)
+    record_outcome(name, row, ev)
 
     case row do
       nil ->
@@ -107,6 +112,22 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
 
   defp record_failure(_agent_id, _name, _row, _ev), do: :ok
 
+  # Rust fleet.rs 1800-1888 run outcome: an untracked runner gets Completed/Failed only (first
+  # finish wins anyway); a tracked one that was destroyed is lost if it had a job or an error,
+  # else a normal pool teardown. Drained comes with F16.
+  defp record_outcome(name, row, %{event_type: type} = ev) do
+    outcome =
+      case {type, row} do
+        {:COMPLETED, _} -> :completed
+        {:FAILED, _} -> :failed
+        {:DESTROYED, nil} -> nil
+        {:DESTROYED, %Runner{job_key: key}} when not is_nil(key) -> :lost
+        {:DESTROYED, _} -> if ev.error in [nil, ""], do: :destroyed, else: :lost
+      end
+
+    if outcome, do: RunHistory.runner_finished(name, outcome, ev.error)
+  end
+
   defp settle_job(_forge, %Runner{job_key: nil} = row, agent_id, ev) do
     case ev.event_type do
       :FAILED -> Logger.warning("Runner #{row.runner_name} on #{agent_id} failed: #{ev.error}")
@@ -129,7 +150,7 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
 
       :done ->
         Logger.info("Runner #{row.runner_name} on #{agent_id} completed job #{key}")
-        Jobs.remove_pending(key)
+        Jobs.remove_pending(key, :ran)
     end
   end
 
@@ -141,7 +162,7 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
             "Runner #{row.runner_name} #{ev.event_type} (#{ev.error}); job #{key} failed #{n} times, abandoning"
           )
 
-          Jobs.remove_pending(key)
+          Jobs.remove_pending(key, :abandoned)
         else
           Logger.warning(
             "Runner #{row.runner_name} #{ev.event_type} (#{ev.error}); job #{key} will be retried (#{n}/#{Jobs.max_retries()})"
