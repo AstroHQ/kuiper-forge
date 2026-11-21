@@ -9,7 +9,7 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
 
   Config (`config :kuiper_coordinator, :webhook`): `:secret` (required to enable it), `:path`
   (default `/webhook`), `:forge` (default `github`), `:required_labels` (default
-  `["self-hosted"]`), `:label_mappings`.
+  `["self-hosted"]`), `:label_mappings`, `:max_body` (bytes, default 25 MB; larger is 413).
   """
   @behaviour Plug
   import Plug.Conn
@@ -37,7 +37,7 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
 
   defp handle(conn, config) do
     with {:event, ["workflow_job"]} <- {:event, get_req_header(conn, "x-github-event")},
-         {:ok, body, conn} <- read_full_body(conn),
+         {:ok, body, conn} <- read_full_body(conn, Keyword.get(config, :max_body, @max_body)),
          {:sig, true} <-
            {:sig, valid_signature?(config[:secret], body, header(conn, "x-hub-signature-256"))},
          {:json, {:ok, %{} = event}} <- {:json, Jason.decode(body)} do
@@ -56,18 +56,69 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
 
       {:error, :too_large} ->
         send_resp(conn, 413, "")
+
+      {:error, reason} ->
+        Logger.warning("Failed to read webhook body: #{inspect(reason)}")
+        send_resp(conn, 400, "")
     end
   end
 
-  defp handle_event(%{"action" => "queued", "workflow_job" => job} = event, config) do
+  # A validly signed but malformed workflow_job is a 400, never a crash or 5xx (GitHub would
+  # redeliver a 5xx forever).
+  defp handle_event(%{"workflow_job" => job} = event, config) do
+    case malformed(event, job) do
+      nil ->
+        dispatch_event(event, config)
+
+      why ->
+        Logger.warning("Malformed workflow_job webhook (#{why}) - rejecting with 400")
+        400
+    end
+  end
+
+  defp handle_event(_event, _config), do: 200
+
+  defp malformed(event, job) do
+    cond do
+      not is_map(job) ->
+        "workflow_job is not an object"
+
+      not (is_nil(event["repository"]) or is_map(event["repository"])) ->
+        "repository is not an object"
+
+      not (is_integer(job["id"]) or is_binary(job["id"])) ->
+        "job id missing"
+
+      not (is_nil(job["labels"]) or
+               (is_list(job["labels"]) and Enum.all?(job["labels"], &is_binary/1))) ->
+        "labels are not strings"
+
+      not (is_nil(job["created_at"]) or is_binary(job["created_at"])) ->
+        "created_at is not a string"
+
+      event["action"] == "queued" and not is_binary(owner(event)) ->
+        "no organization or repository owner"
+
+      true ->
+        nil
+    end
+  end
+
+  defp owner(event) do
+    case event do
+      %{"organization" => %{"login" => login}} when is_binary(login) -> login
+      %{"repository" => %{"owner" => %{"login" => login}}} -> login
+      _ -> nil
+    end
+  end
+
+  defp dispatch_event(%{"action" => "queued", "workflow_job" => job} = event, config) do
     forge = Keyword.get(config, :forge, "github")
     key = "#{forge}:#{job["id"]}"
     labels = job["labels"] || []
     required = Keyword.get(config, :required_labels, Labels.default_required())
 
-    default_scope =
-      {:org,
-       get_in(event, ["organization", "login"]) || get_in(event, ["repository", "owner", "login"])}
+    default_scope = {:org, owner(event)}
 
     with {:required, true} <- {:required, Labels.has_required?(labels, required)},
          {:ok, scope, group} <-
@@ -117,7 +168,7 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
     end
   end
 
-  defp handle_event(%{"action" => "in_progress", "workflow_job" => job}, config) do
+  defp dispatch_event(%{"action" => "in_progress", "workflow_job" => job}, config) do
     broadcast(
       {:job_started, "#{Keyword.get(config, :forge, "github")}:#{job["id"]}", job["runner_name"]}
     )
@@ -125,13 +176,13 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
     200
   end
 
-  defp handle_event(%{"action" => action, "workflow_job" => job}, config)
+  defp dispatch_event(%{"action" => action, "workflow_job" => job}, config)
        when action in ["completed", "cancelled"] do
     broadcast({:job_completed, "#{Keyword.get(config, :forge, "github")}:#{job["id"]}"})
     200
   end
 
-  defp handle_event(_event, _config), do: 200
+  defp dispatch_event(_event, _config), do: 200
 
   @doc "HMAC-SHA256 of the raw body against a `sha256=<hex>` header, in constant time."
   def valid_signature?(secret, body, "sha256=" <> hex) when is_binary(secret) do
@@ -156,15 +207,17 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
     end
   end
 
-  defp read_full_body(conn, acc \\ []) do
+  defp read_full_body(conn, max, acc \\ []) do
     case read_body(conn) do
       {:ok, chunk, conn} ->
-        {:ok, IO.iodata_to_binary([acc, chunk]), conn}
+        if IO.iodata_length([acc, chunk]) > max,
+          do: {:error, :too_large},
+          else: {:ok, IO.iodata_to_binary([acc, chunk]), conn}
 
       {:more, chunk, conn} ->
-        if IO.iodata_length([acc, chunk]) > @max_body,
+        if IO.iodata_length([acc, chunk]) > max,
           do: {:error, :too_large},
-          else: read_full_body(conn, [acc, chunk])
+          else: read_full_body(conn, max, [acc, chunk])
 
       {:error, _} = e ->
         e
