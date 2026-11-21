@@ -24,6 +24,11 @@ defmodule KuiperCoordinator.Runners do
 
   def list_runners, do: Repo.all(from r in Runner, order_by: r.inserted_at)
 
+  @doc "Runner names bound to a job (Rust runners_for_job)."
+  @spec for_job(String.t()) :: [String.t()]
+  def for_job(job_key),
+    do: Repo.all(from r in Runner, where: r.job_key == ^job_key, select: r.runner_name)
+
   @spec remove_runner(String.t()) :: :ok
   def remove_runner(name) do
     Repo.delete_all(from r in Runner, where: r.runner_name == ^name)

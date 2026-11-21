@@ -6,6 +6,9 @@ defmodule KuiperCoordinator.Jobs do
   alias KuiperCoordinator.Repo
   alias KuiperCoordinator.Jobs.PendingJob
 
+  @doc "Failures (retries) after which a job is abandoned (Rust MAX_RETRIES, F7)."
+  def max_retries, do: 3
+
   @fields ~w(job_key forge job_labels agent_labels runner_scope runner_group repository job_name workflow_name queued_at)a
 
   @doc """
