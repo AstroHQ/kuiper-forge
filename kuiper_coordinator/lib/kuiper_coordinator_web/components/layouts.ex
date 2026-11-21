@@ -113,6 +113,7 @@ defmodule KuiperCoordinatorWeb.Layouts do
   defp admin_nav do
     [
       {:dashboard, "Dashboard", ~p"/admin/dashboard"},
+      {:errors, "Errors", ~p"/admin/errors"},
       {:users, "Users", ~p"/admin/users"},
       {:api_tokens, "API tokens", ~p"/admin/api-tokens"}
     ]
