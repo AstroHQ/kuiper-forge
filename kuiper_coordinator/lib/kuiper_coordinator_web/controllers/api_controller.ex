@@ -92,12 +92,14 @@ defmodule KuiperCoordinatorWeb.ApiController do
     })
   end
 
-  defp parse_limit(raw) do
-    case Integer.parse(to_string(raw || "")) do
+  defp parse_limit(raw) when is_binary(raw) do
+    case Integer.parse(raw) do
       {n, ""} -> n |> max(1) |> min(1000)
       _ -> 500
     end
   end
+
+  defp parse_limit(_), do: 500
 
   defp live_max_vms(%{status: %{max_vms: n}}) when is_integer(n), do: n
   defp live_max_vms(_), do: 0

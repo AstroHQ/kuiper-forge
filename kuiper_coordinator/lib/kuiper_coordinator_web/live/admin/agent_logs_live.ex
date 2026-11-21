@@ -39,8 +39,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
     {:noreply, socket}
   end
 
-  defp presence(""), do: nil
-  defp presence(v), do: v
+  defp presence(v) when is_binary(v) and v != "", do: v
+  defp presence(_), do: nil
 
   defp load(socket) do
     %{agent: agent, min_level: min_level, before: before} = socket.assigns

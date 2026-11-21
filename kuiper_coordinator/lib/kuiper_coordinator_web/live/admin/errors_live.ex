@@ -18,7 +18,7 @@ defmodule KuiperCoordinatorWeb.Admin.ErrorsLive do
   @impl true
   def handle_params(params, _uri, socket) do
     kind = AgentFailures.parse_kind(params["kind"])
-    agent = if params["agent"] in [nil, ""], do: nil, else: params["agent"]
+    agent = if is_binary(params["agent"]) and params["agent"] != "", do: params["agent"]
     now = DateTime.utc_now()
 
     agents =

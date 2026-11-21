@@ -393,7 +393,8 @@ defmodule KuiperCoordinator.Agents do
   def parse_log_cursor(cursor) when is_binary(cursor) do
     with [ts, seq] <- String.split(cursor, "_", parts: 2),
          {ts, ""} <- Integer.parse(ts),
-         {seq, ""} <- Integer.parse(seq) do
+         {seq, ""} <- Integer.parse(seq),
+         true <- int64?(ts) and int64?(seq) do
       {ts, seq}
     else
       _ -> nil
@@ -402,9 +403,12 @@ defmodule KuiperCoordinator.Agents do
 
   def parse_log_cursor(_), do: nil
 
+  # ts and seq are bigint columns; a cursor outside that range can't come from log_cursor/1
+  defp int64?(n), do: n >= -0x8000000000000000 and n <= 0x7FFFFFFFFFFFFFFF
+
   @doc "Minimum level from a filter name (agent_log_routes.rs level_filter): unknown is trace."
-  def level_filter(name) do
-    case String.downcase(name || "") do
+  def level_filter(name) when is_binary(name) do
+    case String.downcase(name) do
       "error" -> 1
       "warn" -> 2
       "info" -> 3
@@ -412,6 +416,8 @@ defmodule KuiperCoordinator.Agents do
       _ -> 5
     end
   end
+
+  def level_filter(_), do: 5
 
   def level_name(1), do: "error"
   def level_name(2), do: "warn"

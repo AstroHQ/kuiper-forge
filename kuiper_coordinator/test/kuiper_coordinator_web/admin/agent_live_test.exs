@@ -187,6 +187,16 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
       assert has_element?(view, "#level option[selected][value=error]")
     end
 
+    test "malformed level and before params are ignored (F15)", %{conn: conn} do
+      agent!("agent_mac")
+      log!("agent_mac", 1_000, 3, "first info")
+
+      for query <- ["before=99999999999999999999999_1", "before[]=1_1", "level[]=x"] do
+        {:ok, _view, html} = live(conn, "/admin/agents/agent_mac/logs?" <> query)
+        assert html =~ "first info", query
+      end
+    end
+
     test "pages 500 at a time with a before cursor", %{conn: conn} do
       agent!("agent_mac")
       for i <- 1..501, do: log!("agent_mac", i * 10, 3, "line #{i}-end")
