@@ -170,6 +170,31 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLiveTest do
     assert f.webhook_secret == "whs1"
   end
 
+  test "Check runs the live check even when saves skip it, and shows its message", %{conn: conn} do
+    f = github!()
+    Forges.subscribe()
+
+    Application.put_env(:kuiper_coordinator, :forge_req_options,
+      plug: fn conn -> Plug.Conn.send_resp(conn, 401, ~s({"message":"Bad credentials"})) end
+    )
+
+    on_exit(fn -> Application.delete_env(:kuiper_coordinator, :forge_req_options) end)
+
+    {:ok, view, _} = live(conn, ~p"/admin/forges")
+    view |> element("#check-forge-#{f.id}") |> render_click()
+    assert has_element?(view, "#flash-error", "astro:")
+    # the fake test key fails the check before any request
+    assert has_element?(view, "#flash-error", "invalid_private_key")
+    refute_received {:forges_changed}
+    render_click(view, "check", %{"id" => "nope"})
+    assert has_element?(view, "#flash-error", "No such forge")
+  end
+
+  test "GitHub's post-install redirect says what to do next", %{conn: conn} do
+    {:ok, view, _} = live(conn, ~p"/admin/forges?installation_id=7&setup_action=install")
+    assert has_element?(view, "#flash-info", "GitHub App installed. Press Check")
+  end
+
   test "removes a forge", %{conn: conn} do
     f = github!()
     {:ok, view, _} = live(conn, ~p"/admin/forges")
