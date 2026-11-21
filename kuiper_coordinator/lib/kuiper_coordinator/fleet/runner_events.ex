@@ -15,8 +15,9 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
       `Jobs.max_retries/0`.
 
   A terminal event for a runner no longer tracked only asks for a pass (cleanup already
-  happened, so the slot isn't released twice). Idle teardown (F6, F13), drain outcomes and
-  run metrics come with their own features.
+  happened, so the slot isn't released twice). A runner torn down for idling (`Fleet.Idle`)
+  goes through `idled/3` instead: cleaned up, its job untouched. Drain outcomes and run
+  metrics come with their own features.
   """
   require Logger
 
@@ -51,6 +52,25 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
       true ->
         Logger.warning("Runner event for #{name} from #{agent_id} has no type")
         :ok
+    end
+  end
+
+  @doc """
+  A runner we destroyed for idling ended (Rust: RunOutcome::Idled): slot, row and forge
+  registration go, but its job keeps its place and backoff, no retry counted. Returns `:pass`.
+  """
+  @spec idled(map(), String.t(), String.t()) :: :pass
+  def idled(ctx, agent_id, name) do
+    case Runners.get_runner(name) do
+      nil ->
+        :pass
+
+      %Runner{} = row ->
+        AgentDispatch.release_slot(agent_id, name)
+        Runners.remove_runner(name)
+        Logger.info("Idle runner #{name} on #{agent_id} torn down (job #{row.job_key})")
+        remove_from_forge(ctx, Map.get(ctx.forges, row.forge), row)
+        :pass
     end
   end
 

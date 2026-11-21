@@ -38,6 +38,11 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
         Jobs.remove_pending(job.job_key)
         :abandoned
 
+      # its last runner idled (F13): no new one until the delay is up
+      MapSet.member?(Map.get(ctx, :backing_off, MapSet.new()), job.job_key) ->
+        Logger.debug("Pending job #{job.job_key} is backing off after an idle runner")
+        :skipped
+
       (runners = Runners.for_job(job.job_key)) != [] ->
         if length(runners) > 1,
           do: Logger.error("Multiple runners for job #{job.job_key}: #{inspect(runners)}")
