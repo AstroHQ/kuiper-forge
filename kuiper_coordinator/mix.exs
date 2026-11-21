@@ -5,7 +5,7 @@ defmodule KuiperCoordinator.MixProject do
     [
       app: :kuiper_coordinator,
       version: "0.1.0",
-      elixir: "~> 1.17",
+      elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
@@ -76,7 +76,8 @@ defmodule KuiperCoordinator.MixProject do
       {:protobuf, "~> 0.17"},
       {:grpc, "~> 1.1"},
       {:grpc_server, "~> 1.1"},
-      {:x509, "~> 0.9"}
+      {:x509, "~> 0.9"},
+      {:mox, "~> 1.2", only: :test}
     ]
   end
 
