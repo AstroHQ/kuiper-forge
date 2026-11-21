@@ -25,7 +25,16 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
   alias Cirunner.Agent.RunnerEvent
   alias KuiperCoordinator.{AgentRegistry, Runners}
-  alias KuiperCoordinator.Fleet.{FixedCapacity, Forges, Idle, OnDemand, Recovery, RunnerEvents}
+
+  alias KuiperCoordinator.Fleet.{
+    Drain,
+    FixedCapacity,
+    Forges,
+    Idle,
+    OnDemand,
+    Recovery,
+    RunnerEvents
+  }
 
   @modes [:fixed_capacity, :webhook, :polling]
   @on_demand [:webhook, :polling]
@@ -67,6 +76,8 @@ defmodule KuiperCoordinator.Fleet.Manager do
         grace_ms: Keyword.get(opts, :disconnect_grace_ms, @disconnect_grace_ms),
         # agent_id => the stamp of its latest disconnect, until it reconnects or fails over
         disconnects: %{},
+        # fixed capacity: runner_name => when DestroyRunner was sent to drain it (F16)
+        draining: %{},
         # idle teardown of one-job runners (F13-F15); nil when off or in fixed capacity
         idle:
           if(mode in @on_demand,
@@ -150,6 +161,7 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
   @impl true
   def handle_info(:tick, state) do
+    state = drain(state)
     run_pass(state)
     state = check_idle(state)
     state = if scan_due?(state), do: scan(state), else: state
@@ -292,6 +304,18 @@ defmodule KuiperCoordinator.Fleet.Manager do
       Logger.error("fleet idle check failed: " <> Exception.format(:error, e, __STACKTRACE__))
       state
   end
+
+  # Fixed capacity drains switched-off agents before the reconcile (Rust reconcile order, F16).
+  # A drain that raises is logged and keeps the old state; the next tick tries again.
+  defp drain(%{mode: :fixed_capacity} = state) do
+    %{state | draining: Drain.run(state.draining, state.ctx, System.monotonic_time(:millisecond))}
+  rescue
+    e ->
+      Logger.error("fleet drain failed: " <> Exception.format(:error, e, __STACKTRACE__))
+      state
+  end
+
+  defp drain(state), do: state
 
   # A pass that raises is logged; the next tick tries again.
   defp run_pass(%{mode: mode, ctx: ctx} = state) do

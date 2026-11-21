@@ -11,6 +11,7 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
 
   setup do
     stub(ForgeMock, :runner_kind, fn _ -> "github" end)
+    stub(AgentDispatchMock, :unavailable_agents, fn -> [] end)
     :ok
   end
 
@@ -22,6 +23,43 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
     pid = start_supervised!({Manager, opts})
     Ecto.Adapters.SQL.Sandbox.allow(KuiperCoordinator.Repo, self(), pid)
     pid
+  end
+
+  test "fixed capacity drains switched-off agents before it reconciles (F16)" do
+    test = self()
+
+    {:ok, _} =
+      KuiperCoordinator.Runners.add_runner(%{
+        runner_name: "mac1-00000001",
+        agent_id: "a1",
+        vm_name: "mac1-00000001",
+        runner_scope: @scope,
+        forge: "github"
+      })
+
+    stub(AgentDispatchMock, :unavailable_agents, fn -> ["a1"] end)
+
+    expect(ForgeMock, :remove_idle_runner, fn :client, @scope, "mac1-00000001" ->
+      {:ok, :removed}
+    end)
+
+    expect(AgentDispatchMock, :dispatch_destroy, fn "a1", "mac1-00000001" ->
+      send(test, :destroyed)
+      :ok
+    end)
+
+    expect(AgentDispatchMock, :pool_definitions, fn ->
+      send(test, :reconciled)
+      []
+    end)
+
+    pid = start(mode: :fixed_capacity, runner_scope: @scope)
+    send(pid, :tick)
+    # one sender, so messages arrive in order: the drain ran first
+    assert_receive first
+    assert first == :destroyed
+    assert_receive :reconciled
+    assert %{draining: %{"mac1-00000001" => _}} = :sys.get_state(pid)
   end
 
   test "fixed capacity reconciles the pools on each tick (P1)" do
