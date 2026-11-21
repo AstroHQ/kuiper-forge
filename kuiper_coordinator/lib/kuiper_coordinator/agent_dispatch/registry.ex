@@ -43,6 +43,10 @@ defmodule KuiperCoordinator.AgentDispatch.Registry do
   def pool_definitions, do: Capacity.pool_definitions(AgentRegistry.capacities())
 
   @impl true
+  def unavailable_agents,
+    do: for(%Capacity{unavailable: true, agent_id: id} <- AgentRegistry.capacities(), do: id)
+
+  @impl true
   def pool_capacity(%PoolDefinition{agent_id: nil, labels: labels}),
     do: Capacity.legacy_pool_capacity(AgentRegistry.capacities(), labels)
 
