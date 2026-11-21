@@ -1,0 +1,22 @@
+# A real kuiper-agent-lib agent for the Phoenix coordinator's integration test
+# (test/kuiper_coordinator/agent_grpc/rust_agent_test.exs). Not part of the Rust workspace.
+[package]
+name = "kuiper-agent-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+kuiper-agent-lib = { path = "../../../kuiper-agent-lib" }
+kuiper-agent-proto = { path = "../../../kuiper-agent-proto" }
+tonic = { version = "0.14", features = ["tls-aws-lc", "tls-native-roots", "tls-connect-info"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+tokio = { version = "1.41", features = ["full"] }
+tokio-stream = "0.1"
+url = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+debug = 0

@@ -28,6 +28,29 @@ http_port = System.get_env("KUIPER_HTTP_PORT") || System.get_env("PORT") || "948
 config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint,
   http: [port: String.to_integer(http_port)]
 
+# Agent gRPC (RegistrationService + AgentService over TLS, optional client cert) on its own
+# TLS listener (D21-D23): KUIPER_AGENT_PORT, default 9543, beside the Rust coordinator on 9443.
+# Point the CA at the Rust coordinator's ca.crt/ca.key so existing agent certs stay valid.
+# The server cert may come from another CA (KUIPER_SERVER_TRUST_MODE=chain, e.g. a public
+# cert with its chain); agent client certs are always verified against KUIPER_CA_CERT.
+if config_env() != :test do
+  data_dir = System.get_env("KUIPER_DATA_DIR", "/var/lib/kuiper-forge")
+
+  config :kuiper_coordinator, :agent_grpc,
+    enabled: System.get_env("KUIPER_AGENT_GRPC", "false") in ~w(true 1),
+    port: String.to_integer(System.get_env("KUIPER_AGENT_PORT", "9543")),
+    ca_cert: System.get_env("KUIPER_CA_CERT", Path.join(data_dir, "ca.crt")),
+    ca_key: System.get_env("KUIPER_CA_KEY", Path.join(data_dir, "ca.key")),
+    server_cert: System.get_env("KUIPER_SERVER_CERT", Path.join(data_dir, "server.crt")),
+    server_key: System.get_env("KUIPER_SERVER_KEY", Path.join(data_dir, "server.key")),
+    server_ca_cert: System.get_env("KUIPER_SERVER_CA_CERT"),
+    server_use_native_roots:
+      System.get_env("KUIPER_SERVER_USE_NATIVE_ROOTS", "false") in ~w(true 1),
+    server_trust_mode: System.get_env("KUIPER_SERVER_TRUST_MODE", "ca"),
+    # the name agents and browsers use; the server cert is checked against it at startup
+    server_hostname: System.get_env("KUIPER_SERVER_HOSTNAME") || System.get_env("PHX_HOST")
+end
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint,
