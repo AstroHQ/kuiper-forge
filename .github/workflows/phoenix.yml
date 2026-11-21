@@ -77,8 +77,10 @@ jobs:
       - name: Generated protos are up to date
         run: |
           mix proto.gen
+          # Intent-to-add new files, then compare against HEAD (not the index)
+          # so a committed module protoc no longer generates also counts.
           git add -N lib/kuiper_coordinator/proto
-          git diff --exit-code -- lib/kuiper_coordinator/proto || {
+          git diff --exit-code HEAD -- lib/kuiper_coordinator/proto || {
             echo "::error::Generated proto modules are stale. Run 'mix proto.gen' in kuiper_coordinator/ and commit the result."
             exit 1
           }
