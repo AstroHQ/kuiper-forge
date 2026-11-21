@@ -364,6 +364,56 @@ defmodule KuiperCoordinator.Agents do
     end
   end
 
+  @doc """
+  An agent's log lines at `min_level` (1 = error .. 5 = trace) or more severe, newest first,
+  older than the `before` cursor (`"<ts>_<seq>"`, as `log_cursor/1` gives; a bad one is ignored),
+  at most `limit` (agent_logs.rs recent).
+  """
+  def recent_logs(agent_id, min_level, before, limit) do
+    {ts, seq} = parse_log_cursor(before) || {nil, nil}
+
+    from(l in LogLine,
+      where: l.agent_id == ^agent_id and l.level <= ^min_level,
+      order_by: [desc: l.ts, desc: l.seq],
+      limit: ^limit
+    )
+    |> then(fn q ->
+      if ts, do: where(q, [l], l.ts < ^ts or (l.ts == ^ts and l.seq < ^seq)), else: q
+    end)
+    |> Repo.all()
+  end
+
+  def log_cursor(%LogLine{ts: ts, seq: seq}), do: "#{ts}_#{seq}"
+
+  def parse_log_cursor(cursor) when is_binary(cursor) do
+    with [ts, seq] <- String.split(cursor, "_", parts: 2),
+         {ts, ""} <- Integer.parse(ts),
+         {seq, ""} <- Integer.parse(seq) do
+      {ts, seq}
+    else
+      _ -> nil
+    end
+  end
+
+  def parse_log_cursor(_), do: nil
+
+  @doc "Minimum level from a filter name (agent_log_routes.rs level_filter): unknown is trace."
+  def level_filter(name) do
+    case String.downcase(name || "") do
+      "error" -> 1
+      "warn" -> 2
+      "info" -> 3
+      "debug" -> 4
+      _ -> 5
+    end
+  end
+
+  def level_name(1), do: "error"
+  def level_name(2), do: "warn"
+  def level_name(3), do: "info"
+  def level_name(4), do: "debug"
+  def level_name(_), do: "trace"
+
   def log_lines(agent_id) do
     Repo.all(
       from(l in LogLine, where: l.agent_id == ^agent_id, order_by: [asc: l.ts, asc: l.seq])
