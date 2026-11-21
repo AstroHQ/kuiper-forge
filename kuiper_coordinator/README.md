@@ -20,6 +20,23 @@ mix phx.server     # http://localhost:9480 (KUIPER_HTTP_PORT or PORT to change)
 mix test
 ```
 
+## Ports
+
+Two listeners, so it runs beside the Rust coordinator (9443):
+
+- HTTP (admin UI, webhooks): `KUIPER_HTTP_PORT`, else `PORT`, else 9480.
+- Agent gRPC (registration, AgentStream, UploadLogs), with `KUIPER_AGENT_GRPC=true`:
+  its own TLS port, `KUIPER_AGENT_PORT`, else 9543. Agent RPCs need a client cert
+  signed by the coordinator CA (`KUIPER_CA_CERT`/`KUIPER_CA_KEY`, the Rust
+  coordinator's `ca.crt`/`ca.key`); registration works without one. A gateway in
+  front passes this port's TLS through.
+
+`KUIPER_SERVER_CERT`/`KUIPER_SERVER_KEY` may be a cert from another CA (put its
+intermediates after it in the same file) with `KUIPER_SERVER_TRUST_MODE=chain`
+and `KUIPER_SERVER_CA_CERT` (the CA agents should trust) or
+`KUIPER_SERVER_USE_NATIVE_ROOTS=true`. Agent client certs are still verified
+against the coordinator CA.
+
 Before committing, run `mix precommit` (compile with warnings as errors,
 format, test).
 

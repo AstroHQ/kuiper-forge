@@ -1,0 +1,228 @@
+defmodule KuiperCoordinator.AgentRegistry do
+  @moduledoc """
+  Live agent connections (Rust `agent_registry.rs`, connection half).
+
+  Each entry is keyed by agent_id but owned by the AgentStream process that registered it (D5):
+  a reconnect replaces the entry and the old stream is told to close, and only the owning process
+  can remove it, by unregistering or exiting. So an old stream cleaning up never evicts a fresh
+  reconnect (parity S10). Agents silent for `stale_after_ms` are dropped by a sweep (S5).
+
+  Events go out on `KuiperCoordinator.PubSub` topic `"agents"`:
+  `{:agent_connected, agent_id, info}`, `{:agent_disconnected, agent_id, reason}`,
+  `{:agent_status, agent_id, status}` and `{:agent_event, agent_id, payload}` for command
+  results and runner events.
+  """
+  use GenServer
+  require Logger
+
+  @topic "agents"
+
+  def topic, do: @topic
+
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @doc "Registers the calling stream process as `agent_id`'s connection."
+  def register(agent_id, info),
+    do: GenServer.call(__MODULE__, {:register, agent_id, self(), info})
+
+  @doc "Removes `agent_id` only if the calling process owns the entry."
+  def unregister(agent_id), do: GenServer.call(__MODULE__, {:unregister, agent_id, self()})
+
+  @doc "Refreshes last_seen (Pong or Status) for the calling stream."
+  def touch(agent_id, status \\ nil),
+    do: GenServer.cast(__MODULE__, {:touch, agent_id, self(), status})
+
+  @doc "Asks `agent_id`'s live stream to close, e.g. after a revoke."
+  def disconnect(agent_id, reason),
+    do: GenServer.call(__MODULE__, {:disconnect, agent_id, reason})
+
+  def lookup(agent_id) do
+    case :ets.lookup(__MODULE__, agent_id) do
+      [{^agent_id, entry}] -> entry
+      [] -> nil
+    end
+  end
+
+  def connected?(agent_id), do: lookup(agent_id) != nil
+
+  def list, do: :ets.tab2list(__MODULE__) |> Enum.map(fn {_id, entry} -> entry end)
+
+  @doc """
+  Sends a CoordinatorMessage payload to the agent's stream and waits for the CommandAck whose
+  command_id matches. The timeout starts now, not after queueing (parity S11).
+  """
+  def send_command(agent_id, command_id, payload, timeout \\ 30_000) do
+    case lookup(agent_id) do
+      nil ->
+        {:error, :not_connected}
+
+      %{pid: pid} ->
+        ref = Process.monitor(pid)
+        send(pid, {:send_command, self(), ref, command_id, payload})
+
+        receive do
+          {^ref, {:ack, ack}} ->
+            Process.demonitor(ref, [:flush])
+            {:ok, ack}
+
+          {:DOWN, ^ref, :process, _, _} ->
+            {:error, :disconnected}
+        after
+          timeout ->
+            Process.demonitor(ref, [:flush])
+            send(pid, {:forget_command, command_id})
+            {:error, :timeout}
+        end
+    end
+  end
+
+  @doc "Fire-and-forget payload (Ping, DestroyRunner)."
+  def push(agent_id, payload) do
+    case lookup(agent_id) do
+      nil ->
+        {:error, :not_connected}
+
+      %{pid: pid} ->
+        send(pid, {:push, payload})
+        :ok
+    end
+  end
+
+  def broadcast(msg), do: Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, @topic, msg)
+
+  ## Server
+
+  @impl true
+  def init(opts) do
+    :ets.new(__MODULE__, [:named_table, :set, :protected, read_concurrency: true])
+    state = %{monitors: %{}, opts: opts}
+    schedule_sweep(state)
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_call({:register, agent_id, pid, info}, _from, state) do
+    state =
+      case lookup(agent_id) do
+        %{pid: ^pid} ->
+          state
+
+        %{pid: old} ->
+          send(old, {:disconnect, :superseded})
+          demonitor(state, old)
+
+        nil ->
+          state
+      end
+
+    ref = Process.monitor(pid)
+    now = System.monotonic_time(:millisecond)
+
+    entry =
+      Map.merge(info, %{
+        agent_id: agent_id,
+        pid: pid,
+        connected_at: DateTime.utc_now(),
+        last_seen: now
+      })
+
+    :ets.insert(__MODULE__, {agent_id, entry})
+    broadcast({:agent_connected, agent_id, info})
+    {:reply, :ok, put_in(state.monitors[pid], {ref, agent_id})}
+  end
+
+  def handle_call({:unregister, agent_id, pid}, _from, state) do
+    {:reply, :ok, drop_if_owner(state, agent_id, pid, :closed)}
+  end
+
+  def handle_call({:disconnect, agent_id, reason}, _from, state) do
+    case lookup(agent_id) do
+      %{pid: pid} ->
+        send(pid, {:disconnect, reason})
+        {:reply, :ok, drop_if_owner(state, agent_id, pid, reason)}
+
+      nil ->
+        {:reply, {:error, :not_connected}, state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:touch, agent_id, pid, status}, state) do
+    case lookup(agent_id) do
+      %{pid: ^pid} = entry ->
+        entry = %{entry | last_seen: System.monotonic_time(:millisecond)}
+        entry = if status, do: Map.put(entry, :status, status), else: entry
+        :ets.insert(__MODULE__, {agent_id, entry})
+        if status, do: broadcast({:agent_status, agent_id, status})
+
+      _ ->
+        :ok
+    end
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    case Map.pop(state.monitors, pid) do
+      {{_ref, agent_id}, monitors} ->
+        {:noreply, drop_if_owner(%{state | monitors: monitors}, agent_id, pid, :disconnected)}
+
+      {nil, _} ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(:sweep, state) do
+    state = sweep(state, System.monotonic_time(:millisecond))
+    schedule_sweep(state)
+    {:noreply, state}
+  end
+
+  # A sweep as of `now` (monotonic ms); tests send it to sweep at a set time without sleeping.
+  def handle_info({:sweep, now}, state), do: {:noreply, sweep(state, now)}
+
+  defp sweep(state, now) do
+    stale_after = setting(:stale_after_ms, 120_000)
+
+    Enum.reduce(list(), state, fn entry, acc ->
+      if now - entry.last_seen > stale_after do
+        Logger.warning("agent #{entry.agent_id} silent for #{stale_after} ms, dropping it")
+        send(entry.pid, {:disconnect, :stale})
+        drop_if_owner(acc, entry.agent_id, entry.pid, :stale)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp drop_if_owner(state, agent_id, pid, reason) do
+    case lookup(agent_id) do
+      %{pid: ^pid} ->
+        :ets.delete(__MODULE__, agent_id)
+        broadcast({:agent_disconnected, agent_id, reason})
+        demonitor(state, pid)
+
+      _ ->
+        state
+    end
+  end
+
+  defp demonitor(state, pid) do
+    case Map.pop(state.monitors, pid) do
+      {{ref, _}, monitors} ->
+        Process.demonitor(ref, [:flush])
+        %{state | monitors: monitors}
+
+      {nil, _} ->
+        state
+    end
+  end
+
+  defp schedule_sweep(_state),
+    do: Process.send_after(self(), :sweep, setting(:sweep_interval_ms, 60_000))
+
+  defp setting(key, default) do
+    :kuiper_coordinator |> Application.get_env(:agent_grpc, []) |> Keyword.get(key, default)
+  end
+end
