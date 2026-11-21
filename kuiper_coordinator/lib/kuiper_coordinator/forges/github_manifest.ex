@@ -49,12 +49,14 @@ defmodule KuiperCoordinator.Forges.GitHubManifest do
   @doc """
   The manifest for a new App. `base_url` is the coordinator's public URL (webhooks and the
   redirect come back to it). Options: `:name`, `:public` (default false), `:webhook`
-  (default true; off for pool-only setups).
+  (default true; off for pool-only setups), `:webhook_path` (default "/webhook"; pass the
+  stored `Settings.webhook_path` so the App delivers where the webhook plug listens).
   """
   @spec manifest(String.t(), keyword()) :: map()
   def manifest(base_url, opts \\ []) do
     base = String.trim_trailing(base_url, "/")
     webhook? = Keyword.get(opts, :webhook, true)
+    path = Keyword.get(opts, :webhook_path) || "/webhook"
 
     %{
       "name" => Keyword.get(opts, :name, "Kuiper Forge"),
@@ -64,7 +66,7 @@ defmodule KuiperCoordinator.Forges.GitHubManifest do
       "setup_url" => base <> "/admin/forges",
       "setup_on_update" => true,
       "public" => Keyword.get(opts, :public, false),
-      "hook_attributes" => %{"url" => base <> "/webhook", "active" => webhook?},
+      "hook_attributes" => %{"url" => base <> path, "active" => webhook?},
       "default_permissions" => @permissions,
       "default_events" => if(webhook?, do: @events, else: [])
     }

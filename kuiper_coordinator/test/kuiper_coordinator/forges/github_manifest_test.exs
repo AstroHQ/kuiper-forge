@@ -32,6 +32,11 @@ defmodule KuiperCoordinator.Forges.GitHubManifestTest do
       assert {:ok, _} = m |> Jason.encode!() |> Jason.decode()
     end
 
+    test "the hook URL uses the given webhook path" do
+      m = GitHubManifest.manifest("https://ci.example.com/", webhook_path: "/hooks/github")
+      assert m["hook_attributes"]["url"] == "https://ci.example.com/hooks/github"
+    end
+
     test "webhook off leaves no events and an inactive hook" do
       m = GitHubManifest.manifest("https://ci.example.com", webhook: false, name: "Kuiper CI")
       assert m["name"] == "Kuiper CI"

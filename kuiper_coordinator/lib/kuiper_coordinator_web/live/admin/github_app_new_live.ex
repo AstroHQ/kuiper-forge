@@ -34,7 +34,13 @@ defmodule KuiperCoordinatorWeb.Admin.GitHubAppNewLive do
             "admin" => socket.assigns.current_admin.id
           })
 
-        manifest = GitHubManifest.manifest(base, name: name, webhook: webhook?)
+        manifest =
+          GitHubManifest.manifest(base,
+            name: name,
+            webhook: webhook?,
+            webhook_path: KuiperCoordinator.Forges.get_settings().webhook_path
+          )
+
         opts = Keyword.take(GitHubManifest.config(), [:github_url]) ++ [org: org]
 
         {:noreply,
