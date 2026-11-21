@@ -20,6 +20,9 @@ defmodule KuiperCoordinator.Admin do
   def enabled?, do: Keyword.get(settings(), :enabled, false)
   def session_timeout, do: Keyword.get(settings(), :session_timeout_secs, 3600)
 
+  @doc "Agent-facing URL put in registration bundles (Rust [admin] coordinator_url)."
+  def coordinator_url, do: Keyword.get(settings(), :coordinator_url, "https://localhost:9543")
+
   ## Users
 
   def list_users, do: Repo.all(from(u in User, order_by: u.username))
