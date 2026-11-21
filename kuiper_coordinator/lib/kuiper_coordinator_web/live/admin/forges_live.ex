@@ -31,6 +31,19 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
     :exit, _ -> :off
   end
 
+  # GitHub's setup_url lands here after the App is installed (D40)
+  @impl true
+  def handle_params(%{"setup_action" => "install"}, _uri, socket) do
+    {:noreply,
+     put_flash(
+       socket,
+       :info,
+       "GitHub App installed. Press Check on its forge to confirm it and start provisioning."
+     )}
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
+
   @impl true
   def handle_info({:forges_changed}, socket), do: {:noreply, load(socket)}
 
@@ -41,6 +54,36 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
            %{} = forge <- Enum.find(socket.assigns.forges, &(&1.id == id)),
            {:ok, _} <- Forges.delete_forge(forge) do
         put_flash(socket, :info, "Removed #{forge.name}")
+      else
+        _ -> put_flash(socket, :error, "No such forge")
+      end
+
+    {:noreply, load(socket)}
+  end
+
+  # the live check a manifest App skipped at creation (it had no installation yet); saving
+  # broadcasts, so the fleet reloads with it
+  def handle_event("check", %{"id" => id}, socket) do
+    opts = [
+      validate: true,
+      req_options: Application.get_env(:kuiper_coordinator, :forge_req_options, [])
+    ]
+
+    socket =
+      with {id, ""} <- Integer.parse(to_string(id)),
+           %{} = forge <- Enum.find(socket.assigns.forges, &(&1.id == id)) do
+        case Forges.update_forge(forge, %{}, opts) do
+          {:ok, f} ->
+            put_flash(socket, :info, "#{f.name} answers; the fleet reloads with it")
+
+          {:error, cs} ->
+            msgs = for {:base, {m, _}} <- cs.errors, do: m
+
+            msg =
+              if msgs == [], do: "its stored fields don't validate", else: Enum.join(msgs, "; ")
+
+            put_flash(socket, :error, "#{forge.name}: #{msg}")
+        end
       else
         _ -> put_flash(socket, :error, "No such forge")
       end
@@ -120,6 +163,14 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
             </td>
             <td>{if has_secret?(f.webhook_secret), do: "set", else: "none"}</td>
             <td class="flex gap-1 justify-end">
+              <button
+                id={"check-forge-#{f.id}"}
+                class="btn btn-xs"
+                phx-click="check"
+                phx-value-id={f.id}
+              >
+                Check
+              </button>
               <.link navigate={~p"/admin/forges/#{f.id}/edit"} class="btn btn-xs">Edit</.link>
               <button
                 id={"delete-forge-#{f.id}"}
