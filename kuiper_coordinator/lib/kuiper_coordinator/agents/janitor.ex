@@ -1,5 +1,5 @@
 defmodule KuiperCoordinator.Agents.Janitor do
-  @moduledoc "Hourly purge of expired tokens, long-revoked agents (A13, Rust main.rs:672-690) old or over-cap agent logs (agent_logs.rs prune) and expired admin sessions."
+  @moduledoc "Hourly purge of expired tokens, long-revoked agents (A13, Rust main.rs:672-690) old or over-cap agent logs (agent_logs.rs prune), expired admin sessions and run history past its retention (MX7)."
   use GenServer
   require Logger
 
@@ -27,6 +27,9 @@ defmodule KuiperCoordinator.Agents.Janitor do
 
       s = KuiperCoordinator.Admin.purge_sessions()
       if s > 0, do: Logger.info("purged #{s} expired admin session(s)")
+
+      r = KuiperCoordinator.RunHistory.prune_expired()
+      if r > 0, do: Logger.info("pruned #{r} run history row(s)")
     rescue
       e -> Logger.warning("agent purge failed: #{Exception.message(e)}")
     end

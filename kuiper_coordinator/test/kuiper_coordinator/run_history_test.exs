@@ -185,4 +185,21 @@ defmodule KuiperCoordinator.RunHistoryTest do
     assert :ok = RunHistory.job_ended("github:none", :gone)
     assert :ok = RunHistory.runner_requested(%{runner_name: "bad"})
   end
+
+  test "prune_expired uses the configured retention (MX7)" do
+    old = System.system_time(:millisecond) - 91 * 86_400_000
+
+    RunHistory.insert_run!(%{
+      runner_name: "old",
+      agent_id: "a",
+      hostname: "h",
+      agent_type: "tart",
+      requested_at: old
+    })
+
+    :ok = RunHistory.runner_requested(new_runner("fresh"))
+    assert RunHistory.retention_days() == 90
+    assert RunHistory.prune_expired() == 1
+    assert [%{runner_name: "fresh"}] = RunHistory.runs_since(0)
+  end
 end

@@ -48,6 +48,26 @@ defmodule KuiperCoordinator.RunHistory do
 
   ## runners
 
+  @doc """
+  A CreateRunner is about to be sent to `agent_id`. The agent's hostname and type are copied in
+  (the agent row goes away once it's revoked).
+  """
+  def runner_requested_on(agent_id, run) do
+    {hostname, type} =
+      case safe_agent(agent_id) do
+        %{hostname: h, agent_type: t} -> {h, t}
+        nil -> {agent_id, "unknown"}
+      end
+
+    runner_requested(Map.merge(run, %{agent_id: agent_id, hostname: hostname, agent_type: type}))
+  end
+
+  defp safe_agent(agent_id) do
+    KuiperCoordinator.Agents.get_agent(agent_id)
+  rescue
+    _ -> nil
+  end
+
   @doc "A CreateRunner is about to be sent."
   def runner_requested(%{runner_name: name} = run) do
     safely("runner request", name, fn ->
@@ -239,6 +259,13 @@ defmodule KuiperCoordinator.RunHistory do
     {jobs, _} = Repo.delete_all(from(j in JobRun, where: j.seen_at < ^cutoff))
     runs + jobs
   end
+
+  @doc "Retention in days (`config :kuiper_coordinator, :metrics, retention_days:`, default 90)."
+  def retention_days,
+    do: Application.get_env(:kuiper_coordinator, :metrics, []) |> Keyword.get(:retention_days, 90)
+
+  @doc "Prunes rows past `retention_days/0` (the hourly janitor, Rust main.rs:523-539)."
+  def prune_expired, do: prune(retention_days() * 86_400_000)
 
   @doc "Inserts whole rows as given, for seeding example history."
   def insert_run!(attrs), do: Repo.insert!(struct!(RunnerRun, attrs))

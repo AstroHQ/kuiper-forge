@@ -63,6 +63,85 @@ defmodule KuiperCoordinator.Fleet.RunnerEventsTest do
     expect(ForgeMock, :remove_runner, fn :client, @scope, ^name -> :ok end)
   end
 
+  describe "run history (MX1-MX3)" do
+    alias KuiperCoordinator.RunHistory
+
+    defp requested(name, job_key) do
+      RunHistory.runner_requested_on("a1", %{runner_name: name, job_key: job_key, labels: ["x"]})
+    end
+
+    test "Started, timings and Completed fill the runner's row; the job is recorded as ran" do
+      key = job(31)
+      runner("r31", "a1", key)
+      requested("r31", key)
+      expect_cleanup("a1", "r31")
+      expect(ForgeMock, :job_status, fn :client, "astro/app", "31" -> {:ok, "completed"} end)
+
+      started = %{
+        event("r31", :STARTED)
+        | timings: %Cirunner.Agent.RunnerTimings{steps_ms: %{"boot" => 900}, image: "macos-15"}
+      }
+
+      assert :ok = RunnerEvents.handle(@ctx, "a1", started)
+
+      done = %{
+        event("r31", :COMPLETED)
+        | timings: %Cirunner.Agent.RunnerTimings{steps_ms: %{"job" => 5_000}}
+      }
+
+      assert :pass = RunnerEvents.handle(@ctx, "a1", done)
+
+      [run] = RunHistory.runs_since(0)
+      assert run.hostname == "a1" and run.agent_type == "unknown"
+      assert run.started_at && run.finished_at
+      assert run.outcome == "completed"
+      assert run.image == "macos-15"
+      assert run.steps == %{"boot" => 900, "job" => 5_000}
+      assert [%{job_key: ^key, outcome: "ran"}] = RunHistory.jobs_since(0)
+    end
+
+    test "a tracked runner destroyed mid-job is lost; a plain pool teardown is destroyed" do
+      key = job(32)
+      runner("r32", "a1", key)
+      runner("p1", "a1", nil)
+      requested("r32", key)
+      requested("p1", nil)
+      expect_cleanup("a1", "r32")
+      expect_cleanup("a1", "p1")
+      stub(AgentDispatchMock, :hostname, fn _ -> "mac-1" end)
+
+      RunnerEvents.handle(@ctx, "a1", event("r32", :DESTROYED))
+      RunnerEvents.handle(@ctx, "a1", event("p1", :DESTROYED))
+
+      outcomes = Map.new(RunHistory.runs_since(0), &{&1.runner_name, &1.outcome})
+      assert outcomes == %{"r32" => "lost", "p1" => "destroyed"}
+    end
+
+    test "an idled runner is recorded as idled and its job stays pending" do
+      key = job(33)
+      runner("r33", "a1", key)
+      requested("r33", key)
+      expect_cleanup("a1", "r33")
+
+      assert :pass = RunnerEvents.idled(@ctx, "a1", "r33")
+      assert [%{outcome: "idled"}] = RunHistory.runs_since(0)
+      assert [%{outcome: nil}] = RunHistory.jobs_since(0)
+    end
+
+    test "an abandoned job is recorded as abandoned" do
+      key = job(34)
+      runner("r34", "a1", key)
+      expect_cleanup("a1", "r34")
+      stub(AgentDispatchMock, :hostname, fn _ -> "mac-1" end)
+
+      for _ <- 1..(Jobs.max_retries() - 1), do: Jobs.record_retry(key, "a0")
+      RunnerEvents.handle(@ctx, "a1", event("r34", :FAILED, "boom"))
+
+      assert Jobs.get_pending(key) == nil
+      assert [%{outcome: "abandoned", attempts: 0}] = RunHistory.jobs_since(0)
+    end
+  end
+
   describe "a terminal event for a tracked runner (F5, F7)" do
     test "Completed and the job is done on the forge: the job leaves the queue" do
       key = job(1)
