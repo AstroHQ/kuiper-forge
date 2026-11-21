@@ -49,3 +49,6 @@ config :kuiper_coordinator, KuiperCoordinator.Vault,
   key: Base.decode64!("3Jnb0hZiX0QaVE8EmUhx4q0mqYbnbYp9G6u4C2AbmP0=")
 
 config :kuiper_coordinator, validate_forges_on_save: false, fleet_loader: false
+
+# Cheap Argon2 in tests (production uses the library defaults, Argon2id)
+config :argon2_elixir, t_cost: 1, m_cost: 8

@@ -1,0 +1,34 @@
+<main class="min-h-screen flex items-center justify-center px-4">
+  <div class="card w-full max-w-sm bg-base-100 shadow-xl">
+    <div class="card-body">
+      <h1 class="card-title text-2xl">Kuiper Forge</h1>
+      <p class="text-sm opacity-70">Sign in to the coordinator admin</p>
+
+      <div :if={@error} role="alert" class="alert alert-error text-sm" id="login-error">
+        {@error}
+      </div>
+
+      <.form for={%{}} as={:login} action={~p"/admin/login"} id="login-form" class="space-y-2">
+        <.input
+          type="text"
+          name="username"
+          id="username"
+          label="Username"
+          value={@username}
+          autocomplete="username"
+          required
+        />
+        <.input
+          type="password"
+          name="password"
+          id="password"
+          label="Password"
+          value=""
+          autocomplete="current-password"
+          required
+        />
+        <.button class="btn btn-primary w-full" phx-disable-with="Signing in...">Sign in</.button>
+      </.form>
+    </div>
+  </div>
+</main>

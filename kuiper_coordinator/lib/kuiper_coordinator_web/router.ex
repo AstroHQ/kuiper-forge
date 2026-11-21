@@ -1,6 +1,9 @@
 defmodule KuiperCoordinatorWeb.Router do
   use KuiperCoordinatorWeb, :router
 
+  import KuiperCoordinatorWeb.AdminAuth,
+    only: [require_admin_enabled: 2, fetch_admin: 2, require_admin: 2]
+
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
@@ -8,6 +11,11 @@ defmodule KuiperCoordinatorWeb.Router do
     plug :put_root_layout, html: {KuiperCoordinatorWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+  end
+
+  pipeline :admin do
+    plug :require_admin_enabled
+    plug :fetch_admin
   end
 
   pipeline :api do
@@ -18,6 +26,25 @@ defmodule KuiperCoordinatorWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+  end
+
+  # Admin UI (parity section 6): only when admin is enabled.
+  scope "/admin", KuiperCoordinatorWeb do
+    pipe_through [:browser, :admin]
+
+    get "/login", AdminSessionController, :new
+    post "/login", AdminSessionController, :create
+    delete "/logout", AdminSessionController, :delete
+  end
+
+  scope "/admin", KuiperCoordinatorWeb do
+    pipe_through [:browser, :admin, :require_admin]
+
+    get "/", AdminSessionController, :index
+
+    live_session :admin, on_mount: {KuiperCoordinatorWeb.AdminAuth, :require_admin} do
+      live "/dashboard", Admin.DashboardLive
+    end
   end
 
   # Other scopes may use custom stacks.
