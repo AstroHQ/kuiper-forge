@@ -67,10 +67,42 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
     assert_receive :processed
     send(pid, :tick)
     assert_receive :processed
-    # unrelated fleet events don't trigger a pass
-    Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", {:job_completed, "github:1"})
+    # a started job is metrics only in Rust: no pass
+    Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", {:job_started, "github:1", nil})
     :sys.get_state(pid)
     refute_received :processed
+  end
+
+  test "a completed job leaves the pending queue and the freed capacity gets a pass (Rust JobCompleted)" do
+    for key <- ["github:1", "github:2"],
+        do: {:ok, _} = Jobs.add_pending(%{job_key: key, forge: "github", runner_scope: @scope})
+
+    test = self()
+    stub(ForgeMock, :list_queued_jobs, fn :client -> {:ok, []} end)
+
+    stub(AgentDispatchMock, :select_agent, fn _, _ ->
+      send(test, :processed)
+      nil
+    end)
+
+    pid = start(mode: :webhook, scan_ms: 60_000)
+    assert_receive :processed
+    :sys.get_state(pid)
+    flush_processed()
+
+    Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", {:job_completed, "github:1"})
+    assert_receive :processed
+    :sys.get_state(pid)
+    assert Jobs.get_pending("github:1") == nil
+    assert Jobs.get_pending("github:2")
+  end
+
+  defp flush_processed do
+    receive do
+      :processed -> flush_processed()
+    after
+      0 -> :ok
+    end
   end
 
   test "a crashing pass doesn't take the manager down" do
