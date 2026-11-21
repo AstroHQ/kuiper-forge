@@ -2,8 +2,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLive do
   @moduledoc """
   Agent detail (parity UI4): registration, live limits, label split, this agent's runners,
   revoke, and the availability switch (#40: DB first, then scheduling via PubSub; running
-  runners finish), and its last 25 failures (#33). Unknown agents are a 404. The 7-day
-  performance card comes with run history (#67).
+  runners finish), its last 25 failures (#33) and its last 7 days of runs (#67, the
+  metrics page's numbers). Unknown agents are a 404.
   """
   use KuiperCoordinatorWeb, :live_view
 
@@ -37,7 +37,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLive do
       page_title: agent.hostname,
       agent: Dashboard.agent_summary(agent, connected, runners),
       runners: runners,
-      failures: failures
+      failures: failures,
+      performance: KuiperCoordinatorWeb.Admin.MetricsLive.agent_performance(agent.agent_id)
     )
   end
 
@@ -157,6 +158,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLive do
           </dl>
         </div>
       </section>
+
+      <KuiperCoordinatorWeb.Admin.MetricsLive.performance_card :if={@performance} g={@performance} />
 
       <section class="card bg-base-200">
         <div class="card-body">
