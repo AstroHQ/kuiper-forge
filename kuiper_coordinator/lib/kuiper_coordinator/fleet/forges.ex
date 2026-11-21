@@ -139,8 +139,13 @@ defmodule KuiperCoordinator.Fleet.Forges do
   defp app_id(id), do: {:error, "a GitHub forge needs a numeric app_id (got #{inspect(id)})"}
 
   defp private_key(spec) do
+    # an inline key wins over a key file, as in Rust (config.rs private_key_content): the
+    # container case sets KUIPER_GITHUB__PRIVATE_KEY while the TOML still names a path
     pem =
       cond do
+        pem = spec[:private_key] ->
+          pem
+
         env = spec[:private_key_env] ->
           System.get_env(env)
 
@@ -148,7 +153,7 @@ defmodule KuiperCoordinator.Fleet.Forges do
           path |> File.read() |> then(&if(elem(&1, 0) == :ok, do: elem(&1, 1)))
 
         true ->
-          spec[:private_key]
+          nil
       end
 
     if is_binary(pem) and String.trim(pem) != "",

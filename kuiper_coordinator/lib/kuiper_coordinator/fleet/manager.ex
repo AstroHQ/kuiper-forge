@@ -17,7 +17,8 @@ defmodule KuiperCoordinator.Fleet.Manager do
   default `config :kuiper_coordinator, :webhook`), `:idle_runner_timeout_s` (on-demand modes:
   Forgejo one-job runners idle past it are torn down, `Fleet.Idle`; default 600, 0 off, at
   least 120), `:name`.
-  Started by the application only when `config :kuiper_coordinator, :fleet` is set.
+  Started (and restarted on every forge or settings change) by `Fleet.Loader`, from the forges
+  stored in Postgres (D39).
   """
   use GenServer
   require Logger

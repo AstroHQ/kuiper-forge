@@ -12,6 +12,12 @@ defmodule KuiperCoordinator.Forge.RunnerScopeTest do
     assert {:error, _} = RunnerScope.parse("")
   end
 
+  test "rejects the scopes Rust rejects (config.rs runner_scopes)" do
+    for bad <- ["@", "@me/repo", "*/repo", "/repo", "repo/", "@/x"] do
+      assert {:error, _} = RunnerScope.parse(bad), "#{inspect(bad)} should be an error"
+    end
+  end
+
   test "GitHub API paths for org and repo scopes" do
     org = {:org, "my-org"}
     repo = {:repo, "owner", "repo"}
