@@ -3,7 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "kuiper_coordinator/**"
+      - ".github/workflows/phoenix.yml"
   pull_request:
+    paths-ignore:
+      - "kuiper_coordinator/**"
+      - ".github/workflows/phoenix.yml"
 
 env:
   RUSTFLAGS: "-Dwarnings"

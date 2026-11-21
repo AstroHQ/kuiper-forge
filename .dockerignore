@@ -8,3 +8,4 @@ target/
 docs/
 examples/
 LICENSE
+kuiper_coordinator/
