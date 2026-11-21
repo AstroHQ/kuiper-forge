@@ -67,7 +67,11 @@ defmodule KuiperCoordinatorWeb.AdminAuth do
   def on_mount(:require_admin, _params, session, socket) do
     with true <- Admin.enabled?(),
          %Admin.User{} = admin <- Admin.session_user(session[@session_key]) do
-      {:cont, Phoenix.Component.assign(socket, :current_admin, admin)}
+      {:cont,
+       Phoenix.Component.assign(socket,
+         current_admin: admin,
+         admin_session_id: session[@session_key]
+       )}
     else
       _ -> {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/admin/login")}
     end

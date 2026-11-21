@@ -44,6 +44,7 @@ defmodule KuiperCoordinatorWeb.Router do
 
     live_session :admin, on_mount: {KuiperCoordinatorWeb.AdminAuth, :require_admin} do
       live "/dashboard", Admin.DashboardLive
+      live "/users", Admin.UsersLive
     end
   end
 
