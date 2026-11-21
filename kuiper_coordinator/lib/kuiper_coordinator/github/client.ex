@@ -7,14 +7,23 @@ defmodule KuiperCoordinator.GitHub.Client do
   @behaviour KuiperCoordinator.Forge
   require Logger
 
-  alias KuiperCoordinator.Forge.RunnerScope
+  alias KuiperCoordinator.Forge.{QueuedJob, RunnerScope}
   alias KuiperCoordinator.GitHub.{Client.Cache, JWT, Pages}
 
   @api "https://api.github.com"
   @token_margin_secs 5 * 60
   @default_runner_group 1
+  @default_scan_lookback_hours 168
+  @scan_concurrency 20
 
-  defstruct [:app_id, :private_key, :cache, :req, now: &DateTime.utc_now/0]
+  defstruct [
+    :app_id,
+    :private_key,
+    :cache,
+    :req,
+    scan_lookback_hours: @default_scan_lookback_hours,
+    now: &DateTime.utc_now/0
+  ]
 
   @type t :: %__MODULE__{}
   @type scope :: RunnerScope.t()
@@ -22,7 +31,8 @@ defmodule KuiperCoordinator.GitHub.Client do
   @doc """
   Options: `:app_id`, `:private_key` (PEM; escaped `\\n` allowed), `:cache` (a
   `#{inspect(Cache)}` pid or name), `:req_options` (extra `Req` options, e.g. a test plug),
-  `:now` (a clock function, for tests).
+  `:now` (a clock function, for tests), `:scan_lookback_hours` (recovery scan only looks at
+  repos pushed this recently; default #{@default_scan_lookback_hours}, `0` scans every repo).
   """
   def new(opts) do
     req =
@@ -41,6 +51,7 @@ defmodule KuiperCoordinator.GitHub.Client do
       private_key: Keyword.fetch!(opts, :private_key),
       cache: Keyword.fetch!(opts, :cache),
       req: req,
+      scan_lookback_hours: Keyword.get(opts, :scan_lookback_hours, @default_scan_lookback_hours),
       now: Keyword.get(opts, :now, &DateTime.utc_now/0)
     }
   end
@@ -218,6 +229,162 @@ defmodule KuiperCoordinator.GitHub.Client do
         {:error, :invalid_repo}
     end
   end
+
+  @doc """
+  Recovery scan (G9, github.rs list_queued_jobs): every `queued` or `waiting` job in the
+  queued, in_progress and waiting runs of each installation's repos, org-scoped like the
+  webhook. Repos not pushed within `scan_lookback_hours` are skipped (non-push triggers on
+  them are missed; `0` disables the filter). A failed installation token, repo page, run or
+  job listing is logged and skipped, so the rest of the scan still counts.
+  """
+  @impl KuiperCoordinator.Forge
+  @spec list_queued_jobs(t()) :: {:ok, [QueuedJob.t()]} | {:error, term()}
+  def list_queued_jobs(c) do
+    Logger.info("Scanning GitHub for queued workflow jobs...")
+
+    with :ok <- discover_installations(c) do
+      jobs =
+        c.cache
+        |> Cache.installation_map()
+        |> Enum.flat_map(fn {account, id} -> scan_installation(c, account, id) end)
+
+      Logger.info("Found #{length(jobs)} queued workflow jobs across all installations")
+      {:ok, jobs}
+    end
+  end
+
+  defp scan_installation(c, account, id) do
+    case installation_token(c, id) do
+      {:ok, token} ->
+        repos = installation_repos(c, token, account, 1, [])
+        active = Enum.filter(repos, &recent_push?(c, &1))
+
+        if length(active) < length(repos) do
+          Logger.debug(
+            "Queued-job scan: #{length(repos) - length(active)} of #{length(repos)} repos " <>
+              "for #{account} skipped by lookback filter"
+          )
+        end
+
+        active
+        |> Task.async_stream(&queued_jobs_in_repo(c, token, &1),
+          max_concurrency: @scan_concurrency,
+          timeout: :infinity,
+          ordered: true
+        )
+        |> Enum.flat_map(fn {:ok, jobs} -> jobs end)
+
+      {:error, e} ->
+        # Loud: a token failure silently drops a whole installation from the scan.
+        Logger.warning(
+          "Queued-job scan: failed to get access token for #{account} - skipping installation: " <>
+            inspect(e)
+        )
+
+        []
+    end
+  end
+
+  # Like Rust, a failed repo page keeps the repos read so far.
+  defp installation_repos(c, token, account, page, acc) do
+    case request(c, token, :get, "/installation/repositories", [200],
+           params: [per_page: Pages.page_size(), page: page]
+         ) do
+      {:ok, %{"repositories" => repos}} when is_list(repos) ->
+        acc = acc ++ repos
+
+        if length(repos) < Pages.page_size() or page >= 100,
+          do: acc,
+          else: installation_repos(c, token, account, page + 1, acc)
+
+      other ->
+        Logger.warning(
+          "Queued-job scan: failed to list repos page #{page} for #{account}: #{inspect(other)}"
+        )
+
+        acc
+    end
+  end
+
+  defp recent_push?(%{scan_lookback_hours: 0}, _repo), do: true
+
+  defp recent_push?(c, repo) do
+    cutoff = DateTime.add(c.now.(), -c.scan_lookback_hours * 3600)
+
+    case parse_time(repo["pushed_at"]) do
+      nil -> true
+      pushed -> DateTime.compare(pushed, cutoff) == :gt
+    end
+  end
+
+  defp queued_jobs_in_repo(c, token, %{"full_name" => full_name, "owner" => %{"login" => owner}}) do
+    # Every page of runs and of each run's jobs: in polling mode this scan is the only job
+    # source, so a queued job past the first page would never get a runner.
+    for run_status <- ["queued", "in_progress", "waiting"],
+        run <-
+          list_or_skip(
+            c,
+            token,
+            "/repos/#{full_name}/actions/runs",
+            "workflow_runs",
+            [status: run_status],
+            "#{run_status} runs in #{full_name}"
+          ),
+        job <-
+          list_or_skip(
+            c,
+            token,
+            "/repos/#{full_name}/actions/runs/#{run["id"]}/jobs",
+            "jobs",
+            [],
+            "jobs of run #{run["id"]} in #{full_name}"
+          ),
+        job["status"] in ["queued", "waiting"] do
+      %QueuedJob{
+        id: to_string(job["id"]),
+        labels: job["labels"] || [],
+        runner_scope: {:org, owner},
+        repository: full_name,
+        created_at: parse_time(job["created_at"])
+      }
+    end
+  end
+
+  defp queued_jobs_in_repo(_c, _token, repo) do
+    Logger.warning("Queued-job scan: skipping malformed repo #{inspect(repo["full_name"])}")
+    []
+  end
+
+  defp list_or_skip(c, token, path, key, params, what) do
+    result =
+      Pages.collect(fn page ->
+        case request(c, token, :get, path, [200],
+               params: params ++ [per_page: Pages.page_size(), page: page]
+             ) do
+          {:ok, %{^key => items}} when is_list(items) -> {:ok, items}
+          {:ok, body} -> {:error, {:malformed, body}}
+          {:error, e} -> {:error, e}
+        end
+      end)
+
+    case result do
+      {:ok, items} ->
+        items
+
+      {:error, e} ->
+        Logger.warning("Queued-job scan: failed to list #{what}: #{inspect(e)}")
+        []
+    end
+  end
+
+  defp parse_time(s) when is_binary(s) do
+    case DateTime.from_iso8601(s) do
+      {:ok, t, _} -> t
+      _ -> nil
+    end
+  end
+
+  defp parse_time(_), do: nil
 
   # -- internals --
 
