@@ -110,6 +110,23 @@ defmodule KuiperCoordinatorWeb.Admin.GitHubAppTest do
     assert m["default_permissions"]["administration"] == "write"
   end
 
+  test "the manifest's webhook URL follows the stored webhook path", %{conn: conn} do
+    {:ok, _} = KuiperCoordinator.Forges.update_settings(%{webhook_path: "/hooks/github"})
+    {:ok, view, _html} = live(conn, ~p"/admin/forges/github/new")
+
+    view
+    |> form("#github-app-form",
+      app: %{name: "Kuiper CI", org: "", base_url: "https://ci.example.com", webhook: "true"}
+    )
+    |> render_submit()
+
+    doc = view |> element("#github-manifest-post") |> render() |> LazyHTML.from_fragment()
+    [manifest] = doc |> LazyHTML.query("input[name=manifest]") |> LazyHTML.attribute("value")
+
+    assert Jason.decode!(manifest)["hook_attributes"]["url"] ==
+             "https://ci.example.com/hooks/github"
+  end
+
   test "a bad base URL is refused, not posted", %{conn: conn} do
     {:ok, view, _} = live(conn, ~p"/admin/forges/github/new")
 
