@@ -10,8 +10,9 @@ defmodule KuiperCoordinator.Fleet.Manager do
   scan (`Fleet.Recovery.poll/1`) is the only source of jobs and runs at startup and every
   poll interval (`:poll_interval_s`, default 120, at least 10), with the tick never slower.
 
-  Options: `:mode`, `:forges` (`%{name => Forge.t()}`, the first is the default forge for
-  fixed capacity), `:runner_scope`, `:tick_ms` (default 30 s, Rust's tick), `:scan_ms`
+  Options: `:mode`, `:forges` (a list of forge specs, built and validated at startup by
+  `Fleet.Forges`, fatal like Rust; or ready-made `%{name => Forge.t()}`), `:default_forge` (the
+  forge for fixed capacity; default the first spec), `:validate_forges` (default true), `:runner_scope`, `:tick_ms` (default 30 s, Rust's tick), `:scan_ms`
   (default 5 min, Rust RECOVERY_SCAN_INTERVAL; the poll interval in polling mode), `:webhook` (label filters for the scan;
   default `config :kuiper_coordinator, :webhook`), `:name`.
   Started by the application only when `config :kuiper_coordinator, :fleet` is set.
@@ -19,7 +20,7 @@ defmodule KuiperCoordinator.Fleet.Manager do
   use GenServer
   require Logger
 
-  alias KuiperCoordinator.Fleet.{FixedCapacity, OnDemand, Recovery}
+  alias KuiperCoordinator.Fleet.{FixedCapacity, Forges, OnDemand, Recovery}
 
   @modes [:fixed_capacity, :webhook, :polling]
   @on_demand [:webhook, :polling]
@@ -36,8 +37,8 @@ defmodule KuiperCoordinator.Fleet.Manager do
   def init(opts) do
     mode = Keyword.get(opts, :mode, :fixed_capacity)
 
-    if mode in @modes do
-      forges = Keyword.fetch!(opts, :forges)
+    with {:mode, true} <- {:mode, mode in @modes},
+         {:ok, forges, opts} <- build_forges(Keyword.fetch!(opts, :forges), mode, opts) do
       {default_name, default_forge} = default_forge(forges, opts)
 
       scan_ms =
@@ -77,9 +78,47 @@ defmodule KuiperCoordinator.Fleet.Manager do
       schedule(state)
       {:ok, state, {:continue, :startup}}
     else
-      {:error, {:unknown_mode, mode}}
+      {:mode, false} -> {:error, {:unknown_mode, mode}}
+      {:error, msg} -> {:stop, {:forges, msg}}
     end
   end
+
+  # Ready-made `%{name => {module, client}}` (tests) pass through. A list of specs is built and
+  # validated here (fatal, as in Rust), so the clients' caches belong to this process, and the
+  # webhook learns its source forge and, for Forgejo, the scopes (`Fleet.Forges`).
+  defp build_forges(forges, _mode, opts) when is_map(forges), do: {:ok, forges, opts}
+
+  defp build_forges(specs, mode, opts) when is_list(specs) do
+    with {:ok, built} <-
+           Forges.build(specs,
+             validate: Keyword.get(opts, :validate_forges, true),
+             req_options: Keyword.get(opts, :req_options, [])
+           ),
+         :ok <- check_mode(mode, built),
+         :ok <- configure_webhook(mode, built) do
+      {name, _} = hd(built)
+      {:ok, Map.new(built), Keyword.put_new(opts, :default_forge, name)}
+    end
+  end
+
+  # C3: fixed capacity needs registration tokens, which Forgejo one-job runners don't have.
+  defp check_mode(:fixed_capacity, built) do
+    if Enum.any?(built, fn {_, {mod, _}} -> mod == KuiperCoordinator.Forgejo.Client end),
+      do: {:error, "fixed_capacity mode doesn't support Forgejo forges (one-job runners only)"},
+      else: :ok
+  end
+
+  defp check_mode(_mode, _built), do: :ok
+
+  defp configure_webhook(:webhook, built) do
+    webhook = Application.get_env(:kuiper_coordinator, :webhook, [])
+
+    with {:ok, webhook} <- Forges.webhook_config(built, webhook) do
+      Application.put_env(:kuiper_coordinator, :webhook, webhook)
+    end
+  end
+
+  defp configure_webhook(_mode, _built), do: :ok
 
   # Webhook mode: jobs left from a previous run first, then the forge scan (Rust order).
   @impl true
