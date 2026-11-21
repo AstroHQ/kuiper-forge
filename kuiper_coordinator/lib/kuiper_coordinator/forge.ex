@@ -33,9 +33,17 @@ defmodule KuiperCoordinator.Forge do
   @callback job_status(client :: term(), repo :: String.t(), job_id :: String.t()) ::
               {:ok, String.t() | nil} | {:error, term()}
 
+  @doc """
+  Every job waiting for a runner that the forge can see (recovery scan, parity G9). Failures
+  in one installation, repo or run are logged and skipped, never fail the whole scan.
+  """
+  @callback list_queued_jobs(client :: term()) ::
+              {:ok, [KuiperCoordinator.Forge.QueuedJob.t()]} | {:error, term()}
+
   def registration_token({mod, client}, scope), do: mod.registration_token(client, scope)
   def remove_runner({mod, client}, scope, name), do: mod.remove_runner(client, scope, name)
   def scope_url({mod, client}, scope), do: mod.scope_url(client, scope)
+  def list_queued_jobs({mod, client}), do: mod.list_queued_jobs(client)
 
   def create_job_runner({mod, client}, scope, name, labels, group, job_id),
     do: mod.create_job_runner(client, scope, name, labels, group, job_id)

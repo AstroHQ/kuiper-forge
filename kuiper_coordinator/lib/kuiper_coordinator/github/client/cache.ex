@@ -13,6 +13,8 @@ defmodule KuiperCoordinator.GitHub.Client.Cache do
 
   def installations(cache), do: Agent.get(cache, &Map.keys(&1.installations))
 
+  def installation_map(cache), do: Agent.get(cache, & &1.installations)
+
   def token(cache, installation_id), do: Agent.get(cache, &Map.get(&1.tokens, installation_id))
 
   def put_token(cache, installation_id, token, expires_at),
