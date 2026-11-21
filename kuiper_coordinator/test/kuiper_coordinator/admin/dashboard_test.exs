@@ -172,4 +172,37 @@ defmodule KuiperCoordinator.Admin.DashboardTest do
     assert_receive {:agent_availability, "agent_x", true}
     assert {:error, :not_found} = KuiperCoordinator.Agents.set_unavailable("nope", true)
   end
+
+  test "a restarted registry keeps agents switched off in the DB unavailable (#40)" do
+    for id <- ["agent_off", "agent_on"] do
+      Repo.insert!(%KuiperCoordinator.Agents.Agent{
+        agent_id: id,
+        hostname: "h",
+        agent_type: "tart",
+        serial_number: id,
+        expires_at: DateTime.add(DateTime.utc_now(), 86_400, :second)
+      })
+    end
+
+    assert :ok = KuiperCoordinator.Agents.set_unavailable("agent_off", true)
+    registry = KuiperCoordinator.AgentRegistry
+    old = Process.whereis(registry)
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, _, _, _}
+    new = wait_for(fn -> Process.whereis(registry) end)
+    assert new != old
+    assert MapSet.to_list(:sys.get_state(registry).unavailable) == ["agent_off"]
+  end
+
+  defp wait_for(fun, tries \\ 50) do
+    case fun.() do
+      nil when tries > 0 ->
+        Process.sleep(10)
+        wait_for(fun, tries - 1)
+
+      value ->
+        value
+    end
+  end
 end
