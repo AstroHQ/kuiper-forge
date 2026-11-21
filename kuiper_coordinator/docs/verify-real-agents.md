@@ -22,7 +22,7 @@ time: moving it to Phoenix and back is a re-register each way (section 5).
 To keep the two from taking each other's jobs, give the test agents an extra label,
 `phoenix-verify`, and run test workflows on `runs-on: [self-hosted, phoenix-verify]`. Rust's
 agents can't take those jobs (they lack the label), and Phoenix only takes them
-(`KUIPER_REQUIRED_LABELS`).
+(the required labels setting, section 3).
 
 ## 2. Build the release
 
@@ -62,24 +62,14 @@ KUIPER_AGENT_PORT=9543
 KUIPER_DATA_DIR=/var/lib/kuiper-forge     # ca.crt, ca.key, server.crt, server.key: the Rust coordinator's
 # chain-mode server certs: KUIPER_SERVER_TRUST_MODE=chain plus KUIPER_SERVER_CA_CERT or
 # KUIPER_SERVER_USE_NATIVE_ROOTS=true, as set on the Rust side
-
-# Provisioning (README, "Provisioning"). For the GitHub checks: fixed capacity.
-KUIPER_PROVISIONING_MODE=fixed_capacity
-KUIPER_GITHUB_APP_ID=<app id>
-KUIPER_GITHUB_PRIVATE_KEY_FILE=/etc/kuiper-phoenix/github-app.pem
-KUIPER_RUNNER_SCOPE=<org or owner/repo with the test workflow>
-KUIPER_REQUIRED_LABELS=self-hosted,phoenix-verify
-# For the Forgejo checks, switch to polling and restart:
-# KUIPER_PROVISIONING_MODE=polling
-# KUIPER_FORGEJO_URL=https://git.example.com
-# KUIPER_FORGEJO_TOKEN_FILE=/etc/kuiper-phoenix/forgejo-token
-# KUIPER_FORGEJO_SCOPES=<owner/repo with the test workflow>
-# KUIPER_POLL_INTERVAL_SECS=30
-# KUIPER_IDLE_RUNNER_TIMEOUT_SECS=600
 ```
 
-Use a GitHub scope or a repo that the Rust coordinator isn't also serving with webhooks for the
-same labels, or the two race for the job.
+Forges (the GitHub App, Forgejo URL and token) and provisioning settings (mode, scope,
+required labels, poll interval, idle timeout) aren't env vars: they're stored in Postgres and
+set in the admin UI (see the README once the forge storage work lands). For the GitHub checks
+use fixed capacity; for the Forgejo checks, polling. Set the required labels to
+`self-hosted,phoenix-verify`, and use a GitHub scope or a repo that the Rust coordinator isn't
+also serving with webhooks for the same labels, or the two race for the job.
 
 ## 4. Start it
 
@@ -155,7 +145,7 @@ unless an agent's are named.
 | Existing certs | restart the agent (no register) | it reconnects with its stored cert, same agent_id | A15 |
 | GitHub job | fixed capacity; push a workflow on `[self-hosted, phoenix-verify]` | pool fills to the agent's pool size (`runners` rows written before CreateRunner); the job runs on a VM of this agent; after it, the pool is topped up | P2-P4, F3, F5 |
 | Forgejo job | polling mode; push a workflow on the test repo | within one poll a one-job runner starts, runs the job and is removed (`runners` row gone) | J5-J6, FJ1-FJ5, F7 |
-| Idle teardown | Forgejo: queue a job, then cancel it before it starts | the runner is destroyed after `KUIPER_IDLE_RUNNER_TIMEOUT_SECS` (clock from when it started) and not straight back | F13-F15 |
+| Idle teardown | Forgejo: queue a job, then cancel it before it starts | the runner is destroyed after the idle timeout setting (clock from when it started) and not straight back | F13-F15 |
 | Reused VMID destroy (Proxmox) | while a runner runs, note its VM name; let it finish | agent log shows DestroyRunner for exactly that VM name; a VMID reused by a newer VM isn't destroyed | F8 (#52) |
 | Switch off (drain) | fixed capacity, pool full and idle; switch the agent off | within a tick (30 s) idle runners are unregistered then their VMs destroyed; a busy one finishes its job first; nothing is replaced until it's switched on | F16, R6-R7 |
 | Disconnect | stop the agent for under 30 s, then over 30 s | under: its runners survive; over: they're failed over and cleaned up | S9, F11-F12 |
