@@ -171,4 +171,61 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
       assert %{last_scan: nil} = :sys.get_state(pid)
     end
   end
+
+  describe "polling mode (Rust ProvisioningMode::Polling)" do
+    test "polls at startup and processes what it found, then polls only pending jobs it missed" do
+      test = self()
+
+      expect(AgentDispatchMock, :select_agent, fn labels, _ ->
+        send(test, {:pass, labels})
+        {:error, :no_available_agent}
+      end)
+
+      expect(ForgeMock, :list_queued_jobs, fn :client ->
+        send(test, :polled)
+
+        {:ok,
+         [
+           %QueuedJob{
+             id: "5",
+             labels: ["self-hosted"],
+             runner_scope: @scope,
+             repository: "astro/app"
+           }
+         ]}
+      end)
+
+      # the job it just found is listed, so it's never checked with job_status
+      start(mode: :polling, scan_ms: 60_000)
+      assert_receive :polled
+      assert_receive {:pass, ["self-hosted"]}
+      assert [%{job_key: "github:5"}] = Jobs.list_pending()
+    end
+
+    test "the poll interval sets the scan, and the tick is never slower than it" do
+      {:ok, state, _} = Manager.init(mode: :polling, forges: @forges, poll_interval_s: 15)
+      assert %{scan_ms: 15_000, tick_ms: 15_000} = state
+      {:ok, state, _} = Manager.init(mode: :polling, forges: @forges, poll_interval_s: 1)
+      assert %{scan_ms: 10_000, tick_ms: 10_000} = state
+      {:ok, state, _} = Manager.init(mode: :polling, forges: @forges)
+      assert %{scan_ms: 120_000, tick_ms: 30_000} = state
+    end
+
+    test "a tick polls again once the interval has passed, and a new job gets a pass" do
+      test = self()
+      stub(AgentDispatchMock, :select_agent, fn _, _ -> {:error, :no_available_agent} end)
+
+      expect(ForgeMock, :list_queued_jobs, 2, fn :client ->
+        send(test, :polled)
+        {:ok, []}
+      end)
+
+      pid = start(mode: :polling, scan_ms: 0)
+      assert_receive :polled
+      send(pid, :tick)
+      assert_receive :polled
+      Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", :reprocess)
+      assert %{mode: :polling} = :sys.get_state(pid)
+    end
+  end
 end

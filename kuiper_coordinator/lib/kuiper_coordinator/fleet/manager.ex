@@ -5,11 +5,13 @@ defmodule KuiperCoordinator.Fleet.Manager do
   queued (`{:new_job, key}`) or a pass is asked for (`:reprocess`) on PubSub "fleet".
   In webhook mode it also runs the forge scan (`Fleet.Recovery`, Rust scan_forges) at startup,
   after a first pass over jobs left from a previous run, and then on the tick once `scan_ms`
-  has passed (Rust run_on_demand_loop). Polling mode comes with the Forgejo work.
+  has passed (Rust run_on_demand_loop). `:polling` is webhook mode without the webhook: the
+  scan (`Fleet.Recovery.poll/1`) is the only source of jobs and runs at startup and every
+  poll interval (`:poll_interval_s`, default 120, at least 10), with the tick never slower.
 
   Options: `:mode`, `:forges` (`%{name => Forge.t()}`, the first is the default forge for
   fixed capacity), `:runner_scope`, `:tick_ms` (default 30 s, Rust's tick), `:scan_ms`
-  (default 5 min, Rust RECOVERY_SCAN_INTERVAL), `:webhook` (label filters for the scan;
+  (default 5 min, Rust RECOVERY_SCAN_INTERVAL; the poll interval in polling mode), `:webhook` (label filters for the scan;
   default `config :kuiper_coordinator, :webhook`), `:name`.
   Started by the application only when `config :kuiper_coordinator, :fleet` is set.
   """
@@ -18,7 +20,8 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
   alias KuiperCoordinator.Fleet.{FixedCapacity, OnDemand, Recovery}
 
-  @modes [:fixed_capacity, :webhook]
+  @modes [:fixed_capacity, :webhook, :polling]
+  @on_demand [:webhook, :polling]
   @default_tick_ms 30_000
 
   def start_link(opts) do
@@ -36,10 +39,21 @@ defmodule KuiperCoordinator.Fleet.Manager do
       forges = Keyword.fetch!(opts, :forges)
       {default_name, default_forge} = default_forge(forges, opts)
 
+      scan_ms =
+        Keyword.get_lazy(opts, :scan_ms, fn ->
+          if mode == :polling,
+            do: Recovery.poll_interval_ms(opts[:poll_interval_s]),
+            else: Recovery.default_interval_ms()
+        end)
+
+      # never slower than the poll, so a short poll interval is honoured (Rust check_interval)
+      default_tick =
+        if mode == :polling, do: min(@default_tick_ms, scan_ms), else: @default_tick_ms
+
       state = %{
         mode: mode,
-        tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
-        scan_ms: Keyword.get(opts, :scan_ms, Recovery.default_interval_ms()),
+        tick_ms: Keyword.get(opts, :tick_ms, default_tick),
+        scan_ms: scan_ms,
         last_scan: nil,
         ctx: %{
           forges: forges,
@@ -56,7 +70,7 @@ defmodule KuiperCoordinator.Fleet.Manager do
           :error -> state
         end
 
-      if mode == :webhook,
+      if mode in @on_demand,
         do: Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, "fleet")
 
       schedule(state)
@@ -68,7 +82,7 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
   # Webhook mode: jobs left from a previous run first, then the forge scan (Rust order).
   @impl true
-  def handle_continue(:startup, %{mode: :webhook} = state) do
+  def handle_continue(:startup, %{mode: mode} = state) when mode in @on_demand do
     run_pass(state)
     {:noreply, scan(state)}
   end
@@ -83,8 +97,10 @@ defmodule KuiperCoordinator.Fleet.Manager do
     {:noreply, state}
   end
 
-  def handle_info({:new_job, _key}, %{mode: :webhook} = state), do: pass(state)
-  def handle_info(:reprocess, %{mode: :webhook} = state), do: pass(state)
+  def handle_info({:new_job, _key}, %{mode: mode} = state) when mode in @on_demand,
+    do: pass(state)
+
+  def handle_info(:reprocess, %{mode: mode} = state) when mode in @on_demand, do: pass(state)
   def handle_info(_other, state), do: {:noreply, state}
 
   defp pass(state) do
@@ -96,16 +112,16 @@ defmodule KuiperCoordinator.Fleet.Manager do
   defp run_pass(%{mode: mode, ctx: ctx}) do
     case mode do
       :fixed_capacity -> FixedCapacity.reconcile(ctx)
-      :webhook -> OnDemand.process_pending(ctx)
+      m when m in @on_demand -> OnDemand.process_pending(ctx)
     end
   rescue
     e ->
       Logger.error("fleet #{mode} pass failed: " <> Exception.format(:error, e, __STACKTRACE__))
   end
 
-  defp scan_due?(%{mode: :webhook, last_scan: nil}), do: true
+  defp scan_due?(%{mode: mode, last_scan: nil}) when mode in @on_demand, do: true
 
-  defp scan_due?(%{mode: :webhook, last_scan: at, scan_ms: ms}),
+  defp scan_due?(%{mode: mode, last_scan: at, scan_ms: ms}) when mode in @on_demand,
     do: System.monotonic_time(:millisecond) - at >= ms
 
   defp scan_due?(_state), do: false
@@ -115,7 +131,10 @@ defmodule KuiperCoordinator.Fleet.Manager do
     state = %{state | last_scan: System.monotonic_time(:millisecond)}
 
     try do
-      case Recovery.scan(state.ctx) do
+      result =
+        if state.mode == :polling, do: Recovery.poll(state.ctx), else: Recovery.scan(state.ctx)
+
+      case result do
         %{recovered: n} when n > 0 -> run_pass(state)
         _ -> :ok
       end
