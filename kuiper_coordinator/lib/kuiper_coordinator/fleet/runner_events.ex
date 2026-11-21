@@ -22,7 +22,7 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
   require Logger
 
   alias Cirunner.Agent.RunnerEvent
-  alias KuiperCoordinator.{AgentDispatch, Forge, Jobs, Runners}
+  alias KuiperCoordinator.{AgentDispatch, AgentFailures, Forge, Jobs, Runners}
   alias KuiperCoordinator.Runners.Runner
 
   @terminal [:COMPLETED, :FAILED, :DESTROYED]
@@ -75,7 +75,10 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
   end
 
   defp terminal(ctx, agent_id, name, ev) do
-    case Runners.get_runner(name) do
+    row = Runners.get_runner(name)
+    record_failure(agent_id, name, row, ev)
+
+    case row do
       nil ->
         Logger.debug("#{ev.event_type} for #{name}, already cleaned up")
         :pass
@@ -89,6 +92,20 @@ defmodule KuiperCoordinator.Fleet.RunnerEvents do
         :pass
     end
   end
+
+  # Rust fleet.rs 1800-1888 (#33): Failed is recorded even for a runner already cleaned up (a
+  # failed destroy lands after it); Destroyed is "lost" only for a tracked runner that had a job
+  # or came with an error (a plain fixed-capacity destroy is normal).
+  defp record_failure(agent_id, name, row, %{event_type: :FAILED} = ev),
+    do: AgentFailures.record(agent_id, :runner_failed, name, row && row.job_key, ev.error)
+
+  defp record_failure(agent_id, name, %Runner{} = row, %{event_type: :DESTROYED} = ev)
+       when not is_nil(row.job_key) or ev.error not in [nil, ""] do
+    message = if ev.error in [nil, ""], do: "runner destroyed before finishing", else: ev.error
+    AgentFailures.record(agent_id, :runner_lost, name, row.job_key, message)
+  end
+
+  defp record_failure(_agent_id, _name, _row, _ev), do: :ok
 
   defp settle_job(_forge, %Runner{job_key: nil} = row, agent_id, ev) do
     case ev.event_type do

@@ -12,7 +12,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
   """
   require Logger
 
-  alias KuiperCoordinator.{AgentDispatch, Forge, Jobs, Runners}
+  alias KuiperCoordinator.{AgentDispatch, AgentFailures, Forge, Jobs, Runners}
   alias KuiperCoordinator.Jobs.PendingJob
   alias KuiperCoordinator.Runners.Naming
   alias Cirunner.Agent.{CommandResult, CreateRunnerCommand, ForgejoRunner}
@@ -225,6 +225,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
   # Rejected (e.g. at capacity): the job is fine, another agent may take it (F4, no retry).
   defp handle_reply({:error, {:rejected, reason}}, forge, job, agent_id, name) do
     Logger.warning("CreateRunner rejected by #{agent_id} for #{name}: #{reason}")
+    AgentFailures.record(agent_id, :command_rejected, name, job.job_key, reason)
     cleanup(forge, job, agent_id, name)
     reprocess()
   end
@@ -247,6 +248,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
 
   defp handle_reply({:ok, %CommandResult{error: error}}, forge, job, agent_id, name) do
     Logger.warning("Runner #{name} failed: #{error}")
+    AgentFailures.record(agent_id, :runner_failed, name, job.job_key, error)
     bump(job.job_key, agent_id)
     cleanup(forge, job, agent_id, name)
   end
@@ -254,6 +256,15 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
   # Timeout, disconnect, not connected: a command failure, retried avoiding this agent.
   defp handle_reply({:error, reason}, forge, job, agent_id, name) do
     Logger.error("CreateRunner on #{agent_id} for #{name} failed: #{inspect(reason)}")
+
+    AgentFailures.record(
+      agent_id,
+      :command_failed,
+      name,
+      job.job_key,
+      "CreateRunner: #{inspect(reason)}"
+    )
+
     cleanup(forge, job, agent_id, name)
     bump(job.job_key, agent_id)
   end
