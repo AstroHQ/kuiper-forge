@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "kuiper_coordinator/**"
-      - "kuiper-agent-proto/proto/**"
+      - "kuiper-agent-proto/**"
+      - "kuiper-agent-lib/**"
       - ".github/workflows/phoenix.yml"
   pull_request:
     paths:
       - "kuiper_coordinator/**"
-      - "kuiper-agent-proto/proto/**"
+      - "kuiper-agent-proto/**"
+      - "kuiper-agent-lib/**"
       - ".github/workflows/phoenix.yml"
 
 permissions:
@@ -87,3 +89,62 @@ jobs:
 
       - name: Test
         run: mix test
+
+  rust-agent:
+    # A real kuiper-agent-lib agent (test/rust_agent_probe) registers, streams and uploads logs
+    # against the Phoenix agent port.
+    name: Real Rust agent
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: kuiper_coordinator/test/rust_agent_probe
+
+      - name: Build the agent probe
+        run: cargo build --locked --manifest-path test/rust_agent_probe/Cargo.toml
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            kuiper_coordinator/deps
+            kuiper_coordinator/_build
+          key: mix-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('kuiper_coordinator/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Get deps
+        run: mix deps.get --check-locked
+
+      - name: Test with the real agent
+        env:
+          KUIPER_AGENT_PROBE: test/rust_agent_probe/target/debug/kuiper-agent-probe
+        run: mix test --only rust_agent
