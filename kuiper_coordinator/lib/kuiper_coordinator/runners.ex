@@ -40,6 +40,15 @@ defmodule KuiperCoordinator.Runners do
   def names_for_agent(agent_id),
     do: Repo.all(from r in Runner, where: r.agent_id == ^agent_id, select: r.runner_name)
 
+  @doc "Names of `agent_id`'s runners that are bound to a job (S9 failover candidates)."
+  def job_runners_for_agent(agent_id),
+    do:
+      Repo.all(
+        from r in Runner,
+          where: r.agent_id == ^agent_id and not is_nil(r.job_key),
+          select: r.runner_name
+      )
+
   def remove_runner(name) do
     Repo.delete_all(from r in Runner, where: r.runner_name == ^name)
     :ok
