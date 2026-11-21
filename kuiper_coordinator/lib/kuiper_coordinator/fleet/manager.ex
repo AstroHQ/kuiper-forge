@@ -2,7 +2,8 @@ defmodule KuiperCoordinator.Fleet.Manager do
   @moduledoc """
   Runs provisioning (Rust FleetManager::run, parity P1, P6): `:fixed_capacity` reconciles the
   agents' pools each tick, `:webhook` processes pending jobs each tick and whenever a job is
-  queued (`{:new_job, key}`) or a pass is asked for (`:reprocess`) on PubSub "fleet".
+  queued (`{:new_job, key}`), a job completes (`{:job_completed, key}`: it leaves the pending
+  queue, Rust fleet.rs JobCompleted) or a pass is asked for (`:reprocess`) on PubSub "fleet".
   In webhook mode it also runs the forge scan (`Fleet.Recovery`, Rust scan_forges) at startup,
   after a first pass over jobs left from a previous run, and then on the tick once `scan_ms`
   has passed (Rust run_on_demand_loop). `:polling` is webhook mode without the webhook: the
@@ -101,6 +102,22 @@ defmodule KuiperCoordinator.Fleet.Manager do
     do: pass(state)
 
   def handle_info(:reprocess, %{mode: mode} = state) when mode in @on_demand, do: pass(state)
+
+  # Rust fleet.rs JobCompleted: the job leaves the pending queue (a job cancelled or finished
+  # before a runner took it), and an agent may be free, so pending jobs get a pass.
+  def handle_info({:job_completed, key}, %{mode: mode} = state) when mode in @on_demand do
+    KuiperCoordinator.Jobs.remove_pending(key)
+    pass(state)
+  rescue
+    e ->
+      Logger.error(
+        "fleet job_completed #{key} failed: " <> Exception.format(:error, e, __STACKTRACE__)
+      )
+
+      {:noreply, state}
+  end
+
+  # Rust only records job_started in metrics; the fleet has nothing to do.
   def handle_info(_other, state), do: {:noreply, state}
 
   defp pass(state) do
