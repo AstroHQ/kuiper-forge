@@ -7,6 +7,7 @@ defmodule KuiperCoordinator.Fleet.Recovery do
   a webhook would have ignored.
 
   `Fleet.Manager` runs it at startup and every `scan_ms` (Rust RECOVERY_SCAN_INTERVAL, 5 min).
+  In polling mode `poll/1` is the only source of jobs instead, every poll interval.
   """
   require Logger
 
@@ -92,23 +93,75 @@ defmodule KuiperCoordinator.Fleet.Recovery do
 
   @doc "Adds queued jobs found on the forges to the pending queue (Rust recover_queued_jobs)."
   def recover_queued(ctx) do
+    {_scan, recovered} = list_and_recover(ctx)
+    recovered
+  end
+
+  @doc """
+  Polling mode's scan (Rust scan_forges with `ProvisioningMode::Polling`): the poll itself
+  adds newly queued jobs, then only the pending jobs it no longer listed are checked with
+  their forge. Jobs on a forge that couldn't be listed are left alone.
+  """
+  @spec poll(map()) :: %{dropped: non_neg_integer(), recovered: non_neg_integer()}
+  def poll(ctx) do
+    {scan, recovered} = list_and_recover(ctx)
+
+    dropped =
+      case dropped_pending(Jobs.list_pending(), scan) do
+        [] ->
+          0
+
+        jobs ->
+          Logger.info(
+            "#{length(jobs)} pending job(s) no longer listed as queued - verifying with their forge"
+          )
+
+          Enum.count(jobs, &(verify_job(&1, ctx) == :dropped))
+      end
+
+    %{dropped: dropped, recovered: recovered}
+  end
+
+  @doc """
+  Pending jobs a scan no longer listed as queued, in queue order (Rust dropped_pending_jobs).
+  Only jobs on forges the scan listed count: an unreachable forge drops nothing.
+  """
+  def dropped_pending(pending, %{forges: forges, seen: seen}) do
+    Enum.filter(pending, fn job ->
+      MapSet.member?(forges, job.forge) and not MapSet.member?(seen, job.job_key)
+    end)
+  end
+
+  @doc "Rust PollingConfig: 120 s by default, never under 10 s (MIN_POLL_INTERVAL_SECS)."
+  def poll_interval_ms(nil), do: 120_000
+  def poll_interval_ms(secs) when is_integer(secs), do: max(secs, 10) * 1000
+
+  # Lists every forge's queue, recording which forges answered and every job they listed.
+  defp list_and_recover(ctx) do
     config = Map.get_lazy(ctx, :webhook, fn -> webhook_config() end)
     required = Keyword.get(config, :required_labels, Labels.default_required())
     mappings = Keyword.get(config, :label_mappings, [])
 
-    ctx.forges
-    |> Enum.sort_by(&elem(&1, 0))
-    |> Enum.flat_map(fn {name, forge} ->
-      case Forge.list_queued_jobs(forge) do
-        {:ok, jobs} ->
-          Enum.map(jobs, &{name, &1})
+    {scan, jobs} =
+      ctx.forges
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.reduce({%{forges: MapSet.new(), seen: MapSet.new()}, []}, fn {name, forge},
+                                                                           {scan, acc} ->
+        case Forge.list_queued_jobs(forge) do
+          {:ok, jobs} ->
+            seen = Enum.reduce(jobs, scan.seen, &MapSet.put(&2, "#{name}:#{&1.id}"))
 
-        {:error, e} ->
-          Logger.warning("Failed to list queued jobs from forge #{name}: #{inspect(e)}")
-          []
-      end
-    end)
-    |> Enum.count(fn {name, job} -> recover(name, job, required, mappings) == :added end)
+            {%{forges: MapSet.put(scan.forges, name), seen: seen},
+             acc ++ Enum.map(jobs, &{name, &1})}
+
+          {:error, e} ->
+            Logger.warning("Failed to list queued jobs from forge #{name}: #{inspect(e)}")
+            {scan, acc}
+        end
+      end)
+
+    {scan,
+     Enum.count(jobs, fn {name, job} -> recover(name, job, required, mappings) == :added end)}
   end
 
   defp recover(forge, %QueuedJob{} = job, required, mappings) do

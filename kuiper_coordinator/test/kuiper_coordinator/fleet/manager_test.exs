@@ -9,6 +9,11 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  setup do
+    stub(ForgeMock, :runner_kind, fn _ -> "github" end)
+    :ok
+  end
+
   @scope {:org, "astro"}
   @forges %{"github" => {ForgeMock, :client}}
 
@@ -62,10 +67,42 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
     assert_receive :processed
     send(pid, :tick)
     assert_receive :processed
-    # unrelated fleet events don't trigger a pass
-    Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", {:job_completed, "github:1"})
+    # a started job is metrics only in Rust: no pass
+    Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", {:job_started, "github:1", nil})
     :sys.get_state(pid)
     refute_received :processed
+  end
+
+  test "a completed job leaves the pending queue and the freed capacity gets a pass (Rust JobCompleted)" do
+    for key <- ["github:1", "github:2"],
+        do: {:ok, _} = Jobs.add_pending(%{job_key: key, forge: "github", runner_scope: @scope})
+
+    test = self()
+    stub(ForgeMock, :list_queued_jobs, fn :client -> {:ok, []} end)
+
+    stub(AgentDispatchMock, :select_agent, fn _, _ ->
+      send(test, :processed)
+      nil
+    end)
+
+    pid = start(mode: :webhook, scan_ms: 60_000)
+    assert_receive :processed
+    :sys.get_state(pid)
+    flush_processed()
+
+    Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", {:job_completed, "github:1"})
+    assert_receive :processed
+    :sys.get_state(pid)
+    assert Jobs.get_pending("github:1") == nil
+    assert Jobs.get_pending("github:2")
+  end
+
+  defp flush_processed do
+    receive do
+      :processed -> flush_processed()
+    after
+      0 -> :ok
+    end
   end
 
   test "a crashing pass doesn't take the manager down" do
@@ -164,6 +201,63 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
       send(pid, :tick)
       # no list_queued_jobs expectation: Mox fails the test if it's called
       assert %{last_scan: nil} = :sys.get_state(pid)
+    end
+  end
+
+  describe "polling mode (Rust ProvisioningMode::Polling)" do
+    test "polls at startup and processes what it found, then polls only pending jobs it missed" do
+      test = self()
+
+      expect(AgentDispatchMock, :select_agent, fn labels, _ ->
+        send(test, {:pass, labels})
+        {:error, :no_available_agent}
+      end)
+
+      expect(ForgeMock, :list_queued_jobs, fn :client ->
+        send(test, :polled)
+
+        {:ok,
+         [
+           %QueuedJob{
+             id: "5",
+             labels: ["self-hosted"],
+             runner_scope: @scope,
+             repository: "astro/app"
+           }
+         ]}
+      end)
+
+      # the job it just found is listed, so it's never checked with job_status
+      start(mode: :polling, scan_ms: 60_000)
+      assert_receive :polled
+      assert_receive {:pass, ["self-hosted"]}
+      assert [%{job_key: "github:5"}] = Jobs.list_pending()
+    end
+
+    test "the poll interval sets the scan, and the tick is never slower than it" do
+      {:ok, state, _} = Manager.init(mode: :polling, forges: @forges, poll_interval_s: 15)
+      assert %{scan_ms: 15_000, tick_ms: 15_000} = state
+      {:ok, state, _} = Manager.init(mode: :polling, forges: @forges, poll_interval_s: 1)
+      assert %{scan_ms: 10_000, tick_ms: 10_000} = state
+      {:ok, state, _} = Manager.init(mode: :polling, forges: @forges)
+      assert %{scan_ms: 120_000, tick_ms: 30_000} = state
+    end
+
+    test "a tick polls again once the interval has passed, and a new job gets a pass" do
+      test = self()
+      stub(AgentDispatchMock, :select_agent, fn _, _ -> {:error, :no_available_agent} end)
+
+      expect(ForgeMock, :list_queued_jobs, 2, fn :client ->
+        send(test, :polled)
+        {:ok, []}
+      end)
+
+      pid = start(mode: :polling, scan_ms: 0)
+      assert_receive :polled
+      send(pid, :tick)
+      assert_receive :polled
+      Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", :reprocess)
+      assert %{mode: :polling} = :sys.get_state(pid)
     end
   end
 end

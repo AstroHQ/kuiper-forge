@@ -171,4 +171,75 @@ defmodule KuiperCoordinator.Fleet.RecoveryTest do
     assert Recovery.scan(@ctx) == %{dropped: 1, recovered: 1}
     assert keys() == ["github:2"]
   end
+
+  describe "poll (polling mode, Rust scan_forges with Polling)" do
+    test "adds new jobs, then checks only the pending jobs the poll no longer listed" do
+      # 1 is still listed, 2 isn't (finished), 3 isn't but the forge says it's still queued
+      pending(1)
+      pending(2)
+      pending(3)
+      test = self()
+
+      expect(ForgeMock, :list_queued_jobs, fn :gh ->
+        {:ok, [queued(1, ["self-hosted"]), queued(4, ["self-hosted"])]}
+      end)
+
+      expect(ForgeMock, :job_status, 2, fn :gh, "astro/app", id ->
+        send(test, {:checked, id})
+        if id == "2", do: {:ok, "completed"}, else: {:ok, "queued"}
+      end)
+
+      assert Recovery.poll(@ctx) == %{dropped: 1, recovered: 1}
+      assert keys() == ["github:1", "github:3", "github:4"]
+      assert_received {:checked, "2"}
+      assert_received {:checked, "3"}
+      refute_received {:checked, "1"}
+    end
+
+    test "a forge that couldn't be listed drops nothing" do
+      pending(1)
+      ctx = %{@ctx | forges: %{"github" => {ForgeMock, :gh}, "fj" => {ForgeMock, :fj}}}
+
+      {:ok, :inserted} =
+        Jobs.add_pending(%{
+          job_key: "fj:h-1",
+          forge: "fj",
+          runner_scope: @scope,
+          repository: "astro/app"
+        })
+
+      expect(ForgeMock, :list_queued_jobs, 2, fn
+        :gh -> {:error, :rate_limited}
+        :fj -> {:ok, [queued("h-1", ["self-hosted"])]}
+      end)
+
+      # no job_status expectation: Mox fails the test if either job is checked
+      assert Recovery.poll(ctx) == %{dropped: 0, recovered: 0}
+      assert keys() == ["fj:h-1", "github:1"]
+    end
+
+    test "a job the poll missed but the forge can't confirm is kept" do
+      pending(1)
+      expect(ForgeMock, :list_queued_jobs, fn :gh -> {:ok, []} end)
+      expect(ForgeMock, :job_status, fn :gh, "astro/app", "1" -> {:error, :timeout} end)
+      assert Recovery.poll(@ctx) == %{dropped: 0, recovered: 0}
+      assert keys() == ["github:1"]
+    end
+
+    test "dropped_pending keeps queue order and only counts listed forges" do
+      jobs =
+        for k <- ["gh:1", "gh:2", "gh:3", "fj:9"],
+            do: %{job_key: k, forge: hd(String.split(k, ":"))}
+
+      scan = %{forges: MapSet.new(["gh"]), seen: MapSet.new(["gh:2", "gh:99"])}
+      assert Enum.map(Recovery.dropped_pending(jobs, scan), & &1.job_key) == ["gh:1", "gh:3"]
+      assert Recovery.dropped_pending(jobs, %{scan | forges: MapSet.new()}) == []
+    end
+
+    test "the poll interval is 120 s by default and never under 10 s" do
+      assert Recovery.poll_interval_ms(nil) == 120_000
+      assert Recovery.poll_interval_ms(30) == 30_000
+      assert Recovery.poll_interval_ms(1) == 10_000
+    end
+  end
 end
