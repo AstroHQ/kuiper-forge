@@ -78,6 +78,7 @@ defmodule KuiperCoordinator.MixProject do
       {:grpc_server, "~> 1.1"},
       {:x509, "~> 0.9"},
       {:cloak_ecto, "~> 1.3"},
+      {:argon2_elixir, "~> 4.1"},
       {:mox, "~> 1.2", only: :test}
     ]
   end

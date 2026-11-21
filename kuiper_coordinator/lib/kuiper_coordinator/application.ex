@@ -16,6 +16,7 @@ defmodule KuiperCoordinator.Application do
          query: Application.get_env(:kuiper_coordinator, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: KuiperCoordinator.PubSub},
         {Task.Supervisor, name: KuiperCoordinator.TaskSupervisor},
+        KuiperCoordinator.Admin.LoginThrottle,
         KuiperCoordinator.AgentRegistry,
         {Registry, keys: :unique, name: KuiperCoordinator.AgentGrpc.UploadSlots},
         KuiperCoordinator.Agents.Janitor

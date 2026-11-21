@@ -31,3 +31,6 @@ config :logger, level: :info
 
 # Runtime production configuration, including reading
 # of environment variables, is done on config/runtime.exs.
+
+# Session cookie (admin login) only over HTTPS; the gateway terminates TLS in front of PORT.
+config :kuiper_coordinator, :secure_session_cookie, true
