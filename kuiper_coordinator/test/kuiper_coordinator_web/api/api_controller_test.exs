@@ -196,6 +196,25 @@ defmodule KuiperCoordinatorWeb.ApiControllerTest do
       assert Enum.map(errors["lines"], & &1["message"]) == ["line 4", "line 2"]
     end
 
+    test "malformed params are ignored, not a 500 (F15)", %{authed: authed} do
+      agent!("a1")
+      logs!("a1", 3)
+
+      for query <- [
+            "before=99999999999999999999999_1",
+            "before=1_99999999999999999999999",
+            "before=-99999999999999999999999_1",
+            "before[]=1002_2",
+            "level[]=x",
+            "level[a]=error",
+            "limit[]=2",
+            "limit[a]=2"
+          ] do
+        conn = get(authed, "/api/v1/agents/a1/logs?" <> query)
+        assert length(json_response(conn, 200)["lines"]) == 3, query
+      end
+    end
+
     test "limit clamps to 1..1000, a bad cursor or unknown agent is ignored", %{authed: authed} do
       agent!("a1")
       logs!("a1", 3)

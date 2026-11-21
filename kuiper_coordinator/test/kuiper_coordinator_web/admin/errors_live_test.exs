@@ -64,6 +64,13 @@ defmodule KuiperCoordinatorWeb.Admin.ErrorsLiveTest do
     refute has_element?(view, "#failures", "at capacity")
   end
 
+  test "array kind or agent params are ignored, not a crash (F15)", %{conn: conn} do
+    for query <- ["agent[]=agent_mac", "kind[]=runner_failed", "agent[a]=x"] do
+      {:ok, _view, html} = live(conn, "/admin/errors?" <> query)
+      assert html =~ "vm boot timed out", query
+    end
+  end
+
   test "the agent page shows its recent failures", %{conn: conn} do
     {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac")
     assert has_element?(view, "#agent-failures", "vm boot timed out")
