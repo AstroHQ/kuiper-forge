@@ -74,4 +74,14 @@ if ! openssl s_client -connect "127.0.0.1:$agent_port" -servername localhost \
   cat "$work/server.log"; exit 1
 fi
 echo "agent gRPC TLS on $agent_port verifies against the coordinator CA"
+
+# the runbook's token step, as written there
+bundle="$("$rel/bin/kuiper_coordinator" rpc '{:ok, t} = KuiperCoordinator.Agents.create_registration_token(3600); IO.puts(KuiperCoordinator.Agents.registration_bundle(t, "https://localhost:'"$agent_port"'"))')"
+case "$bundle" in
+  kfr1_*) echo "registration bundle from bin/kuiper_coordinator rpc" ;;
+  *) echo "rpc didn't print a registration bundle: $bundle"; cat "$work/server.log"; exit 1 ;;
+esac
+
+# the runbook's switch-off step, until the admin UI's switch lands
+"$rel/bin/kuiper_coordinator" rpc 'Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "agents", {:agent_availability, "agent_smoke", false})'
 echo SMOKE_OK
