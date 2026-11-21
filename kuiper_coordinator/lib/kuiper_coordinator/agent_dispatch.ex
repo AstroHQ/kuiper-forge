@@ -9,7 +9,8 @@ defmodule KuiperCoordinator.AgentDispatch do
   Commands are the generated `Cirunner.Agent.*` structs, since the proto is the contract.
   """
 
-  alias Cirunner.Agent.{CreateRunnerCommand, CreateRunnerResult}
+  alias Cirunner.Agent.{CommandResult, CreateRunnerCommand}
+  alias KuiperCoordinator.Fleet.PoolDefinition
 
   @type agent_id :: String.t()
   @type runner_name :: String.t()
@@ -33,12 +34,12 @@ defmodule KuiperCoordinator.AgentDispatch do
   Sends CreateRunner (the registry fills in `command_id`) and waits for the agent's answer,
   like Rust's 30 s ack wait. `:ok` is an accepted Ack; the runner finishing arrives later as
   runner events on PubSub "agents" (D13). Legacy agents answer with a full
-  `CreateRunnerResult` instead (`{:ok, result}`, fleet.rs). `{:error, {:rejected, reason}}` is
+  `CommandResult` (success, error, and a CreateRunnerResult) instead (`{:ok, result}`, fleet.rs). `{:error, {:rejected, reason}}` is
   an Ack with accepted=false (parity F4: not a retry).
   """
   @callback dispatch_create(agent_id(), CreateRunnerCommand.t()) ::
               :ok
-              | {:ok, CreateRunnerResult.t()}
+              | {:ok, CommandResult.t()}
               | {:error, {:rejected, String.t()} | :timeout | :not_connected | :disconnected}
 
   @doc """
@@ -46,6 +47,23 @@ defmodule KuiperCoordinator.AgentDispatch do
   (parity F8: the proxmox agent only destroys a VMID that still belongs to that name).
   """
   @callback dispatch_destroy(agent_id(), vm_name :: String.t()) :: :ok | {:error, term()}
+
+  @doc """
+  Fixed-capacity pools from the connected agents (Rust get_pool_definitions, parity R6):
+  unavailable agents skipped; agents with explicit pool sizes get one pool per label set,
+  the rest share a legacy pool per normalized base-label set (`members` = those agents).
+  """
+  @callback pool_definitions() :: [PoolDefinition.t()]
+
+  @doc "Free slots for the pool (Rust agent_capacity / legacy_pool_capacity)."
+  @callback pool_capacity(PoolDefinition.t()) :: non_neg_integer()
+
+  @doc "A member agent with room for a legacy pool's runner (Rust select_legacy_pool_agent)."
+  @callback select_pool_agent(PoolDefinition.t()) :: {:ok, agent_id()} | :none
+
+  def pool_definitions, do: impl().pool_definitions()
+  def pool_capacity(%PoolDefinition{} = pool), do: impl().pool_capacity(pool)
+  def select_pool_agent(%PoolDefinition{} = pool), do: impl().select_pool_agent(pool)
 
   def reserve_slot(labels, runner_name, opts \\ []) when is_binary(runner_name),
     do: impl().reserve_slot(labels, runner_name, opts)
@@ -78,6 +96,12 @@ defmodule KuiperCoordinator.AgentDispatch.None do
   def release_slot(_agent_id, _runner_name), do: :ok
   @impl true
   def hostname(_agent_id), do: nil
+  @impl true
+  def pool_definitions, do: []
+  @impl true
+  def pool_capacity(_pool), do: 0
+  @impl true
+  def select_pool_agent(_pool), do: :none
   @impl true
   def dispatch_create(_agent_id, _cmd), do: {:error, :not_connected}
   @impl true

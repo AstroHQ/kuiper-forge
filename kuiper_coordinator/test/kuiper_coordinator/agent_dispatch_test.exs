@@ -3,7 +3,7 @@ defmodule KuiperCoordinator.AgentDispatchTest do
   import Mox
 
   alias KuiperCoordinator.{AgentDispatch, AgentDispatchMock}
-  alias Cirunner.Agent.{CreateRunnerCommand, CreateRunnerResult}
+  alias Cirunner.Agent.{CommandResult, CreateRunnerCommand, CreateRunnerResult}
 
   setup :verify_on_exit!
 
@@ -34,11 +34,24 @@ defmodule KuiperCoordinator.AgentDispatchTest do
 
   test "a legacy agent's full result and a rejected ack pass through" do
     expect(AgentDispatchMock, :dispatch_create, 2, fn
-      "legacy", _ -> {:ok, %CreateRunnerResult{vm_id: "101"}}
-      "busy", _ -> {:error, {:rejected, "at capacity"}}
+      "legacy", _ ->
+        {:ok,
+         %CommandResult{
+           success: false,
+           error: "clone failed",
+           result: {:create_runner, %CreateRunnerResult{vm_id: "101"}}
+         }}
+
+      "busy", _ ->
+        {:error, {:rejected, "at capacity"}}
     end)
 
-    assert {:ok, %CreateRunnerResult{vm_id: "101"}} =
+    assert {:ok,
+            %CommandResult{
+              success: false,
+              error: "clone failed",
+              result: {:create_runner, %CreateRunnerResult{vm_id: "101"}}
+            }} =
              AgentDispatch.dispatch_create("legacy", %CreateRunnerCommand{})
 
     assert {:error, {:rejected, "at capacity"}} =
