@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds the prod release and boots it the way the runbook does (docs/verify-real-agents.md):
-# migrate, then bin/server with the HTTP and agent gRPC listeners on their own ports, on a
-# throwaway CA. Passes when the HTTP port answers and the agent port does TLS with a server
-# cert from that CA.
+# migrate, then bin/server with the HTTP and agent gRPC listeners on their own ports, from an
+# empty data dir: the first launch makes the CA and server cert there (D57). Passes when the HTTP
+# port answers, the keys are 0600, and the agent port does TLS with a server cert from that CA.
 #
 #   DATABASE_URL  Postgres to migrate (default ecto://postgres:postgres@localhost:$PGPORT/kuiper_coordinator_smoke)
 #   MIX           how to run mix (default mix), e.g. a wrapper that runs it in a container
@@ -32,23 +32,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== throwaway coordinator CA and server cert"
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
-  -subj /CN=kuiper-smoke-ca -addext basicConstraints=critical,CA:TRUE \
-  -addext keyUsage=critical,keyCertSign,cRLSign \
-  -keyout "$work/ca.key" -out "$work/ca.crt" 2>/dev/null
-openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj /CN=localhost \
-  -keyout "$work/server.key" -out "$work/server.csr" 2>/dev/null
-printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >"$work/ext"
-openssl x509 -req -in "$work/server.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key" \
-  -CAcreateserial -days 1 -extfile "$work/ext" -out "$work/server.crt" 2>/dev/null
-
 export SECRET_KEY_BASE="$(openssl rand -base64 48)"
 export KUIPER_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 export PHX_HOST=localhost PORT="$http_port"
-export KUIPER_AGENT_GRPC=true KUIPER_AGENT_PORT="$agent_port" KUIPER_DATA_DIR="$work"
-export KUIPER_CA_CERT="$work/ca.crt" KUIPER_CA_KEY="$work/ca.key"
-export KUIPER_SERVER_CERT="$work/server.crt" KUIPER_SERVER_KEY="$work/server.key"
+# agent gRPC is on by default (D58); the data dir doesn't exist yet
+data="$work/data"
+export KUIPER_AGENT_PORT="$agent_port" KUIPER_DATA_DIR="$data"
+unset KUIPER_AGENT_GRPC KUIPER_CA_CERT KUIPER_CA_KEY KUIPER_SERVER_CERT KUIPER_SERVER_KEY
 
 echo "== create the database and migrate"
 "$rel/bin/kuiper_coordinator" eval 'KuiperCoordinator.Release.create_db()'
@@ -69,8 +59,17 @@ if [ -z "$ok" ]; then
 fi
 echo "HTTP on $http_port answers"
 
+for f in ca.crt ca.key server.crt server.key; do
+  [ -f "$data/$f" ] || { echo "first launch didn't make $data/$f"; cat "$work/server.log"; exit 1; }
+done
+for f in ca.key server.key; do
+  mode="$(stat -c %a "$data/$f" 2>/dev/null || stat -f %Lp "$data/$f")"
+  [ "$mode" = 600 ] || { echo "$data/$f is mode $mode, want 600"; exit 1; }
+done
+echo "first launch made the CA and server cert in $data, keys 0600"
+
 if ! openssl s_client -connect "127.0.0.1:$agent_port" -servername localhost \
-  -CAfile "$work/ca.crt" -verify_return_error </dev/null 2>/dev/null | grep -q "Verify return code: 0"; then
+  -CAfile "$data/ca.crt" -verify_return_error </dev/null 2>/dev/null | grep -q "Verify return code: 0"; then
   echo "agent port $agent_port didn't do TLS with the coordinator CA's server cert"
   cat "$work/server.log"; exit 1
 fi

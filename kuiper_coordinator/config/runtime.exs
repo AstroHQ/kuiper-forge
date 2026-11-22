@@ -33,11 +33,23 @@ config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint,
 # Point the CA at the Rust coordinator's ca.crt/ca.key so existing agent certs stay valid.
 # The server cert may come from another CA (KUIPER_SERVER_TRUST_MODE=chain, e.g. a public
 # cert with its chain); agent client certs are always verified against KUIPER_CA_CERT.
+# A fresh install makes its own CA and server cert in the data dir on first launch (D57); files
+# that are already there (like the Rust coordinator's) are used as-is. Dev keeps them in
+# kuiper_coordinator/.kuiper-data (gitignored), so it runs without sudo.
 if config_env() != :test do
-  data_dir = System.get_env("KUIPER_DATA_DIR", "/var/lib/kuiper-forge")
+  default_data_dir =
+    if config_env() == :dev,
+      do: Path.expand("../.kuiper-data", __DIR__),
+      else: "/var/lib/kuiper-forge"
+
+  data_dir = System.get_env("KUIPER_DATA_DIR", default_data_dir)
+  # on unless KUIPER_AGENT_GRPC is false or 0 (D58)
+  agent_grpc? = System.get_env("KUIPER_AGENT_GRPC", "true") not in ~w(false 0)
 
   config :kuiper_coordinator, :agent_grpc,
-    enabled: System.get_env("KUIPER_AGENT_GRPC", "false") in ~w(true 1),
+    enabled: agent_grpc?,
+    data_dir: data_dir,
+    ca_org: System.get_env("KUIPER_CA_ORG", "Kuiper Forge"),
     port: String.to_integer(System.get_env("KUIPER_AGENT_PORT", "9543")),
     ca_cert: System.get_env("KUIPER_CA_CERT", Path.join(data_dir, "ca.crt")),
     ca_key: System.get_env("KUIPER_CA_KEY", Path.join(data_dir, "ca.key")),
@@ -54,8 +66,7 @@ if config_env() != :test do
   # Its own path beside the Rust coordinator's <data_dir>/coordinator.sock (parity M6). On
   # with agent gRPC unless KUIPER_MANAGEMENT says otherwise (tokens are for registration).
   config :kuiper_coordinator, :management,
-    enabled:
-      System.get_env("KUIPER_MANAGEMENT", System.get_env("KUIPER_AGENT_GRPC", "false")) in ~w(true 1),
+    enabled: System.get_env("KUIPER_MANAGEMENT", to_string(agent_grpc?)) in ~w(true 1),
     socket:
       System.get_env("KUIPER_MANAGEMENT_SOCKET") ||
         Path.join(data_dir, "phoenix-coordinator.sock")

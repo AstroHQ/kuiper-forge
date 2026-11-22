@@ -6,7 +6,8 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
   @vars ~w(KUIPER_HTTP_PORT PORT KUIPER_AGENT_GRPC KUIPER_AGENT_PORT KUIPER_GITHUB_APP_ID
            KUIPER_GITHUB_PRIVATE_KEY KUIPER_FORGEJO_URL KUIPER_FORGEJO_TOKEN KUIPER_FORGEJO_SCOPES
            KUIPER_PROVISIONING_MODE KUIPER_POLL_INTERVAL_SECS KUIPER_CONFIG
-           KUIPER_ENCRYPTION_KEY)
+           KUIPER_ENCRYPTION_KEY KUIPER_DATA_DIR KUIPER_CA_CERT KUIPER_CA_ORG
+           KUIPER_MANAGEMENT)
 
   setup do
     saved = Map.new(@vars, &{&1, System.get_env(&1)})
@@ -76,5 +77,30 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
 
   test "dev without KUIPER_ENCRYPTION_KEY gets a fixed dev key" do
     assert byte_size(get_in(config(), [:kuiper_coordinator, KuiperCoordinator.Vault, :key])) == 32
+  end
+
+  test "agent gRPC and Management are on by default; false or 0 turns gRPC off (D58)" do
+    assert agent_grpc()[:enabled]
+    assert get_in(config(), [:kuiper_coordinator, :management, :enabled])
+
+    for off <- ~w(false 0) do
+      System.put_env("KUIPER_AGENT_GRPC", off)
+      refute agent_grpc()[:enabled]
+    end
+  end
+
+  test "dev keeps its data in a gitignored dir in the app, writable without sudo (D58)" do
+    dir = Path.expand("../../.kuiper-data", __DIR__)
+    assert agent_grpc()[:data_dir] == dir
+    assert agent_grpc()[:ca_cert] == Path.join(dir, "ca.crt")
+    assert agent_grpc()[:ca_org] == "Kuiper Forge"
+
+    {_, 0} =
+      System.cmd("git", ["check-ignore", "-q", Path.join(dir, "ca.key")], cd: Path.dirname(dir))
+
+    System.put_env("KUIPER_DATA_DIR", "/srv/kf")
+    System.put_env("KUIPER_CA_ORG", "Acme")
+    assert agent_grpc()[:ca_key] == "/srv/kf/ca.key"
+    assert agent_grpc()[:ca_org] == "Acme"
   end
 end

@@ -111,6 +111,29 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     assert job =~ "CI / </span>test" and job =~ "astro/app" and job =~ "No matching agent"
   end
 
+  test "an unreadable CA shows a flash with the reason and keeps the page alive", %{conn: conn} do
+    old = Application.get_env(:kuiper_coordinator, :agent_grpc)
+
+    missing =
+      Path.join(System.tmp_dir!(), "kc-no-ca-#{System.unique_integer([:positive])}/ca.crt")
+
+    Application.put_env(:kuiper_coordinator, :agent_grpc,
+      ca_cert: missing,
+      server_trust_mode: "ca"
+    )
+
+    on_exit(fn -> Application.put_env(:kuiper_coordinator, :agent_grpc, old || []) end)
+
+    {:ok, view, _} = live(conn, ~p"/admin/dashboard")
+    html = view |> element("#create-token") |> render_click()
+
+    assert html =~ "Couldn&#39;t build the registration bundle"
+    assert html =~ "cannot read server CA certificate"
+    assert Process.alive?(view.pid)
+    assert render(view) =~ "No pending tokens"
+    assert Agents.list_registration_tokens() == []
+  end
+
   test "creating a token shows a kfr1_ bundle once; deleting removes it", %{conn: conn} do
     {ca_cert, ca_key} = KuiperCoordinator.AgentGrpcCase.fixture_ca()
     KuiperCoordinator.CA.install!(ca_cert, ca_key)

@@ -25,11 +25,29 @@ mix test
 Two listeners, so it runs beside the Rust coordinator (9443):
 
 - HTTP (admin UI, webhooks): `KUIPER_HTTP_PORT`, else `PORT`, else 9480.
-- Agent gRPC (registration, AgentStream, UploadLogs), with `KUIPER_AGENT_GRPC=true`:
-  its own TLS port, `KUIPER_AGENT_PORT`, else 9543. Agent RPCs need a client cert
-  signed by the coordinator CA (`KUIPER_CA_CERT`/`KUIPER_CA_KEY`, the Rust
-  coordinator's `ca.crt`/`ca.key`); registration works without one. A gateway in
-  front passes this port's TLS through.
+- Agent gRPC (registration, AgentStream, UploadLogs), on by default
+  (`KUIPER_AGENT_GRPC=false` or `0` turns it off): its own TLS port,
+  `KUIPER_AGENT_PORT`, else 9543. Agent RPCs need a client cert signed by the
+  coordinator CA (`KUIPER_CA_CERT`/`KUIPER_CA_KEY`); registration works without
+  one. A gateway in front passes this port's TLS through.
+
+### Certificates
+
+The CA and server cert live in `KUIPER_DATA_DIR` (`/var/lib/kuiper-forge` in
+prod; `kuiper_coordinator/.kuiper-data` in dev, gitignored, so `mix phx.server`
+needs no sudo) as `ca.crt`, `ca.key`, `server.crt`, `server.key`, or wherever
+`KUIPER_CA_CERT`, `KUIPER_CA_KEY`, `KUIPER_SERVER_CERT`, `KUIPER_SERVER_KEY`
+point.
+
+- Fresh install: nothing to do. When both CA files are missing, the first launch
+  makes a CA like `kuiper-forge ca init` (P-256, 10 years, CN "<org> CA" with
+  `KUIPER_CA_ORG`, default "Kuiper Forge"); when both server files are missing,
+  it issues a server cert from that CA for `KUIPER_SERVER_HOSTNAME` (else
+  `PHX_HOST`) plus localhost and 127.0.0.1, valid a year. Keys are written 0600.
+- Sharing with the Rust coordinator: point the paths at its files, so agent
+  certs it issued stay valid. Existing files are never overwritten.
+- Half a pair (a cert without its key, or the other way round) or a key that
+  doesn't match stops startup with a message naming the file.
 
 `KUIPER_SERVER_CERT`/`KUIPER_SERVER_KEY` may be a cert from another CA (put its
 intermediates after it in the same file) with `KUIPER_SERVER_TRUST_MODE=chain`
