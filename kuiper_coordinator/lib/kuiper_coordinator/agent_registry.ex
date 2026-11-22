@@ -122,13 +122,24 @@ defmodule KuiperCoordinator.AgentRegistry do
 
   def broadcast(msg), do: Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, @topic, msg)
 
+  # An agent switched off on the dashboard stays off across a restart (Rust main.rs seeds it at
+  # startup). The DB is up first (Repo starts before us); if it can't be read, log and
+  # start with everyone available rather than not start.
+  defp seed_unavailable do
+    MapSet.new(KuiperCoordinator.Agents.unavailable_agent_ids())
+  rescue
+    e ->
+      Logger.error("Could not load unavailable agents: " <> Exception.message(e))
+      MapSet.new()
+  end
+
   ## Server
 
   @impl true
   def init(opts) do
     :ets.new(__MODULE__, [:named_table, :set, :protected, read_concurrency: true])
     :ok = Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, @topic)
-    state = %{monitors: %{}, opts: opts, unavailable: MapSet.new()}
+    state = %{monitors: %{}, opts: opts, unavailable: seed_unavailable()}
     schedule_sweep(state)
     {:ok, state}
   end

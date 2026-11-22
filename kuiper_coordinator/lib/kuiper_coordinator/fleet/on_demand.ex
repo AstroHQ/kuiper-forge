@@ -12,7 +12,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
   """
   require Logger
 
-  alias KuiperCoordinator.{AgentDispatch, Forge, Jobs, Runners}
+  alias KuiperCoordinator.{AgentDispatch, AgentFailures, Forge, Jobs, Runners, RunHistory}
   alias KuiperCoordinator.Jobs.PendingJob
   alias KuiperCoordinator.Runners.Naming
   alias Cirunner.Agent.{CommandResult, CreateRunnerCommand, ForgejoRunner}
@@ -35,7 +35,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
     cond do
       job.retry_count >= max ->
         Logger.warning("Pending job #{job.job_key} exceeded max retries (#{max}), abandoning")
-        Jobs.remove_pending(job.job_key)
+        Jobs.remove_pending(job.job_key, :abandoned)
         :abandoned
 
       # its last runner idled (F13): no new one until the delay is up
@@ -87,7 +87,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
 
         :gone ->
           AgentDispatch.release_slot(agent_id, name)
-          Jobs.remove_pending(job.job_key)
+          Jobs.remove_pending(job.job_key, :gone)
           :skipped
       end
     end
@@ -152,6 +152,18 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
     cmd = create_command(forge, job, name, launch)
 
     Logger.info("Sending CreateRunner to #{agent_id} for #{name} (job #{job.job_key})")
+
+    RunHistory.runner_requested_on(agent_id, %{
+      runner_name: name,
+      forge: job.forge,
+      job_key: job.job_key,
+      repository: job.repository,
+      workflow_name: job.workflow_name,
+      job_name: job.job_name,
+      labels: job.agent_labels
+    })
+
+    RunHistory.job_runner_created(job.job_key)
     send_create(forge, job, agent_id, cmd, ctx)
     :created
   end
@@ -219,22 +231,28 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
       else: run.()
   end
 
-  defp handle_reply(:ok, _forge, job, agent_id, name),
-    do: Logger.info("CreateRunner accepted by #{agent_id} for #{name} (job #{job.job_key})")
+  defp handle_reply(:ok, _forge, job, agent_id, name) do
+    Logger.info("CreateRunner accepted by #{agent_id} for #{name} (job #{job.job_key})")
+    RunHistory.runner_acked(name)
+  end
 
   # Rejected (e.g. at capacity): the job is fine, another agent may take it (F4, no retry).
   defp handle_reply({:error, {:rejected, reason}}, forge, job, agent_id, name) do
     Logger.warning("CreateRunner rejected by #{agent_id} for #{name}: #{reason}")
+    AgentFailures.record(agent_id, :command_rejected, name, job.job_key, reason)
+    RunHistory.runner_finished(name, :rejected, reason)
     cleanup(forge, job, agent_id, name)
     reprocess()
   end
 
   # A legacy agent answers with the finished runner (F7).
   defp handle_reply({:ok, %CommandResult{success: true}}, forge, job, agent_id, name) do
+    RunHistory.runner_finished(name, :completed, "")
+
     case check_after_runner(forge, job) do
       :done ->
         Logger.info("Runner #{name} completed job #{job.job_key}")
-        Jobs.remove_pending(job.job_key)
+        Jobs.remove_pending(job.job_key, :ran)
         cleanup(forge, job, agent_id, name)
 
       :keep ->
@@ -247,6 +265,8 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
 
   defp handle_reply({:ok, %CommandResult{error: error}}, forge, job, agent_id, name) do
     Logger.warning("Runner #{name} failed: #{error}")
+    AgentFailures.record(agent_id, :runner_failed, name, job.job_key, error)
+    RunHistory.runner_finished(name, :failed, error)
     bump(job.job_key, agent_id)
     cleanup(forge, job, agent_id, name)
   end
@@ -254,6 +274,16 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
   # Timeout, disconnect, not connected: a command failure, retried avoiding this agent.
   defp handle_reply({:error, reason}, forge, job, agent_id, name) do
     Logger.error("CreateRunner on #{agent_id} for #{name} failed: #{inspect(reason)}")
+
+    AgentFailures.record(
+      agent_id,
+      :command_failed,
+      name,
+      job.job_key,
+      "CreateRunner: #{inspect(reason)}"
+    )
+
+    RunHistory.runner_finished(name, :command_failed, "CreateRunner: #{inspect(reason)}")
     cleanup(forge, job, agent_id, name)
     bump(job.job_key, agent_id)
   end
@@ -287,7 +317,7 @@ defmodule KuiperCoordinator.Fleet.OnDemand do
       {:ok, n} ->
         if n >= Jobs.max_retries() do
           Logger.warning("Job #{job_key} failed #{n} times, abandoning")
-          Jobs.remove_pending(job_key)
+          Jobs.remove_pending(job_key, :abandoned)
         end
 
       {:error, :not_found} ->

@@ -99,6 +99,17 @@ defmodule KuiperCoordinator.Agents do
     end
   end
 
+  @doc "Every registration token, oldest first, in plaintext (management.rs ListTokens, M2)."
+  def list_registration_tokens do
+    Repo.all(from(t in RegistrationToken, order_by: [asc: t.inserted_at, asc: t.token]))
+  end
+
+  @doc "Deletes a registration token; true when one was there."
+  def delete_registration_token(token) when is_binary(token) do
+    {count, _} = Repo.delete_all(from(t in RegistrationToken, where: t.token == ^token))
+    count == 1
+  end
+
   defp consume_token(token) do
     case Repo.delete_all(from(t in RegistrationToken, where: t.token == ^token, select: t)) do
       {1, [reg]} -> {:ok, reg}
@@ -113,6 +124,11 @@ defmodule KuiperCoordinator.Agents do
   ## Agents
 
   def get_agent(agent_id), do: Repo.get(Agent, agent_id)
+
+  @doc "Every registered agent, revoked ones too, newest first (auth.rs list_agents)."
+  def list_agents do
+    Repo.all(from(a in Agent, order_by: [desc: a.inserted_at, asc: a.agent_id]))
+  end
 
   @doc "Exists, not revoked, cert not expired (auth.rs is_agent_valid)."
   def valid_agent?(agent_id) when is_binary(agent_id) do
@@ -164,6 +180,31 @@ defmodule KuiperCoordinator.Agents do
 
     AgentRegistry.disconnect(agent_id, :revoked)
     if count == 1, do: :ok, else: {:error, :not_found}
+  end
+
+  @doc "Ids of agents switched off on the dashboard (`unavailable_at` set)."
+  def unavailable_agent_ids do
+    Repo.all(from(a in Agent, where: not is_nil(a.unavailable_at), select: a.agent_id))
+  end
+
+  @doc """
+  Marks an agent unavailable (no new runners; running ones finish) or available again
+  (Rust set_agent_unavailable, parity #40). The DB is written first, then `{:agent_availability,
+  agent_id, available?}` goes out on PubSub "agents" so scheduling follows.
+  """
+  def set_unavailable(agent_id, unavailable?) when is_boolean(unavailable?) do
+    value = if unavailable?, do: DateTime.utc_now()
+
+    {count, _} =
+      from(a in Agent, where: a.agent_id == ^agent_id)
+      |> Repo.update_all(set: [unavailable_at: value, updated_at: DateTime.utc_now()])
+
+    if count == 1 do
+      AgentRegistry.broadcast({:agent_availability, agent_id, not unavailable?})
+      :ok
+    else
+      {:error, :not_found}
+    end
   end
 
   @doc "Hourly housekeeping (A13): drop expired tokens and agents revoked more than 7 days ago."
@@ -327,6 +368,62 @@ defmodule KuiperCoordinator.Agents do
       _ -> cut
     end
   end
+
+  @doc """
+  An agent's log lines at `min_level` (1 = error .. 5 = trace) or more severe, newest first,
+  older than the `before` cursor (`"<ts>_<seq>"`, as `log_cursor/1` gives; a bad one is ignored),
+  at most `limit` (agent_logs.rs recent).
+  """
+  def recent_logs(agent_id, min_level, before, limit) do
+    {ts, seq} = parse_log_cursor(before) || {nil, nil}
+
+    from(l in LogLine,
+      where: l.agent_id == ^agent_id and l.level <= ^min_level,
+      order_by: [desc: l.ts, desc: l.seq],
+      limit: ^limit
+    )
+    |> then(fn q ->
+      if ts, do: where(q, [l], l.ts < ^ts or (l.ts == ^ts and l.seq < ^seq)), else: q
+    end)
+    |> Repo.all()
+  end
+
+  def log_cursor(%LogLine{ts: ts, seq: seq}), do: "#{ts}_#{seq}"
+
+  def parse_log_cursor(cursor) when is_binary(cursor) do
+    with [ts, seq] <- String.split(cursor, "_", parts: 2),
+         {ts, ""} <- Integer.parse(ts),
+         {seq, ""} <- Integer.parse(seq),
+         true <- int64?(ts) and int64?(seq) do
+      {ts, seq}
+    else
+      _ -> nil
+    end
+  end
+
+  def parse_log_cursor(_), do: nil
+
+  # ts and seq are bigint columns; a cursor outside that range can't come from log_cursor/1
+  defp int64?(n), do: n >= -0x8000000000000000 and n <= 0x7FFFFFFFFFFFFFFF
+
+  @doc "Minimum level from a filter name (agent_log_routes.rs level_filter): unknown is trace."
+  def level_filter(name) when is_binary(name) do
+    case String.downcase(name) do
+      "error" -> 1
+      "warn" -> 2
+      "info" -> 3
+      "debug" -> 4
+      _ -> 5
+    end
+  end
+
+  def level_filter(_), do: 5
+
+  def level_name(1), do: "error"
+  def level_name(2), do: "warn"
+  def level_name(3), do: "info"
+  def level_name(4), do: "debug"
+  def level_name(_), do: "trace"
 
   def log_lines(agent_id) do
     Repo.all(

@@ -16,7 +16,7 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
   import Plug.Conn
   require Logger
 
-  alias KuiperCoordinator.{Jobs, Webhooks.Labels}
+  alias KuiperCoordinator.{Jobs, RunHistory, Webhooks.Labels}
 
   @max_body 25 * 1024 * 1024
 
@@ -173,16 +173,21 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
   end
 
   defp dispatch_event(%{"action" => "in_progress", "workflow_job" => job}, config) do
-    broadcast(
-      {:job_started, "#{Keyword.get(config, :forge, "github")}:#{job["id"]}", job["runner_name"]}
-    )
-
+    key = "#{Keyword.get(config, :forge, "github")}:#{job["id"]}"
+    # run history: the queue wait ends here, and it says which runner took the job
+    at = parse_time(job["started_at"]) || DateTime.utc_now()
+    RunHistory.job_started(key, job["runner_name"], at)
+    if job["runner_name"], do: RunHistory.runner_job_started(job["runner_name"], at)
+    broadcast({:job_started, key, job["runner_name"]})
     200
   end
 
   defp dispatch_event(%{"action" => action, "workflow_job" => job}, config)
        when action in ["completed", "cancelled"] do
-    broadcast({:job_completed, "#{Keyword.get(config, :forge, "github")}:#{job["id"]}"})
+    key = "#{Keyword.get(config, :forge, "github")}:#{job["id"]}"
+    at = parse_time(job["completed_at"]) || DateTime.utc_now()
+    RunHistory.job_completed(key, job["conclusion"], at)
+    broadcast({:job_completed, key})
     200
   end
 

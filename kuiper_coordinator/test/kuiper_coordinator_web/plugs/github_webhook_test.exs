@@ -194,6 +194,35 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhookTest do
     assert_received {:job_started, "github:6", "pve01-abcd1234"}
   end
 
+  test "the job's history follows the webhook: queued, started by a runner, cancelled (MX4, MX5)",
+       %{conn: conn} do
+    assert deliver(conn, event("queued", 8, ["self-hosted", "macOS"])).status == 200
+
+    started =
+      event("in_progress", 8, ["self-hosted"])
+      |> Jason.decode!()
+      |> put_in(["workflow_job", "started_at"], "2026-11-21T12:05:00Z")
+      |> Jason.encode!()
+
+    assert deliver(build_conn(), started).status == 200
+
+    done =
+      event("completed", 8, ["self-hosted"])
+      |> Jason.decode!()
+      |> put_in(["workflow_job", "conclusion"], "cancelled")
+      |> Jason.encode!()
+
+    assert deliver(build_conn(), done).status == 200
+
+    assert [j] = KuiperCoordinator.RunHistory.jobs_since(0)
+    assert j.job_key == "github:8"
+    assert j.repository == "acme/app"
+    assert j.queued_at == DateTime.to_unix(~U[2026-11-21 12:00:00Z], :millisecond)
+    assert j.started_at == DateTime.to_unix(~U[2026-11-21 12:05:00Z], :millisecond)
+    assert j.runner_name == "pve01-abcd1234"
+    assert {j.conclusion, j.outcome} == {"cancelled", "cancelled"}
+  end
+
   test "other paths are left alone", %{conn: conn} do
     assert get(conn, "/").status == 200
   end

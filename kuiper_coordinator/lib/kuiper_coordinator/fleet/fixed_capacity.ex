@@ -8,7 +8,7 @@ defmodule KuiperCoordinator.Fleet.FixedCapacity do
   """
   require Logger
 
-  alias KuiperCoordinator.{AgentDispatch, Forge, Runners}
+  alias KuiperCoordinator.{AgentDispatch, AgentFailures, Forge, Runners, RunHistory}
   alias KuiperCoordinator.Fleet.PoolDefinition
   alias KuiperCoordinator.Runners.Naming
   alias Cirunner.Agent.{CommandResult, CreateRunnerCommand}
@@ -107,6 +107,13 @@ defmodule KuiperCoordinator.Fleet.FixedCapacity do
         label_set_id: pool.label_set_id
       }
 
+      RunHistory.runner_requested_on(agent_id, %{
+        runner_name: name,
+        forge: ctx.forge_name,
+        labels: pool.labels,
+        pool: PoolDefinition.key(pool)
+      })
+
       send_create(agent_id, cmd, ctx)
       :sent
     else
@@ -161,20 +168,43 @@ defmodule KuiperCoordinator.Fleet.FixedCapacity do
 
   defp handle_reply(:ok, agent_id, cmd, _ctx) do
     Logger.info("CreateRunner accepted by agent #{agent_id} for #{cmd.vm_name}")
+    RunHistory.runner_acked(cmd.vm_name)
   end
 
   # A legacy agent answers with the finished runner: it's gone, clean up after it.
   defp handle_reply({:ok, %CommandResult{} = result}, agent_id, cmd, ctx) do
-    unless result.success,
-      do: Logger.warning("runner #{cmd.vm_name} failed: #{result.error}")
+    outcome = if result.success, do: :completed, else: :failed
+    RunHistory.runner_finished(cmd.vm_name, outcome, result.error)
+
+    unless result.success do
+      Logger.warning("runner #{cmd.vm_name} failed: #{result.error}")
+      AgentFailures.record(agent_id, :runner_failed, cmd.vm_name, nil, result.error)
+    end
 
     cleanup(agent_id, cmd.vm_name, ctx)
   end
 
   # Rejected, timed out or disconnected: no reprocess in fixed capacity (P5); the next
   # reconcile tops the pool up again.
+  defp handle_reply({:error, {:rejected, reason}}, agent_id, cmd, ctx) do
+    Logger.warning("CreateRunner rejected by #{agent_id} for #{cmd.vm_name}: #{reason}")
+    AgentFailures.record(agent_id, :command_rejected, cmd.vm_name, nil, reason)
+    RunHistory.runner_finished(cmd.vm_name, :rejected, reason)
+    cleanup(agent_id, cmd.vm_name, ctx)
+  end
+
   defp handle_reply({:error, reason}, agent_id, cmd, ctx) do
     Logger.warning("CreateRunner on #{agent_id} for #{cmd.vm_name}: #{inspect(reason)}")
+
+    AgentFailures.record(
+      agent_id,
+      :command_failed,
+      cmd.vm_name,
+      nil,
+      "CreateRunner: #{inspect(reason)}"
+    )
+
+    RunHistory.runner_finished(cmd.vm_name, :command_failed, "CreateRunner: #{inspect(reason)}")
     cleanup(agent_id, cmd.vm_name, ctx)
   end
 

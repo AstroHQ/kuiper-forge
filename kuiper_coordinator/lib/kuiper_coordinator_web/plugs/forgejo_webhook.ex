@@ -20,7 +20,7 @@ defmodule KuiperCoordinatorWeb.Plugs.ForgejoWebhook do
   import Plug.Conn
   require Logger
 
-  alias KuiperCoordinator.{Jobs, Webhooks.Labels}
+  alias KuiperCoordinator.{Jobs, RunHistory, Webhooks.Labels}
   alias KuiperCoordinatorWeb.Plugs.GitHubWebhook
 
   @prefix "workflow_job_"
@@ -178,13 +178,16 @@ defmodule KuiperCoordinatorWeb.Plugs.ForgejoWebhook do
 
   defp handle_event("running", _event_type, p, config) do
     # Forgejo's payload names no runner and no start time
-    broadcast({:job_started, "#{Keyword.get(config, :forge, "forgejo")}:#{p.handle}", nil})
+    key = "#{Keyword.get(config, :forge, "forgejo")}:#{p.handle}"
+    RunHistory.job_started(key, nil, DateTime.utc_now())
+    broadcast({:job_started, key, nil})
     200
   end
 
   defp handle_event(status, _event_type, p, config) when status in @finished do
     key = "#{Keyword.get(config, :forge, "forgejo")}:#{p.handle}"
     Logger.debug("Forgejo job #{key} finished: #{status}")
+    RunHistory.job_completed(key, status, DateTime.utc_now())
     broadcast({:job_completed, key})
     200
   end

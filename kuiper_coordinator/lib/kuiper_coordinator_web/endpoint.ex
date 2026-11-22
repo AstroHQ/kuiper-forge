@@ -4,11 +4,16 @@ defmodule KuiperCoordinatorWeb.Endpoint do
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
   # Set :encryption_salt if you would also like to encrypt it.
+  # Signed and encrypted; SameSite=Strict and HttpOnly like the Rust admin cookie, plus Secure
+  # in prod (UI10: the Rust one has none). The admin session id lives in it (KuiperCoordinatorWeb.AdminAuth).
   @session_options [
     store: :cookie,
     key: "_kuiper_coordinator_key",
     signing_salt: "fPsy9E7P",
-    same_site: "Lax"
+    encryption_salt: "q3Vb7kLm",
+    same_site: "Strict",
+    http_only: true,
+    secure: Application.compile_env(:kuiper_coordinator, :secure_session_cookie, false)
   ]
 
   socket "/live", Phoenix.LiveView.Socket,
