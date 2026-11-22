@@ -2,3 +2,11 @@
 [tools]
 erlang = "28.5"
 elixir = "1.19.6-otp-28"
+
+[tasks.ngrok]
+description = "Start an ngrok tunnel to the Phoenix dev server (admin UI, webhooks)"
+run = "ngrok http ${KUIPER_HTTP_PORT:-${PORT:-9480}}"
+
+[tasks.ngrok-server]
+description = "Start the Phoenix dev server with the ngrok host as its public URL. Run `mise run ngrok` first, or set PHX_HOST"
+run = "scripts/ngrok-server.sh"

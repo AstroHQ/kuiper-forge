@@ -20,6 +20,18 @@ mix phx.server     # http://localhost:9480 (KUIPER_HTTP_PORT or PORT to change)
 mix test
 ```
 
+To reach the dev server from the internet (GitHub webhooks, the GitHub App
+setup redirect), use ngrok in two terminals:
+
+```sh
+mise run ngrok          # tunnel to the HTTP port
+mise run ngrok-server   # mix phx.server, with PHX_HOST set to the tunnel's host
+```
+
+`ngrok-server` reads the host from the local ngrok agent, so it works with any
+ngrok account. Only HTTP goes through the tunnel; agents still connect to
+`localhost:9543`.
+
 ## Ports
 
 Two listeners, so it runs beside the Rust coordinator (9443):
