@@ -37,6 +37,19 @@ and `KUIPER_SERVER_CA_CERT` (the CA agents should trust) or
 `KUIPER_SERVER_USE_NATIVE_ROOTS=true`. Agent client certs are still verified
 against the coordinator CA.
 
+### Management socket
+
+`ManagementService` (`management.proto`: create, list and delete registration
+tokens; list and revoke agents) listens on a Unix socket, on by default with
+agent gRPC (`KUIPER_MANAGEMENT=true|false` overrides). It has no auth beyond the
+socket's permissions: the socket is 0600 and a directory it creates is 0700.
+The Rust coordinator uses `<data_dir>/coordinator.sock`, so Phoenix defaults to
+`<data_dir>/phoenix-coordinator.sock` (`KUIPER_MANAGEMENT_SOCKET` to change it)
+and refuses to start on a socket something still answers on; a stale one is
+replaced. The Rust CLI always dials `<--data-dir>/coordinator.sock`, so to use
+it with Phoenix, point `KUIPER_MANAGEMENT_SOCKET` at `<dir>/coordinator.sock`
+in a directory of its own and run `kuiper-forge --data-dir <dir> token create`.
+
 Before committing, run `mix precommit` (compile with warnings as errors,
 format, test).
 
@@ -56,6 +69,22 @@ are encrypted with `KUIPER_ENCRYPTION_KEY`; lose it and they have to be entered
 again. A forge is checked against its API when it's saved and rejected if it
 doesn't work; every change reloads the fleet without a restart. With no forge
 stored, nothing is provisioned.
+
+## Admin UI
+
+Off unless `KUIPER_ADMIN=true`; served at `/admin` on the HTTP port, with the
+read-only JSON API at `/api/v1` (bearer `kfapi_` tokens made on the API tokens
+page). Create the first user with `KUIPER_ADMIN_PASSWORD=... bin/kuiper_coordinator
+eval 'KuiperCoordinator.Release.create_admin("admin")'`.
+
+- `KUIPER_ADMIN_SESSION_TIMEOUT`: session lifetime in seconds (3600), never extended.
+- `KUIPER_COORDINATOR_URL`: agent-facing URL put in registration bundles.
+- `KUIPER_METRICS_RETENTION_DAYS`: run history kept for the metrics page (90).
+- `KUIPER_UPDATE_CHECK=false`: stop checking GitHub releases for newer agents
+  (on by default; agents behind the newest release get an "available" badge).
+
+For mock metrics history in dev: `mix run priv/repo/seed_metrics.exs [--days 7]`
+(`--clear` removes it again).
 
 ## Protos
 

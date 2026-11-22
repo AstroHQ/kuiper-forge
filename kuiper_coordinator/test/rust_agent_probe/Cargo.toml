@@ -1,5 +1,7 @@
 # A real kuiper-agent-lib agent for the Phoenix coordinator's integration test
-# (test/kuiper_coordinator/agent_grpc/rust_agent_test.exs). Not part of the Rust workspace.
+# (test/kuiper_coordinator/agent_grpc/rust_agent_test.exs), and the Rust CLI's management
+# client (src/bin/kuiper-management-probe.rs, management/rust_cli_test.exs). Not part of the
+# Rust workspace.
 [package]
 name = "kuiper-agent-probe"
 version = "0.0.0"
@@ -16,6 +18,8 @@ rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false 
 tokio = { version = "1.41", features = ["full"] }
 tokio-stream = "0.1"
 url = "2"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.dev]

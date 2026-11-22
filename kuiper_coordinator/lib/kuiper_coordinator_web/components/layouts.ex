@@ -72,6 +72,54 @@ defmodule KuiperCoordinatorWeb.Layouts do
     """
   end
 
+  @doc "The admin UI shell: nav, the signed-in admin and sign out (Rust templates/admin/base)."
+  attr :flash, :map, required: true
+  attr :current_admin, :map, required: true
+  attr :active, :atom, default: nil, doc: "which nav item is current"
+  slot :inner_block, required: true
+
+  def admin(assigns) do
+    ~H"""
+    <header class="navbar bg-base-200 px-4 sm:px-6 lg:px-8 gap-4">
+      <div class="flex-1 flex items-center gap-6">
+        <.link navigate={~p"/admin/dashboard"} class="font-semibold">Kuiper Forge</.link>
+        <nav class="flex gap-1" id="admin-nav">
+          <.link
+            :for={{key, label, path} <- admin_nav()}
+            navigate={path}
+            class={["btn btn-ghost btn-sm", @active == key && "btn-active"]}
+          >
+            {label}
+          </.link>
+        </nav>
+      </div>
+      <div class="flex-none flex items-center gap-3">
+        <span class="text-sm opacity-70" id="current-admin">{@current_admin.username}</span>
+        <.theme_toggle />
+        <.link href={~p"/admin/logout"} method="delete" class="btn btn-sm">Sign out</.link>
+      </div>
+    </header>
+
+    <main class="px-4 py-8 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-6xl space-y-6">
+        {render_slot(@inner_block)}
+      </div>
+    </main>
+
+    <.flash_group flash={@flash} />
+    """
+  end
+
+  defp admin_nav do
+    [
+      {:dashboard, "Dashboard", ~p"/admin/dashboard"},
+      {:metrics, "Metrics", ~p"/admin/metrics"},
+      {:errors, "Errors", ~p"/admin/errors"},
+      {:users, "Users", ~p"/admin/users"},
+      {:api_tokens, "API tokens", ~p"/admin/api-tokens"}
+    ]
+  end
+
   @doc """
   Shows the flash group with standard titles and content.
 

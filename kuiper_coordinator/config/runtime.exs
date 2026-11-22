@@ -49,6 +49,16 @@ if config_env() != :test do
     server_trust_mode: System.get_env("KUIPER_SERVER_TRUST_MODE", "ca"),
     # the name agents and browsers use; the server cert is checked against it at startup
     server_hostname: System.get_env("KUIPER_SERVER_HOSTNAME") || System.get_env("PHX_HOST")
+
+  # Management gRPC (management.proto) for the CLI's token/agent commands, on a Unix socket.
+  # Its own path beside the Rust coordinator's <data_dir>/coordinator.sock (parity M6). On
+  # with agent gRPC unless KUIPER_MANAGEMENT says otherwise (tokens are for registration).
+  config :kuiper_coordinator, :management,
+    enabled:
+      System.get_env("KUIPER_MANAGEMENT", System.get_env("KUIPER_AGENT_GRPC", "false")) in ~w(true 1),
+    socket:
+      System.get_env("KUIPER_MANAGEMENT_SOCKET") ||
+        Path.join(data_dir, "phoenix-coordinator.sock")
 end
 
 # Forges and provisioning settings live in Postgres and are edited in the admin UI (D39); the
@@ -77,6 +87,26 @@ case {config_env(), System.get_env("KUIPER_ENCRYPTION_KEY")} do
       _ ->
         raise "KUIPER_ENCRYPTION_KEY must be 32 bytes, base64 (openssl rand -base64 32)"
     end
+end
+
+# Admin UI under /admin (parity C7: [admin] enabled false, session_timeout_secs 3600).
+# Create the first user with `bin/kuiper_coordinator eval 'KuiperCoordinator.Release.create_admin("name")'`
+# and KUIPER_ADMIN_PASSWORD set.
+if config_env() != :test do
+  config :kuiper_coordinator, :admin,
+    enabled: System.get_env("KUIPER_ADMIN", "false") in ~w(true 1),
+    session_timeout_secs:
+      String.to_integer(System.get_env("KUIPER_ADMIN_SESSION_TIMEOUT", "3600")),
+    # agent-facing URL in registration bundles (Rust [admin] coordinator_url)
+    coordinator_url: System.get_env("KUIPER_COORDINATOR_URL", "https://localhost:9543"),
+    # flag agents behind the newest GitHub release (Rust [admin] update_check, #75)
+    # (KuiperCoordinator.AgentUpdates.enabled_from_env/1)
+    update_check:
+      String.downcase(String.trim(System.get_env("KUIPER_UPDATE_CHECK", "true"))) not in ~w(0 false no off)
+
+  # run history for the metrics page (parity C7/MX7: [metrics] retention_days 90)
+  config :kuiper_coordinator, :metrics,
+    retention_days: String.to_integer(System.get_env("KUIPER_METRICS_RETENTION_DAYS", "90"))
 end
 
 if config_env() == :dev do
