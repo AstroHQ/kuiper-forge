@@ -53,6 +53,38 @@ defmodule KuiperCoordinator.Admin do
     end
   end
 
+  @setup_lock 0x6B75_6970_6572_0001
+
+  @doc """
+  First-run setup (D50): creates `username` only while there are no users. The count and the
+  insert run in one transaction under a Postgres advisory lock, so racing setups make exactly
+  one admin; the rest get `{:error, :setup_done}`.
+  """
+  def create_first_user(username, password, confirm) do
+    Repo.transaction(fn ->
+      Repo.query!("SELECT pg_advisory_xact_lock($1)", [@setup_lock])
+
+      with 0 <- user_count(),
+           {:ok, user} <- create_user(username, password, confirm) do
+        user
+      else
+        n when is_integer(n) -> Repo.rollback(:setup_done)
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
+  @doc "True while no admin user exists (the first-run setup page is open)."
+  def setup_needed?, do: not Repo.exists?(User)
+
+  @doc "A user-facing message for a `create_user/3` or `set_password/4` error."
+  def error_message(:invalid_username),
+    do: "Usernames are 1-64 characters: letters, digits, and . _ - @"
+
+  def error_message(:empty_password), do: "Password can't be empty"
+  def error_message(:password_mismatch), do: "Passwords don't match"
+  def error_message(:username_taken), do: "That username already exists"
+
   defp check_name(name), do: if(name =~ @name_re, do: :ok, else: {:error, :invalid_username})
 
   defp check_password(pw, _) when pw in [nil, ""], do: {:error, :empty_password}

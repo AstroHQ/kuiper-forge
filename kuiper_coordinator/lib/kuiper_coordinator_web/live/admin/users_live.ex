@@ -47,12 +47,10 @@ defmodule KuiperCoordinatorWeb.Admin.UsersLive do
     end
   end
 
-  defp message(:invalid_username),
-    do: "Usernames are 1-64 characters: letters, digits, and . _ - @"
+  defp message(reason)
+       when reason in [:invalid_username, :empty_password, :password_mismatch, :username_taken],
+       do: Admin.error_message(reason)
 
-  defp message(:empty_password), do: "Password can't be empty"
-  defp message(:password_mismatch), do: "Passwords don't match"
-  defp message(:username_taken), do: "That username already exists"
   defp message(:self), do: "You can't delete yourself"
   defp message(:last_admin), do: "Can't delete the last admin"
   defp message(:not_found), do: "No such user"

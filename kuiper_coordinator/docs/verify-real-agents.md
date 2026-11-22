@@ -91,6 +91,16 @@ openssl s_client -connect 127.0.0.1:9543 -servername "$PHX_HOST" \
 # want: 200, and "Verify return code: 0 (ok)"
 ```
 
+Then create the admin account right away: whoever reaches a fresh install first claims it.
+Open `http://<host>:9480/admin`; with no users yet it goes to a setup page (username, password,
+confirm) that creates the first admin and logs you in. Once an account exists that page is gone.
+If the browser can't reach the host, use the CLI instead (it also resets a lost password):
+
+```sh
+KUIPER_ADMIN_PASSWORD='...' $K/kuiper_coordinator eval 'KuiperCoordinator.Release.create_admin("admin")'
+KUIPER_ADMIN_PASSWORD='...' $K/kuiper_coordinator eval 'KuiperCoordinator.Release.reset_admin_password("admin")'
+```
+
 Handy commands on the running node (`$K/kuiper_coordinator rpc '...'`, same env loaded):
 
 ```sh

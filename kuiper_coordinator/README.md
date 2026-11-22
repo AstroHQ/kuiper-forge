@@ -74,8 +74,11 @@ stored, nothing is provisioned.
 
 Always on (login required); served at `/admin` on the HTTP port, with the
 read-only JSON API at `/api/v1` (bearer `kfapi_` tokens made on the API tokens
-page). Create the first user with `KUIPER_ADMIN_PASSWORD=... bin/kuiper_coordinator
-eval 'KuiperCoordinator.Release.create_admin("admin")'`.
+page). On a fresh install, with no admin users yet, every `/admin` page goes to
+`/admin/setup`, which creates the first account and logs it in; once any user exists that page
+is gone (404). The CLI stays for recovery: `KUIPER_ADMIN_PASSWORD=... bin/kuiper_coordinator
+eval 'KuiperCoordinator.Release.create_admin("admin")'` (and `reset_admin_password/1`,
+`list_admins/0`).
 
 - `KUIPER_ADMIN_SESSION_TIMEOUT`: session lifetime in seconds (3600), never extended.
 - `KUIPER_COORDINATOR_URL`: agent-facing URL put in registration bundles.
