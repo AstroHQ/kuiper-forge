@@ -44,6 +44,7 @@ openssl x509 -req -in "$work/server.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key
   -CAcreateserial -days 1 -extfile "$work/ext" -out "$work/server.crt" 2>/dev/null
 
 export SECRET_KEY_BASE="$(openssl rand -base64 48)"
+export KUIPER_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 export PHX_HOST=localhost PORT="$http_port"
 export KUIPER_AGENT_GRPC=true KUIPER_AGENT_PORT="$agent_port" KUIPER_DATA_DIR="$work"
 export KUIPER_CA_CERT="$work/ca.crt" KUIPER_CA_KEY="$work/ca.key"

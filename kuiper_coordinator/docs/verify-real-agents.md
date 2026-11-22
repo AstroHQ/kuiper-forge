@@ -55,6 +55,7 @@ access to the Rust coordinator's CA and server key):
 ```sh
 DATABASE_URL=ecto://kuiper_phoenix:change-me@localhost/kuiper_phoenix
 SECRET_KEY_BASE=<output of: openssl rand -base64 48>
+KUIPER_ENCRYPTION_KEY=<output of: openssl rand -base64 32>   # encrypts stored forge secrets; keep it, a new key can't read them
 PHX_HOST=coordinator.example.com          # the name agents use; must match server.crt
 PORT=9480
 KUIPER_AGENT_GRPC=true
@@ -66,7 +67,7 @@ KUIPER_DATA_DIR=/var/lib/kuiper-forge     # ca.crt, ca.key, server.crt, server.k
 
 Forges (the GitHub App, Forgejo URL and token) and provisioning settings (mode, scope,
 required labels, poll interval, idle timeout) aren't env vars: they're stored in Postgres and
-set in the admin UI (see the README once the forge storage work lands). For the GitHub checks
+set in the admin UI (see the README). For the GitHub checks
 use fixed capacity; for the Forgejo checks, polling. Set the required labels to
 `self-hosted,phoenix-verify`, and use a GitHub scope or a repo that the Rust coordinator isn't
 also serving with webhooks for the same labels, or the two race for the job.
