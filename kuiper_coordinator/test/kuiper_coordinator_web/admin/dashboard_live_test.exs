@@ -132,7 +132,7 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     error = view |> element("#register-modal #register-error") |> render()
     assert error =~ "Couldn&#39;t build the registration bundle"
     assert error =~ "cannot read server CA certificate"
-    refute has_element?(view, "#register-modal #register-command")
+    refute has_element?(view, "#register-modal #register-token")
     assert Process.alive?(view.pid)
     assert render(view) =~ "No pending tokens"
     assert Agents.list_registration_tokens() == []
@@ -141,7 +141,7 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     refute has_element?(view, "#register-modal")
   end
 
-  test "Register agent opens a modal with the kfr1_ bundle in a copyable command", %{conn: conn} do
+  test "Register agent opens a modal with just the kfr1_ bundle to copy", %{conn: conn} do
     {ca_cert, ca_key} = KuiperCoordinator.AgentGrpcCase.fixture_ca()
     KuiperCoordinator.CA.install!(ca_cert, ca_key)
     {:ok, view, html} = live(conn, ~p"/admin/dashboard")
@@ -155,17 +155,24 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     assert has_element?(view, "#register-modal #register-box.modal-box[phx-mounted]")
     assert has_element?(view, "#register-box #register-box-start[tabindex]")
 
-    command = view |> element("#register-modal #register-command") |> render()
+    shown = view |> element("#register-modal #register-token") |> render()
 
-    [_, bundle] =
-      Regex.run(~r/kuiper-tart-agent register &#39;(kfr1_[A-Za-z0-9_-]+)&#39;/, command)
+    # the bundle alone is what Copy takes: no command around it, no agent assumed
+    [_, bundle] = Regex.run(~r/>\s*(kfr1_[A-Za-z0-9_-]+)\s*</, shown)
 
     # wraps inside the modal instead of squeezing into a column or running off the edge
-    assert command =~ ~r/class="[^"]*break-all/
-    assert command =~ ~r/class="[^"]*whitespace-pre-wrap/
-    assert has_element?(view, "#register-modal", "kuiper-proxmox-agent")
-    assert has_element?(view, "#register-modal", "kuiper-libvirt-agent")
-    assert has_element?(view, "#register-copy[phx-hook][data-copy-target='#register-command']")
+    assert shown =~ ~r/class="[^"]*break-all/
+    assert shown =~ ~r/class="[^"]*whitespace-pre-wrap/
+    assert has_element?(view, "#register-copy[phx-hook][data-copy-target='#register-token']")
+
+    # every kind of agent gets an example, with a placeholder where the token goes
+    examples = view |> element("#register-examples") |> render()
+
+    for agent <- ~w(tart proxmox libvirt) do
+      assert examples =~ "kuiper-#{agent}-agent register &lt;token&gt;"
+    end
+
+    refute examples =~ bundle
     # the hook owns the label, so a refresh patch can't undo "Copied"
     assert has_element?(view, "#register-copy #register-copy-label[phx-update='ignore']", "Copy")
 
@@ -191,8 +198,8 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     {:ok, view, _} = live(conn, ~p"/admin/dashboard")
 
     view |> element("#register-agent") |> render_click()
-    command = view |> element("#register-command") |> render()
-    [_, bundle] = Regex.run(~r/(kfr1_[A-Za-z0-9_-]+)/, command)
+    shown = view |> element("#register-token") |> render()
+    [_, bundle] = Regex.run(~r/(kfr1_[A-Za-z0-9_-]+)/, shown)
 
     html = view |> element("#register-close") |> render_click()
     refute has_element?(view, "#register-modal")
@@ -204,7 +211,7 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
 
     # reopening makes a fresh token; the old bundle never comes back
     view |> element("#register-agent") |> render_click()
-    refute view |> element("#register-command") |> render() =~ bundle
+    refute view |> element("#register-token") |> render() =~ bundle
 
     view |> element("#register-modal") |> render_keydown(%{"key" => "Escape"})
     refute has_element?(view, "#register-modal")

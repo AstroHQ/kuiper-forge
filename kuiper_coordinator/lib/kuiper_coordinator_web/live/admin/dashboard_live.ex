@@ -2,8 +2,8 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
   @moduledoc """
   Admin dashboard (parity UI2, UI3): counts, capacity, pending jobs, agents with their
   availability switch (#40), and registration tokens. Register agent opens a modal that
-  creates a token and shows its `kfr1_` bundle once, as a copyable command (D60); closing the
-  modal drops the bundle. Pending tokens can be deleted. It refreshes on agent events and every few seconds for DB-side changes.
+  creates a token and shows its `kfr1_` bundle once, on its own, to copy (D60), with an example
+  command for each kind of agent below it; closing the modal drops the bundle. Pending tokens can be deleted. It refreshes on agent events and every few seconds for DB-side changes.
   """
   use KuiperCoordinatorWeb, :live_view
 
@@ -304,16 +304,14 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
             Registration token created. Copy it now; it won't be shown again.
             It registers one agent and expires in an hour.
           </p>
-          <p class="text-sm font-semibold">Run on the agent:</p>
           <pre
-            id="register-command"
+            id="register-token"
             class="bg-base-200 rounded-box p-3 text-xs font-mono whitespace-pre-wrap break-all select-all"
-          >kuiper-tart-agent register '{@bundle}'</pre>
-          <p class="text-xs opacity-70">
-            Or use <code>kuiper-proxmox-agent</code>
-            or <code>kuiper-libvirt-agent</code>
-            in place of <code>kuiper-tart-agent</code>.
-          </p>
+          >{@bundle}</pre>
+          <div id="register-examples" class="text-xs opacity-70 space-y-1">
+            <p>Give it to the agent you're registering, for example:</p>
+            <pre :for={agent <- ~w(tart proxmox libvirt)} class="font-mono">kuiper-{agent}-agent register &lt;token&gt;</pre>
+          </div>
         </div>
         <div class="modal-action">
           <button
@@ -322,7 +320,7 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
             type="button"
             class="btn btn-primary"
             phx-hook=".CopyText"
-            data-copy-target="#register-command"
+            data-copy-target="#register-token"
           >
             <.icon name="hero-clipboard-document" class="size-4" />
             <span id="register-copy-label" phx-update="ignore">Copy</span>
