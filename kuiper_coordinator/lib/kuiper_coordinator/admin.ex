@@ -7,7 +7,10 @@ defmodule KuiperCoordinator.Admin do
   never extended. A login for an unknown user still runs a hash, so timing doesn't tell which
   names exist.
 
-  Settings: `config :kuiper_coordinator, :admin, enabled: bool, session_timeout_secs: int`.
+  Always on (D49: a web app always has its UI); login is still required.
+
+  Settings: `config :kuiper_coordinator, :admin, session_timeout_secs: int, coordinator_url: url,
+  update_check: bool`.
   """
   import Ecto.Query
 
@@ -17,7 +20,6 @@ defmodule KuiperCoordinator.Admin do
   @name_re ~r/\A[A-Za-z0-9._\-@]{1,64}\z/
 
   def settings, do: Application.get_env(:kuiper_coordinator, :admin, [])
-  def enabled?, do: Keyword.get(settings(), :enabled, false)
   def session_timeout, do: Keyword.get(settings(), :session_timeout_secs, 3600)
 
   @doc "Agent-facing URL put in registration bundles (Rust [admin] coordinator_url)."
