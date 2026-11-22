@@ -4,14 +4,17 @@ defmodule KuiperCoordinatorWeb.Endpoint do
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
   # Set :encryption_salt if you would also like to encrypt it.
-  # Signed and encrypted; SameSite=Strict and HttpOnly like the Rust admin cookie, plus Secure
-  # in prod (UI10: the Rust one has none). The admin session id lives in it (KuiperCoordinatorWeb.AdminAuth).
+  # Signed, encrypted and HttpOnly like the Rust admin cookie, plus Secure in prod (UI10: the Rust
+  # one has none). The admin session id lives in it (KuiperCoordinatorWeb.AdminAuth).
+  #
+  # SameSite is Lax, *not* Strict like the Rust one: GitHub's redirect back in the App manifest flow
+  # (D40) is a cross-site navigation, and a browser doesn't send a Strict cookie with it
   @session_options [
     store: :cookie,
     key: "_kuiper_coordinator_key",
     signing_salt: "fPsy9E7P",
     encryption_salt: "q3Vb7kLm",
-    same_site: "Strict",
+    same_site: "Lax",
     http_only: true,
     secure: Application.compile_env(:kuiper_coordinator, :secure_session_cookie, false)
   ]

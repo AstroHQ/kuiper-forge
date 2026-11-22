@@ -51,6 +51,33 @@ defmodule KuiperCoordinatorWeb.AdminAuthTest do
     assert html =~ "alice"
   end
 
+  # GitHub's redirect back in the App manifest flow is a cross-site navigation, a Strict cookie
+  # isn't sent with it and the admin ends up at the login page with the code gone
+  test "the session cookie is SameSite=Lax and HttpOnly", %{conn: conn} do
+    cookie = login(conn).resp_cookies["_kuiper_coordinator_key"]
+    assert cookie.same_site == "Lax"
+    assert cookie.http_only
+  end
+
+  test "login goes back to the page that asked for it, query and all", %{conn: conn} do
+    callback = "/admin/forges/github/callback?code=abc123&state=SFMy.g2gD_-.sig"
+    conn = get(conn, callback)
+    assert redirected_to(conn, 303) == ~p"/admin/login"
+
+    conn = conn |> recycle() |> login()
+    assert redirected_to(conn, 303) == callback
+
+    # one use: the next login is back to the dashboard
+    conn = conn |> recycle() |> delete(~p"/admin/logout") |> recycle() |> login()
+    assert redirected_to(conn, 303) == ~p"/admin/dashboard"
+  end
+
+  test "a path `redirect/2` would refuse isn't kept, login goes to the dashboard", %{conn: conn} do
+    conn = get(conn, "/admin/agents/a%2Fb")
+    assert redirected_to(conn, 303) == ~p"/admin/login"
+    assert conn |> recycle() |> login() |> redirected_to(303) == ~p"/admin/dashboard"
+  end
+
   test "a wrong password or unknown user shows one generic error", %{conn: conn} do
     for {u, p} <- [{"alice", "nope"}, {"mallory", "correct horse"}] do
       html = conn |> login(u, p) |> html_response(200)

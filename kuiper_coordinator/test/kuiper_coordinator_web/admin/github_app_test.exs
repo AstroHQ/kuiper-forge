@@ -160,6 +160,27 @@ defmodule KuiperCoordinatorWeb.Admin.GitHubAppTest do
     assert pem =~ "BEGIN RSA PRIVATE KEY"
   end
 
+  # the session can run out while the admin is on GitHub; the code must survive the login
+  test "a callback that arrives logged out carries on after the login", %{alice: alice} do
+    test_pid = self()
+    stub_github(&created/1)
+    Process.put(:test_pid, test_pid)
+    state = GitHubManifest.sign_state(KuiperCoordinatorWeb.Endpoint, %{"admin" => alice.id})
+
+    conn = get(build_conn(), ~p"/admin/forges/github/callback?#{%{code: "abc123", state: state}}")
+    assert redirected_to(conn, 303) == "/admin/login"
+    refute_received {:saved, _, _}
+
+    conn =
+      conn
+      |> recycle()
+      |> post(~p"/admin/login", %{"username" => "alice", "password" => "correct horse"})
+
+    conn = get(recycle(conn), redirected_to(conn, 303))
+    assert redirected_to(conn) == "https://github.com/apps/kuiper-forge/installations/new"
+    assert_received {:saved, %{app_id: 4242}, "alice"}
+  end
+
   test "callback refuses a forged, foreign or missing state without calling GitHub", %{
     conn: conn
   } do
