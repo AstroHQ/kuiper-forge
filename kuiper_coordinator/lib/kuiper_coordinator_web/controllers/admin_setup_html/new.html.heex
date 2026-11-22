@@ -10,29 +10,25 @@
         {@error}
       </div>
 
-      <.form for={%{}} as={:setup} action={~p"/admin/setup"} id="setup-form" class="space-y-2">
+      <.form for={@form} action={~p"/admin/setup"} id="setup-form" class="space-y-2">
         <.input
+          field={@form[:username]}
           type="text"
-          name="username"
-          id="username"
           label="Username"
-          value={@username}
           autocomplete="username"
           required
         />
         <.input
+          field={@form[:password]}
           type="password"
-          name="password"
-          id="password"
           label="Password"
           value=""
           autocomplete="new-password"
           required
         />
         <.input
+          field={@form[:confirm]}
           type="password"
-          name="confirm"
-          id="confirm"
           label="Confirm password"
           value=""
           autocomplete="new-password"

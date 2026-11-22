@@ -33,45 +33,62 @@ defmodule KuiperCoordinator.Admin do
 
   def user_count, do: Repo.aggregate(User, :count)
 
-  @doc """
-  Creates a user. The name is trimmed, then must be 1-64 of `[A-Za-z0-9._-@]` (safe in HTML,
-  URLs and logs, user_routes.rs); the password must be non-empty and match `confirm`.
-  """
-  def create_user(username, password, confirm) do
-    username = String.trim(username || "")
-
-    with :ok <- check_name(username),
-         :ok <- check_password(password, confirm) do
-      %User{username: username, password_hash: Argon2.hash_pwd_salt(password)}
-      |> Ecto.Changeset.change()
-      |> Ecto.Changeset.unique_constraint(:username)
-      |> Repo.insert()
-      |> case do
-        {:ok, user} -> {:ok, user}
-        {:error, %Ecto.Changeset{}} -> {:error, :username_taken}
-      end
-    end
-  end
-
   @setup_lock 0x6B75_6970_6572_0001
 
   @doc """
+  Creates a user. The name is trimmed, then must be 1-64 of `[A-Za-z0-9._-@]` (safe in HTML,
+  URLs and logs, user_routes.rs); the password must be non-empty and match `confirm`.
+
+  Every user insert (this, the CLI's `Release.create_admin/1`, and `create_first_user/3`) runs
+  under the first-user advisory lock, so a first-run setup can't miss a create that's still
+  uncommitted and make a second "first" admin.
+  """
+  def create_user(username, password, confirm) do
+    with {:ok, username, hash} <- prepare_user(username, password, confirm) do
+      Repo.transaction(fn ->
+        take_setup_lock()
+        insert_user(username, hash)
+      end)
+    end
+  end
+
+  @doc """
   First-run setup (D50): creates `username` only while there are no users. The count and the
-  insert run in one transaction under a Postgres advisory lock, so racing setups make exactly
-  one admin; the rest get `{:error, :setup_done}`.
+  insert run in one transaction under the same advisory lock as `create_user/3`, so racing
+  setups (or a setup racing the CLI) make exactly one first admin; the rest get
+  `{:error, :setup_done}`.
   """
   def create_first_user(username, password, confirm) do
-    Repo.transaction(fn ->
-      Repo.query!("SELECT pg_advisory_xact_lock($1)", [@setup_lock])
+    with {:ok, username, hash} <- prepare_user(username, password, confirm) do
+      Repo.transaction(fn ->
+        take_setup_lock()
+        if user_count() > 0, do: Repo.rollback(:setup_done), else: insert_user(username, hash)
+      end)
+    end
+  end
 
-      with 0 <- user_count(),
-           {:ok, user} <- create_user(username, password, confirm) do
-        user
-      else
-        n when is_integer(n) -> Repo.rollback(:setup_done)
-        {:error, reason} -> Repo.rollback(reason)
-      end
-    end)
+  # Validates, then hashes outside the lock (Argon2 is slow). Non-string input is refused, not
+  # crashed on: the setup form is unauthenticated.
+  defp prepare_user(username, password, confirm) do
+    username = if is_binary(username), do: String.trim(username), else: username
+
+    with :ok <- check_name(username),
+         :ok <- check_password(password, confirm) do
+      {:ok, username, Argon2.hash_pwd_salt(password)}
+    end
+  end
+
+  defp take_setup_lock, do: Repo.query!("SELECT pg_advisory_xact_lock($1)", [@setup_lock])
+
+  defp insert_user(username, hash) do
+    %User{username: username, password_hash: hash}
+    |> Ecto.Changeset.change()
+    |> Ecto.Changeset.unique_constraint(:username)
+    |> Repo.insert()
+    |> case do
+      {:ok, user} -> user
+      {:error, %Ecto.Changeset{}} -> Repo.rollback(:username_taken)
+    end
   end
 
   @doc "True while no admin user exists (the first-run setup page is open)."
@@ -85,9 +102,13 @@ defmodule KuiperCoordinator.Admin do
   def error_message(:password_mismatch), do: "Passwords don't match"
   def error_message(:username_taken), do: "That username already exists"
 
-  defp check_name(name), do: if(name =~ @name_re, do: :ok, else: {:error, :invalid_username})
+  defp check_name(name) when is_binary(name),
+    do: if(name =~ @name_re, do: :ok, else: {:error, :invalid_username})
+
+  defp check_name(_), do: {:error, :invalid_username}
 
   defp check_password(pw, _) when pw in [nil, ""], do: {:error, :empty_password}
+  defp check_password(pw, _) when not is_binary(pw), do: {:error, :empty_password}
   defp check_password(pw, pw), do: :ok
   defp check_password(_, _), do: {:error, :password_mismatch}
 
