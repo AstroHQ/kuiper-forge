@@ -8,16 +8,29 @@ defmodule KuiperCoordinator.Forge.RunnerScope do
           {:org, String.t()} | {:repo, String.t(), String.t()} | {:user, String.t()} | :instance
 
   @spec parse(String.t()) :: {:ok, t()} | {:error, String.t()}
-  def parse("*"), do: {:ok, :instance}
-  def parse("@" <> name) when name != "", do: {:ok, {:user, name}}
-
+  # Same rules as Rust's ForgejoForgeConfig::runner_scopes (config.rs): "@", "@me/repo" and
+  # "*/repo" are errors, not a strange org, user or repo.
   def parse(scope) when is_binary(scope) do
     case String.split(scope, "/") do
-      [org] when org != "" -> {:ok, {:org, org}}
-      [owner, repo] when owner != "" and repo != "" -> {:ok, {:repo, owner, repo}}
-      _ -> {:error, "invalid runner scope #{inspect(scope)}: use org, owner/repo, @user or *"}
+      ["*"] ->
+        {:ok, :instance}
+
+      ["@" <> name] when name != "" ->
+        {:ok, {:user, name}}
+
+      [org] when org != "" ->
+        if String.starts_with?(org, "@"), do: invalid(scope), else: {:ok, {:org, org}}
+
+      [owner, repo] when owner not in ["", "*"] and repo != "" ->
+        if String.starts_with?(owner, "@"), do: invalid(scope), else: {:ok, {:repo, owner, repo}}
+
+      _ ->
+        invalid(scope)
     end
   end
+
+  defp invalid(scope),
+    do: {:error, "invalid runner scope #{inspect(scope)}: use org, owner/repo, @user or *"}
 
   @doc "The config string for a scope; `parse/1` reads it back."
   @spec to_string(t()) :: String.t()

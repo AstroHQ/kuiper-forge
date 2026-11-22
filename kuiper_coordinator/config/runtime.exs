@@ -51,6 +51,34 @@ if config_env() != :test do
     server_hostname: System.get_env("KUIPER_SERVER_HOSTNAME") || System.get_env("PHX_HOST")
 end
 
+# Forges and provisioning settings live in Postgres and are edited in the admin UI (D39); the
+# secrets among them (GitHub App keys, Forgejo tokens, webhook secrets) are encrypted with
+# KUIPER_ENCRYPTION_KEY (32 bytes, base64: openssl rand -base64 32). Required in prod; dev
+# falls back to a fixed key, tests set their own.
+case {config_env(), System.get_env("KUIPER_ENCRYPTION_KEY")} do
+  {:test, _} ->
+    :ok
+
+  {env, key} when key in [nil, ""] and env != :prod ->
+    config :kuiper_coordinator, KuiperCoordinator.Vault,
+      key: Base.decode64!("ZGV2LW9ubHkta2V5LWRvLW5vdC11c2UtaW4tcHJvZCE=")
+
+  {:prod, key} when key in [nil, ""] ->
+    raise """
+    environment variable KUIPER_ENCRYPTION_KEY is missing.
+    It encrypts stored forge secrets; make one with: openssl rand -base64 32
+    """
+
+  {_, key} ->
+    case Base.decode64(String.trim(key)) do
+      {:ok, bytes} when byte_size(bytes) == 32 ->
+        config :kuiper_coordinator, KuiperCoordinator.Vault, key: bytes
+
+      _ ->
+        raise "KUIPER_ENCRYPTION_KEY must be 32 bytes, base64 (openssl rand -base64 32)"
+    end
+end
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint,
