@@ -83,6 +83,6 @@ case "$bundle" in
   *) echo "rpc didn't print a registration bundle: $bundle"; cat "$work/server.log"; exit 1 ;;
 esac
 
-# the runbook's switch-off step, until the admin UI's switch lands
+# rpc can reach the fleet's PubSub (what the switch-off step broadcasts; no agent exists here to switch off)
 "$rel/bin/kuiper_coordinator" rpc 'Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "agents", {:agent_availability, "agent_smoke", false})'
 echo SMOKE_OK

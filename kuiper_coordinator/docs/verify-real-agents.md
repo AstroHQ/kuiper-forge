@@ -96,9 +96,10 @@ Handy commands on the running node (`$K/kuiper_coordinator rpc '...'`, same env 
 ```sh
 # a registration bundle (single use, 1 h)
 $K/kuiper_coordinator rpc '{:ok, t} = KuiperCoordinator.Agents.create_registration_token(3600); IO.puts(KuiperCoordinator.Agents.registration_bundle(t, "https://coordinator.example.com:9543"))'
-# switch an agent off (no new runners, idle ones drained), and on again; the admin UI's switch replaces this once it lands
-$K/kuiper_coordinator rpc 'Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "agents", {:agent_availability, "AGENT_ID", false})'
-$K/kuiper_coordinator rpc 'Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "agents", {:agent_availability, "AGENT_ID", true})'
+# switch an agent off (no new runners, idle ones drained), and on again; same as the
+# admin UI's Available switch on the dashboard or the agent's page
+$K/kuiper_coordinator rpc 'IO.inspect(KuiperCoordinator.Agents.set_unavailable("AGENT_ID", true))'
+$K/kuiper_coordinator rpc 'IO.inspect(KuiperCoordinator.Agents.set_unavailable("AGENT_ID", false))'
 # revoke
 $K/kuiper_coordinator rpc 'IO.inspect(KuiperCoordinator.Agents.revoke_agent("AGENT_ID"))'
 ```
