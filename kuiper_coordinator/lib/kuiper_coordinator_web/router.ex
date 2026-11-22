@@ -2,7 +2,7 @@ defmodule KuiperCoordinatorWeb.Router do
   use KuiperCoordinatorWeb, :router
 
   import KuiperCoordinatorWeb.AdminAuth,
-    only: [require_admin_enabled: 2, fetch_admin: 2, require_admin: 2]
+    only: [fetch_admin: 2, require_admin: 2]
 
   pipeline :browser do
     plug :accepts, ["html"]
@@ -14,7 +14,6 @@ defmodule KuiperCoordinatorWeb.Router do
   end
 
   pipeline :admin do
-    plug :require_admin_enabled
     plug :fetch_admin
   end
 
@@ -28,7 +27,7 @@ defmodule KuiperCoordinatorWeb.Router do
     get "/", PageController, :home
   end
 
-  # Admin UI (parity section 6): only when admin is enabled.
+  # Admin UI (parity section 6): always served (D49); login required.
   scope "/admin", KuiperCoordinatorWeb do
     pipe_through [:browser, :admin]
 
@@ -60,7 +59,6 @@ defmodule KuiperCoordinatorWeb.Router do
   end
 
   pipeline :api_token do
-    plug :require_admin_enabled
     plug KuiperCoordinatorWeb.Plugs.ApiAuth
   end
 

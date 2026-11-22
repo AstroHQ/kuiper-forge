@@ -16,7 +16,6 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
     old = Application.get_env(:kuiper_coordinator, :admin)
 
     Application.put_env(:kuiper_coordinator, :admin,
-      enabled: true,
       session_timeout_secs: 3600,
       coordinator_url: "https://ci.example:9543"
     )

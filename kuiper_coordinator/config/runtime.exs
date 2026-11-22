@@ -89,12 +89,11 @@ case {config_env(), System.get_env("KUIPER_ENCRYPTION_KEY")} do
     end
 end
 
-# Admin UI under /admin (parity C7: [admin] enabled false, session_timeout_secs 3600).
+# Admin UI under /admin, always on (D49; Rust's [admin] enabled switch is dropped).
 # Create the first user with `bin/kuiper_coordinator eval 'KuiperCoordinator.Release.create_admin("name")'`
 # and KUIPER_ADMIN_PASSWORD set.
 if config_env() != :test do
   config :kuiper_coordinator, :admin,
-    enabled: System.get_env("KUIPER_ADMIN", "false") in ~w(true 1),
     session_timeout_secs:
       String.to_integer(System.get_env("KUIPER_ADMIN_SESSION_TIMEOUT", "3600")),
     # agent-facing URL in registration bundles (Rust [admin] coordinator_url)
