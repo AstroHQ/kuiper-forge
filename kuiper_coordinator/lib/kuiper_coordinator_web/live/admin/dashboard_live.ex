@@ -315,7 +315,8 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
             phx-hook=".CopyText"
             data-copy-target="#register-command"
           >
-            <.icon name="hero-clipboard-document" class="size-4" /> Copy
+            <.icon name="hero-clipboard-document" class="size-4" />
+            <span id="register-copy-label" phx-update="ignore">Copy</span>
           </button>
           <button id="register-close" type="button" class="btn" phx-click="close_register">
             Close
@@ -325,18 +326,21 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
       <div class="modal-backdrop" phx-click="close_register"></div>
     </div>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyText">
+      // the label sits in a phx-update="ignore" span, so a refresh patch mid-"Copied" leaves it be
       export default {
         mounted() {
+          const label = this.el.querySelector("[phx-update=ignore]")
           this.el.addEventListener("click", () => {
             const target = document.querySelector(this.el.dataset.copyTarget)
             if (!target) return
-            const label = this.el.innerHTML
             navigator.clipboard.writeText(target.innerText.trim()).then(() => {
-              this.el.textContent = "Copied"
-              setTimeout(() => { this.el.innerHTML = label }, 1500)
+              label.textContent = "Copied"
+              clearTimeout(this.reset)
+              this.reset = setTimeout(() => { label.textContent = "Copy" }, 1500)
             })
           })
-        }
+        },
+        destroyed() { clearTimeout(this.reset) }
       }
     </script>
     """

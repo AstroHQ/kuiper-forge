@@ -163,6 +163,8 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     assert has_element?(view, "#register-modal", "kuiper-proxmox-agent")
     assert has_element?(view, "#register-modal", "kuiper-libvirt-agent")
     assert has_element?(view, "#register-copy[phx-hook][data-copy-target='#register-command']")
+    # the hook owns the label, so a refresh patch can't undo "Copied"
+    assert has_element?(view, "#register-copy #register-copy-label[phx-update='ignore']", "Copy")
 
     [%{token: token, created_by: "alice"}] = Agents.list_registration_tokens()
 
