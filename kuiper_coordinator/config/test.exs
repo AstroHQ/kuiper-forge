@@ -42,3 +42,10 @@ config :phoenix,
   sort_verified_routes_query_params: true
 
 config :kuiper_coordinator, :agent_dispatch, KuiperCoordinator.AgentDispatchMock
+
+# Stored secrets (D39): a fixed test key; forges aren't checked live on save, and the fleet
+# loader is off (tests start their own manager and loader)
+config :kuiper_coordinator, KuiperCoordinator.Vault,
+  key: Base.decode64!("3Jnb0hZiX0QaVE8EmUhx4q0mqYbnbYp9G6u4C2AbmP0=")
+
+config :kuiper_coordinator, validate_forges_on_save: false, fleet_loader: false

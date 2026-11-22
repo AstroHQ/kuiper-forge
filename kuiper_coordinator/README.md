@@ -40,6 +40,23 @@ against the coordinator CA.
 Before committing, run `mix precommit` (compile with warnings as errors,
 format, test).
 
+## Configuration
+
+Env vars only bootstrap the app: `DATABASE_URL`, `SECRET_KEY_BASE`, `PHX_HOST`,
+`PORT` (HTTP, default 9480), `KUIPER_AGENT_GRPC` / `KUIPER_AGENT_PORT` (agent
+gRPC, default 9543), the CA and server cert paths (`KUIPER_DATA_DIR` or
+`KUIPER_CA_CERT`, `KUIPER_CA_KEY`, `KUIPER_SERVER_CERT`, `KUIPER_SERVER_KEY`),
+and `KUIPER_ENCRYPTION_KEY` (required in prod; `openssl rand -base64 32`).
+
+Forges (GitHub Apps, Forgejo instances) and provisioning settings (mode, runner
+scope and group, poll interval, idle timeout, required labels, label mappings)
+are stored in Postgres and edited in the admin UI (`KuiperCoordinator.Forges`).
+Secrets among them (GitHub App private keys, Forgejo tokens, webhook secrets)
+are encrypted with `KUIPER_ENCRYPTION_KEY`; lose it and they have to be entered
+again. A forge is checked against its API when it's saved and rejected if it
+doesn't work; every change reloads the fleet without a restart. With no forge
+stored, nothing is provisioned.
+
 ## Protos
 
 `../kuiper-agent-proto/proto/{agent,management}.proto` is the contract with the

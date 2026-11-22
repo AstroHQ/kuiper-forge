@@ -11,6 +11,7 @@ defmodule KuiperCoordinator.Application do
       [
         KuiperCoordinatorWeb.Telemetry,
         KuiperCoordinator.Repo,
+        KuiperCoordinator.Vault,
         {DNSCluster,
          query: Application.get_env(:kuiper_coordinator, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: KuiperCoordinator.PubSub},
@@ -42,11 +43,10 @@ defmodule KuiperCoordinator.Application do
     :ok
   end
 
-  # Provisioning runs only once a fleet is configured (forges, mode).
+  # Provisioning runs from the forges stored in Postgres (D39); the loader starts and reloads
+  # the fleet manager. Off in tests, which start their own.
   defp fleet_child do
-    case Application.get_env(:kuiper_coordinator, :fleet) do
-      nil -> nil
-      opts -> {KuiperCoordinator.Fleet.Manager, opts}
-    end
+    if Application.get_env(:kuiper_coordinator, :fleet_loader, true),
+      do: KuiperCoordinator.Fleet.Loader
   end
 end
