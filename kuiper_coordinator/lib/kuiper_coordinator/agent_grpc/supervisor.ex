@@ -3,7 +3,8 @@ defmodule KuiperCoordinator.AgentGrpc.Supervisor do
   The agent gRPC listener (RegistrationService, AgentService) on its own TLS port
   (`:port`, default 9543), separate from the Phoenix endpoint's HTTP port (D21-D23).
 
-  Checks the cert files and loads the CA (startup fails loudly when they're unusable, A4), then
+  Makes the CA and server cert on first launch when they're missing
+  (`KuiperCoordinator.AgentGrpc.Bootstrap`, D57), checks the cert files and loads the CA (startup fails loudly when they're unusable, A4), then
   starts the gRPC server. The client cert is optional at the TLS layer (RegistrationService runs
   before an agent has one) and enforced per RPC.
   """
@@ -13,6 +14,7 @@ defmodule KuiperCoordinator.AgentGrpc.Supervisor do
 
   @impl true
   def init(opts) do
+    KuiperCoordinator.AgentGrpc.Bootstrap.ensure!(opts)
     ssl = KuiperCoordinator.AgentGrpc.TLS.ssl_opts!(opts)
     KuiperCoordinator.CA.install!(Keyword.fetch!(opts, :ca_cert), Keyword.fetch!(opts, :ca_key))
 

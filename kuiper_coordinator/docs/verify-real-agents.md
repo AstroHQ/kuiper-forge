@@ -4,8 +4,8 @@ How to run the Phoenix coordinator next to the Rust coordinator on the same CA a
 tart, one Proxmox and one libvirt agent at it, unchanged, then check it behaves like Rust. The
 IDs in the checklists (A8, S9, F16, ...) are rows of [docs/phoenix-parity.md](../../docs/phoenix-parity.md).
 
-`scripts/release_smoke.sh` (CI job "Release smoke test") runs steps 2-4 against a throwaway CA,
-so if this page and the app drift apart, CI fails.
+`scripts/release_smoke.sh` (CI job "Release smoke test") runs steps 2-4 from an empty data dir,
+where the first launch makes its own CA, so if this page and the app drift apart, CI fails.
 
 ## 1. What runs where
 
@@ -14,7 +14,7 @@ so if this page and the app drift apart, CI fails.
 | Agent gRPC (TLS) | 9443 | `KUIPER_AGENT_PORT`, 9543 |
 | HTTP (admin, webhooks) | its own | `PORT`, 9480 |
 | Database | its own | its own Postgres DB (`DATABASE_URL`) |
-| CA, server cert | `/var/lib/kuiper-forge/{ca,server}.{crt,key}` | the same files, read only |
+| CA, server cert | `/var/lib/kuiper-forge/{ca,server}.{crt,key}` | the same files, used as-is (or its own, made on first launch) |
 
 Both listen side by side; never put them on one port. An agent talks to one coordinator at a
 time: moving it to Phoenix and back is a re-register each way (section 5).
@@ -50,7 +50,8 @@ sudo -u postgres psql -c "CREATE DATABASE kuiper_phoenix OWNER kuiper_phoenix"
 ```
 
 `/etc/kuiper-phoenix.env` (mode 0600, readable by the user that runs it, who also needs read
-access to the Rust coordinator's CA and server key):
+access to the Rust coordinator's CA and server key, or, for a fresh install, write access to
+`KUIPER_DATA_DIR`):
 
 ```sh
 DATABASE_URL=ecto://kuiper_phoenix:change-me@localhost/kuiper_phoenix
@@ -58,12 +59,21 @@ SECRET_KEY_BASE=<output of: openssl rand -base64 48>
 KUIPER_ENCRYPTION_KEY=<output of: openssl rand -base64 32>   # encrypts stored forge secrets; keep it, a new key can't read them
 PHX_HOST=coordinator.example.com          # the name agents use; must match server.crt
 PORT=9480
-KUIPER_AGENT_GRPC=true
-KUIPER_AGENT_PORT=9543
+KUIPER_AGENT_PORT=9543                    # agent gRPC is on by default (KUIPER_AGENT_GRPC=false turns it off)
 KUIPER_DATA_DIR=/var/lib/kuiper-forge     # ca.crt, ca.key, server.crt, server.key: the Rust coordinator's
+# KUIPER_CA_ORG=Kuiper Forge              # only used when the first launch makes a CA
 # chain-mode server certs: KUIPER_SERVER_TRUST_MODE=chain plus KUIPER_SERVER_CA_CERT or
 # KUIPER_SERVER_USE_NATIVE_ROOTS=true, as set on the Rust side
 ```
+
+Certificates: to share certs with the Rust coordinator (this runbook, so agents registered
+with Rust stay valid), point `KUIPER_DATA_DIR` (or `KUIPER_CA_CERT`, `KUIPER_CA_KEY`,
+`KUIPER_SERVER_CERT`, `KUIPER_SERVER_KEY`) at its files; they're used as-is and never
+rewritten. On a fresh install there's nothing to do: when both `ca.crt` and `ca.key` are
+missing, the first launch makes a CA (P-256, 10 years, like `kuiper-forge ca init`), and when
+both `server.crt` and `server.key` are missing, a server cert from it for `PHX_HOST` (or
+`KUIPER_SERVER_HOSTNAME`) plus localhost and 127.0.0.1, 1 year. Keys are 0600, a data dir it
+makes is 0700, and each file is logged. Half a pair stops startup naming the missing file.
 
 Forges (the GitHub App, Forgejo URL and token) and provisioning settings (mode, scope,
 required labels, poll interval, idle timeout) aren't env vars: they're stored in Postgres and
@@ -82,7 +92,8 @@ $K/migrate
 $K/server            # foreground; or: $K/kuiper_coordinator daemon
 ```
 
-Check both listeners from another shell (the agent port must verify against the Rust CA):
+Check both listeners from another shell (the agent port must verify against the CA in
+`KUIPER_DATA_DIR`, the Rust one when shared):
 
 ```sh
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9480/

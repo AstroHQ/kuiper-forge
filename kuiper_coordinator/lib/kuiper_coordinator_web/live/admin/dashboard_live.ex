@@ -37,9 +37,13 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
           {:ok, bundle} ->
             {:noreply, socket |> assign(new_bundle: bundle) |> load()}
 
-          :error ->
+          {:error, reason} ->
             Agents.delete_registration_token(token.token)
-            {:noreply, put_flash(socket, :error, "The coordinator CA isn't loaded, so no bundle")}
+
+            {:noreply,
+             socket
+             |> put_flash(:error, "Couldn't build the registration bundle: #{reason}")
+             |> load()}
         end
 
       {:error, _} ->
@@ -263,10 +267,11 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
   defp bundle(token) do
     {:ok, Agents.registration_bundle(token, Admin.coordinator_url())}
   rescue
-    e in RuntimeError ->
+    # an unreadable or unloaded CA is a message on the page, never a crashed LiveView (D58)
+    e ->
       require Logger
       Logger.error("Registration bundle failed: #{Exception.message(e)}")
-      :error
+      {:error, Exception.message(e)}
   end
 
   defp job_status(%{j: %{assigned_agent: agent}} = assigns) when is_binary(agent) do
