@@ -15,13 +15,18 @@ defmodule KuiperCoordinatorWeb.AdminSetupController do
   end
 
   def create(conn, params) do
-    username = params["username"] || ""
+    case fields(params) do
+      {:ok, username, password, confirm} -> create(conn, username, password, confirm)
+      :error -> render_form(conn, "Fill in a username and password", "")
+    end
+  end
 
-    case Admin.create_first_user(username, params["password"], params["confirm"]) do
+  defp create(conn, username, password, confirm) do
+    case Admin.create_first_user(username, password, confirm) do
       {:ok, user} ->
         ip = AdminAuth.client_ip(conn)
         meta = %{ip_address: ip, user_agent: conn |> get_req_header("user-agent") |> List.first()}
-        {:ok, token, _} = Admin.login(user.username, params["password"], meta)
+        {:ok, token, _} = Admin.login(user.username, password, meta)
         Logger.info("admin setup created first user username=#{user.username} ip=#{ip}")
 
         conn
@@ -37,11 +42,19 @@ defmodule KuiperCoordinatorWeb.AdminSetupController do
     end
   end
 
+  # The endpoint is unauthenticated: take flat strings only (no `setup[username][x]=y`).
+  defp fields(%{"setup" => %{"username" => u, "password" => p, "confirm" => c}})
+       when is_binary(u) and is_binary(p) and is_binary(c),
+       do: {:ok, u, p, c}
+
+  defp fields(_), do: :error
+
   defp not_found(conn) do
     conn |> put_status(404) |> put_view(KuiperCoordinatorWeb.ErrorHTML) |> render(:"404")
   end
 
   defp render_form(conn, error, username) do
-    render(conn, :new, error: error, username: username, page_title: "Set up")
+    form = Phoenix.Component.to_form(%{"username" => username}, as: :setup)
+    render(conn, :new, error: error, form: form, page_title: "Set up")
   end
 end

@@ -14,7 +14,10 @@ defmodule KuiperCoordinatorWeb.AdminSetupTest do
     :ok
   end
 
-  @form %{"username" => "root", "password" => "first pass", "confirm" => "first pass"}
+  @fields %{"username" => "root", "password" => "first pass", "confirm" => "first pass"}
+  @form %{"setup" => @fields}
+
+  defp form(changes), do: %{"setup" => Map.merge(@fields, changes)}
 
   test "with no users, /admin and /admin/login go to the setup form", %{conn: conn} do
     for path <- [~p"/admin", ~p"/admin/login", ~p"/admin/dashboard"] do
@@ -23,7 +26,8 @@ defmodule KuiperCoordinatorWeb.AdminSetupTest do
 
     html = conn |> get(~p"/admin/setup") |> html_response(200)
     assert html =~ "Create the first admin"
-    assert html =~ ~s(name="confirm")
+    assert html =~ ~s(name="setup[username]")
+    assert html =~ ~s(name="setup[confirm]")
     assert html =~ "_csrf_token"
   end
 
@@ -46,13 +50,13 @@ defmodule KuiperCoordinatorWeb.AdminSetupTest do
   test "setup keeps the password rules and makes no user on a bad form", %{conn: conn} do
     html =
       conn
-      |> post(~p"/admin/setup", %{@form | "confirm" => "other"})
+      |> post(~p"/admin/setup", form(%{"confirm" => "other"}))
       |> html_response(200)
 
     assert html =~ "Passwords don&#39;t match"
 
     html =
-      conn |> post(~p"/admin/setup", %{@form | "username" => "bad name"}) |> html_response(200)
+      conn |> post(~p"/admin/setup", form(%{"username" => "bad name"})) |> html_response(200)
 
     assert html =~ "Usernames are 1-64 characters"
     assert Admin.user_count() == 0
@@ -69,7 +73,7 @@ defmodule KuiperCoordinatorWeb.AdminSetupTest do
 
   test "a second setup POST doesn't make a second admin", %{conn: conn} do
     assert conn |> post(~p"/admin/setup", @form) |> redirected_to(303) == ~p"/admin/dashboard"
-    other = %{@form | "username" => "mallory"}
+    other = form(%{"username" => "mallory"})
     assert build_conn() |> post(~p"/admin/setup", other) |> response(404)
     assert [%{username: "root"}] = Admin.list_users()
   end
@@ -85,5 +89,29 @@ defmodule KuiperCoordinatorWeb.AdminSetupTest do
     assert Enum.count(results, &match?({:ok, _}, &1)) == 1
     assert Enum.count(results, &(&1 == {:error, :setup_done})) == 7
     assert Admin.user_count() == 1
+  end
+
+  test "nested or non-string params get the form back, not a 500, and make no user", %{
+    conn: conn
+  } do
+    bad = [
+      form(%{"username" => %{"x" => "y"}}),
+      form(%{"password" => %{"x" => "y"}, "confirm" => %{"x" => "y"}}),
+      form(%{"confirm" => ["a", "b"]}),
+      %{"setup" => "flat"},
+      %{"setup" => ["a"]},
+      %{"username" => %{"x" => "y"}},
+      %{}
+    ]
+
+    for params <- bad do
+      html = conn |> post(~p"/admin/setup", params) |> html_response(200)
+      assert html =~ ~s(id="setup-error"), inspect(params)
+      assert html =~ ~s(id="setup-form")
+    end
+
+    assert Admin.user_count() == 0
+    # still open, and a good form still works
+    assert conn |> post(~p"/admin/setup", @form) |> redirected_to(303) == ~p"/admin/dashboard"
   end
 end
