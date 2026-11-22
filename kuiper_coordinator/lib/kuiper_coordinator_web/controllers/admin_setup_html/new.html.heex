@@ -1,0 +1,43 @@
+<main class="min-h-screen flex items-center justify-center px-4">
+  <div class="card w-full max-w-sm bg-base-100 shadow-xl">
+    <div class="card-body">
+      <h1 class="card-title text-2xl">Kuiper Forge</h1>
+      <p class="text-sm opacity-70">
+        Create the first admin account. This page is open only until an account exists.
+      </p>
+
+      <div :if={@error} role="alert" class="alert alert-error text-sm" id="setup-error">
+        {@error}
+      </div>
+
+      <.form for={@form} action={~p"/admin/setup"} id="setup-form" class="space-y-2">
+        <.input
+          field={@form[:username]}
+          type="text"
+          label="Username"
+          autocomplete="username"
+          required
+        />
+        <.input
+          field={@form[:password]}
+          type="password"
+          label="Password"
+          value=""
+          autocomplete="new-password"
+          required
+        />
+        <.input
+          field={@form[:confirm]}
+          type="password"
+          label="Confirm password"
+          value=""
+          autocomplete="new-password"
+          required
+        />
+        <.button class="btn btn-primary w-full" phx-disable-with="Creating...">
+          Create account
+        </.button>
+      </.form>
+    </div>
+  </div>
+</main>
