@@ -41,6 +41,7 @@ defmodule KuiperCoordinatorWeb.Router do
     pipe_through [:browser, :admin, :require_admin]
 
     get "/", AdminSessionController, :index
+    get "/forges/github/callback", GitHubAppController, :callback
 
     live_session :admin, on_mount: {KuiperCoordinatorWeb.AdminAuth, :require_admin} do
       live "/dashboard", Admin.DashboardLive
@@ -50,6 +51,11 @@ defmodule KuiperCoordinatorWeb.Router do
       live "/agents/:agent_id/logs", Admin.AgentLogsLive
       live "/errors", Admin.ErrorsLive
       live "/metrics", Admin.MetricsLive
+      live "/forges", Admin.ForgesLive
+      live "/forges/provisioning", Admin.ProvisioningLive
+      live "/forges/github/new", Admin.GitHubAppNewLive
+      live "/forges/forgejo/new", Admin.ForgeFormLive, :new_forgejo
+      live "/forges/:id/edit", Admin.ForgeFormLive, :edit
     end
   end
 
