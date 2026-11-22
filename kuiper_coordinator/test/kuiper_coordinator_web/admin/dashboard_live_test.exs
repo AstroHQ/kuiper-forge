@@ -151,6 +151,9 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     view |> element("#register-agent") |> render_click()
     assert has_element?(view, "#register-modal.modal.modal-open")
     assert has_element?(view, "#register-modal", "Copy it now; it won't be shown again")
+    # keyboard users land in the dialog and Tab stays there
+    assert has_element?(view, "#register-modal #register-box.modal-box[phx-mounted]")
+    assert has_element?(view, "#register-box #register-box-start[tabindex]")
 
     command = view |> element("#register-modal #register-command") |> render()
 

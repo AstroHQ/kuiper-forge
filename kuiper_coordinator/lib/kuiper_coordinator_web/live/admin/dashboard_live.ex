@@ -272,8 +272,13 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
   attr :bundle, :string, default: nil
   attr :error, :string, default: nil
 
-  # DaisyUI modal (D51, D60): the bundle wraps inside the box instead of a flex column
+  # DaisyUI modal (D51, D60): the bundle wraps inside the box instead of a flex column.
+  # focus_wrap keeps Tab inside the dialog; focus moves in on open and back to the
+  # Register agent button on close.
   defp register_modal(assigns) do
+    assigns =
+      assign(assigns, :close, JS.push("close_register") |> JS.focus(to: "#register-agent"))
+
     ~H"""
     <div
       id="register-modal"
@@ -281,10 +286,14 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
       role="dialog"
       aria-modal="true"
       aria-labelledby="register-title"
-      phx-window-keydown="close_register"
+      phx-window-keydown={@close}
       phx-key="Escape"
     >
-      <div class="modal-box w-11/12 max-w-3xl">
+      <.focus_wrap
+        id="register-box"
+        class="modal-box w-11/12 max-w-3xl"
+        phx-mounted={JS.focus_first(to: "#register-box")}
+      >
         <h3 id="register-title" class="text-lg font-bold">Register an agent</h3>
         <div :if={@error} id="register-error" class="alert alert-error mt-4" role="alert">
           <.icon name="hero-exclamation-circle" class="size-5 shrink-0" />
@@ -318,12 +327,12 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
             <.icon name="hero-clipboard-document" class="size-4" />
             <span id="register-copy-label" phx-update="ignore">Copy</span>
           </button>
-          <button id="register-close" type="button" class="btn" phx-click="close_register">
+          <button id="register-close" type="button" class="btn" phx-click={@close}>
             Close
           </button>
         </div>
-      </div>
-      <div class="modal-backdrop" phx-click="close_register"></div>
+      </.focus_wrap>
+      <div class="modal-backdrop" phx-click={@close}></div>
     </div>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyText">
       // The label sits in a phx-update="ignore" span, so a refresh patch mid-"Copied" leaves it
