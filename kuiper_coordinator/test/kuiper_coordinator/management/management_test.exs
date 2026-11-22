@@ -213,6 +213,20 @@ defmodule KuiperCoordinator.ManagementTest do
   end
 
   @tag :no_server
+  @tag :no_server
+  test "starts with the logger at :info, as in prod (grpc's start log can't print a Unix socket)",
+       %{socket: socket} do
+    level = Logger.level()
+    Logger.configure(level: :info)
+    on_exit(fn -> Logger.configure(level: level) end)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      start_supervised!({KuiperCoordinator.Management.Supervisor, socket: socket})
+    end)
+
+    assert {:ok, %File.Stat{type: :other}} = File.lstat(socket)
+  end
+
   test "the default socket path is not the Rust coordinator's coordinator.sock" do
     path = KuiperCoordinator.Management.default_socket("/var/lib/kuiper-forge")
     assert Path.dirname(path) == "/var/lib/kuiper-forge"

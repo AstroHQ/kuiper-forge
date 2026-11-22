@@ -259,6 +259,7 @@ defmodule KuiperCoordinator.Forgejo.Client do
   runner status reflects check-ins, not whether a job runs. Registered -> `:busy`, else
   `:not_registered`.
   """
+  @impl KuiperCoordinator.Forge
   @spec remove_idle_runner(t(), RunnerScope.t(), String.t()) ::
           {:ok, :busy | :not_registered} | {:error, term()}
   def remove_idle_runner(c, scope, runner_name) do

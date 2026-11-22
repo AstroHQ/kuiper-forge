@@ -18,6 +18,12 @@ defmodule KuiperCoordinator.Management.Supervisor do
     socket = Keyword.fetch!(opts, :socket) |> Path.expand()
     prepare_socket!(socket)
 
+    # grpc_server's Cowboy adapter logs "Running ... using http://<ip>:<port>" at :info once
+    # listening, via :inet.ntoa, which can't print a Unix socket address and crashes the
+    # start (seen in the prod release, where the level is :info). We log our own line in
+    # secure_socket/1, so keep that module's start log quiet.
+    Logger.put_module_level(GRPC.Server.Adapters.Cowboy, :warning)
+
     children = [
       {GRPC.Server.Supervisor,
        endpoint: KuiperCoordinator.Management.Endpoint,

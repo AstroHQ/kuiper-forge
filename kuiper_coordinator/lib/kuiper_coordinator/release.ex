@@ -9,9 +9,33 @@ defmodule KuiperCoordinator.Release do
   def migrate do
     load_app()
 
-    for repo <- Application.fetch_env!(@app, :ecto_repos) do
+    for repo <- repos() do
       {:ok, _, _} = Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :up, all: true))
     end
+  end
+
+  @doc "Creates each repo's database if it's missing (`bin/kuiper_coordinator eval`)."
+  def create_db do
+    load_app()
+
+    for repo <- repos() do
+      case repo.__adapter__().storage_up(repo.config()) do
+        :ok -> :ok
+        {:error, :already_up} -> :ok
+        {:error, e} -> raise "could not create the #{inspect(repo)} database: #{inspect(e)}"
+      end
+    end
+  end
+
+  @doc "Drops each repo's database (the release smoke test cleans up with it)."
+  def drop_db do
+    load_app()
+    for repo <- repos(), do: repo.__adapter__().storage_down(repo.config())
+  end
+
+  def rollback(repo, version) do
+    load_app()
+    {:ok, _, _} = Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :down, to: version))
   end
 
   @doc "Creates an admin user with KUIPER_ADMIN_PASSWORD."
@@ -62,6 +86,10 @@ defmodule KuiperCoordinator.Release do
     load_app()
     {:ok, _, _} = Ecto.Migrator.with_repo(KuiperCoordinator.Repo, fn _ -> fun.() end)
     :ok
+  end
+
+  defp repos do
+    Application.fetch_env!(@app, :ecto_repos)
   end
 
   defp load_app do
