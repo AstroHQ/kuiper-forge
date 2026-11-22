@@ -2,7 +2,7 @@ defmodule KuiperCoordinatorWeb.Router do
   use KuiperCoordinatorWeb, :router
 
   import KuiperCoordinatorWeb.AdminAuth,
-    only: [fetch_admin: 2, require_admin: 2]
+    only: [fetch_admin: 2, redirect_to_setup: 2, require_admin: 2]
 
   pipeline :browser do
     plug :accepts, ["html"]
@@ -14,6 +14,7 @@ defmodule KuiperCoordinatorWeb.Router do
   end
 
   pipeline :admin do
+    plug :redirect_to_setup
     plug :fetch_admin
   end
 
@@ -31,6 +32,8 @@ defmodule KuiperCoordinatorWeb.Router do
   scope "/admin", KuiperCoordinatorWeb do
     pipe_through [:browser, :admin]
 
+    get "/setup", AdminSetupController, :new
+    post "/setup", AdminSetupController, :create
     get "/login", AdminSessionController, :new
     post "/login", AdminSessionController, :create
     delete "/logout", AdminSessionController, :delete

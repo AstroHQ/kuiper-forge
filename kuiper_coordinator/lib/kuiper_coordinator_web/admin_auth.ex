@@ -3,6 +3,7 @@ defmodule KuiperCoordinatorWeb.AdminAuth do
   Admin UI auth (parity UI1): plugs for the `/admin` scope and the LiveView `on_mount` hook.
 
   * `:fetch_admin` puts `:current_admin` (or nil) from the session's admin session id.
+  * `:redirect_to_setup` sends every request to `/admin/setup` while there are no users (D50).
   * `:require_admin` sends a 303 to the login page when there's no live session.
 
   The session id is in the (signed, encrypted, SameSite=Strict) Phoenix session cookie; the row
@@ -21,6 +22,20 @@ defmodule KuiperCoordinatorWeb.AdminAuth do
 
   def fetch_admin(conn, _opts) do
     assign(conn, :current_admin, Admin.session_user(get_session(conn, @session_key)))
+  end
+
+  @doc """
+  First-run setup (D50): while no admin user exists, every /admin request but the setup page
+  itself gets a 303 to /admin/setup.
+  """
+  def redirect_to_setup(%{request_path: "/admin/setup"} = conn, _opts), do: conn
+
+  def redirect_to_setup(conn, _opts) do
+    if Admin.setup_needed?() do
+      conn |> put_status(303) |> redirect(to: ~p"/admin/setup") |> halt()
+    else
+      conn
+    end
   end
 
   def require_admin(%{assigns: %{current_admin: %Admin.User{}}} = conn, _opts), do: conn
