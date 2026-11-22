@@ -37,8 +37,18 @@ defmodule KuiperCoordinator.Management.Supervisor do
     Supervisor.init(children, strategy: :rest_for_one)
   end
 
+  @max_socket_path 103
+
   @doc false
   def prepare_socket!(socket) do
+    # sun_path is 104 bytes on macOS (108 on Linux) with the trailing NUL: say so, rather than
+    # the listener's bare "cannot listen on port 0: einval"
+    if byte_size(socket) > @max_socket_path do
+      raise ArgumentError,
+            "management socket path #{socket} is #{byte_size(socket)} bytes; Unix sockets " <>
+              "allow at most #{@max_socket_path}. Set KUIPER_MANAGEMENT_SOCKET to a shorter path."
+    end
+
     dir = Path.dirname(socket)
 
     unless File.dir?(dir) do

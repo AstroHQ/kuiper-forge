@@ -62,7 +62,9 @@ tokens; list and revoke agents) listens on a Unix socket, on by default with
 agent gRPC (`KUIPER_MANAGEMENT=true|false` overrides). It has no auth beyond the
 socket's permissions: the socket is 0600 and a directory it creates is 0700.
 The Rust coordinator uses `<data_dir>/coordinator.sock`, so Phoenix defaults to
-`<data_dir>/phoenix-coordinator.sock` (`KUIPER_MANAGEMENT_SOCKET` to change it)
+`<data_dir>/phoenix-coordinator.sock` (in dev, `kuiper-phoenix-dev.sock` in the
+temp dir, since the in-repo data dir is too deep for a Unix socket path;
+`KUIPER_MANAGEMENT_SOCKET` to change it; a path over 103 bytes stops startup)
 and refuses to start on a socket something still answers on; a stale one is
 replaced. The Rust CLI always dials `<--data-dir>/coordinator.sock`, so to use
 it with Phoenix, point `KUIPER_MANAGEMENT_SOCKET` at `<dir>/coordinator.sock`

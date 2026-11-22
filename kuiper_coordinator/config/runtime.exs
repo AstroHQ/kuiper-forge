@@ -67,9 +67,14 @@ if config_env() != :test do
   # with agent gRPC unless KUIPER_MANAGEMENT says otherwise (tokens are for registration).
   config :kuiper_coordinator, :management,
     enabled: System.get_env("KUIPER_MANAGEMENT", to_string(agent_grpc?)) in ~w(true 1),
+    # dev's data dir sits deep in the checkout, too long for a Unix socket path (macOS allows
+    # 103 bytes), so dev's socket goes in the per-user temp dir
     socket:
       System.get_env("KUIPER_MANAGEMENT_SOCKET") ||
-        Path.join(data_dir, "phoenix-coordinator.sock")
+        if(config_env() == :dev,
+          do: Path.join(System.tmp_dir!(), "kuiper-phoenix-dev.sock"),
+          else: Path.join(data_dir, "phoenix-coordinator.sock")
+        )
 end
 
 # Forges and provisioning settings live in Postgres and are edited in the admin UI (D39); the

@@ -7,7 +7,7 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
            KUIPER_GITHUB_PRIVATE_KEY KUIPER_FORGEJO_URL KUIPER_FORGEJO_TOKEN KUIPER_FORGEJO_SCOPES
            KUIPER_PROVISIONING_MODE KUIPER_POLL_INTERVAL_SECS KUIPER_CONFIG
            KUIPER_ENCRYPTION_KEY KUIPER_DATA_DIR KUIPER_CA_CERT KUIPER_CA_ORG
-           KUIPER_MANAGEMENT)
+           KUIPER_MANAGEMENT KUIPER_MANAGEMENT_SOCKET)
 
   setup do
     saved = Map.new(@vars, &{&1, System.get_env(&1)})
@@ -94,6 +94,8 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     assert agent_grpc()[:data_dir] == dir
     assert agent_grpc()[:ca_cert] == Path.join(dir, "ca.crt")
     assert agent_grpc()[:ca_org] == "Kuiper Forge"
+    socket = get_in(config(), [:kuiper_coordinator, :management, :socket])
+    assert byte_size(socket) <= 103
 
     {_, 0} =
       System.cmd("git", ["check-ignore", "-q", Path.join(dir, "ca.key")], cd: Path.dirname(dir))

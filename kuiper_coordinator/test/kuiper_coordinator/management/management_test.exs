@@ -227,6 +227,16 @@ defmodule KuiperCoordinator.ManagementTest do
     assert {:ok, %File.Stat{type: :other}} = File.lstat(socket)
   end
 
+  test "a socket path too long for a Unix socket fails naming the setting" do
+    long = Path.join(System.tmp_dir!(), String.duplicate("d", 90) <> "/phoenix-coordinator.sock")
+
+    assert_raise ArgumentError, ~r/at most 103.*KUIPER_MANAGEMENT_SOCKET/, fn ->
+      KuiperCoordinator.Management.Supervisor.prepare_socket!(long)
+    end
+
+    refute File.exists?(Path.dirname(long))
+  end
+
   test "the default socket path is not the Rust coordinator's coordinator.sock" do
     path = KuiperCoordinator.Management.default_socket("/var/lib/kuiper-forge")
     assert Path.dirname(path) == "/var/lib/kuiper-forge"
