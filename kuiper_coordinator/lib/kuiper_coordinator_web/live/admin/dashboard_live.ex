@@ -326,18 +326,38 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
       <div class="modal-backdrop" phx-click="close_register"></div>
     </div>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyText">
-      // the label sits in a phx-update="ignore" span, so a refresh patch mid-"Copied" leaves it be
+      // The label sits in a phx-update="ignore" span, so a refresh patch mid-"Copied" leaves it
+      // be. Plain-HTTP admin URLs (http://host:9480) aren't a secure context and have no
+      // navigator.clipboard, so fall back to selecting the text and execCommand("copy").
       export default {
         mounted() {
           const label = this.el.querySelector("[phx-update=ignore]")
+          const show = (text) => {
+            label.textContent = text
+            clearTimeout(this.reset)
+            this.reset = setTimeout(() => { label.textContent = "Copy" }, 1500)
+          }
+          const selectCopy = (target) => {
+            const range = document.createRange()
+            range.selectNodeContents(target)
+            const sel = window.getSelection()
+            sel.removeAllRanges()
+            sel.addRange(range)
+            let ok = false
+            try { ok = document.execCommand("copy") } catch (_e) { ok = false }
+            // on failure the text stays selected for a manual copy
+            if (ok) sel.removeAllRanges()
+            show(ok ? "Copied" : "Press Ctrl+C")
+          }
           this.el.addEventListener("click", () => {
             const target = document.querySelector(this.el.dataset.copyTarget)
             if (!target) return
-            navigator.clipboard.writeText(target.innerText.trim()).then(() => {
-              label.textContent = "Copied"
-              clearTimeout(this.reset)
-              this.reset = setTimeout(() => { label.textContent = "Copy" }, 1500)
-            })
+            if (window.isSecureContext && navigator.clipboard) {
+              navigator.clipboard.writeText(target.innerText.trim())
+                .then(() => show("Copied"), () => selectCopy(target))
+            } else {
+              selectCopy(target)
+            }
           })
         },
         destroyed() { clearTimeout(this.reset) }
