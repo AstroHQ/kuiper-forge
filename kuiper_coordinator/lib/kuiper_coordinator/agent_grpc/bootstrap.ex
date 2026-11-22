@@ -72,7 +72,7 @@ defmodule KuiperCoordinator.AgentGrpc.Bootstrap do
     now = DateTime.utc_now()
 
     cert =
-      X509.Certificate.self_signed(key, "/CN=#{org} CA/O=#{org}",
+      X509.Certificate.self_signed(key, subject(CN: "#{org} CA", O: org),
         hash: :sha256,
         validity: X509.Certificate.Validity.new(now, DateTime.add(now, 3650, :day)),
         extensions: [
@@ -100,7 +100,7 @@ defmodule KuiperCoordinator.AgentGrpc.Bootstrap do
     cert =
       key
       |> X509.PublicKey.derive()
-      |> X509.Certificate.new("/CN=#{host}/O=CI Runner Coordinator", ca.cert, ca.key,
+      |> X509.Certificate.new(subject(CN: host, O: "CI Runner Coordinator"), ca.cert, ca.key,
         hash: :sha256,
         validity: X509.Certificate.Validity.new(now, DateTime.add(now, 365, :day)),
         extensions: [
@@ -117,6 +117,10 @@ defmodule KuiperCoordinator.AgentGrpc.Bootstrap do
     write_cert!(cert_file, X509.Certificate.to_pem(cert))
     Logger.info("Created server certificate #{cert_file} and key #{key_file} for #{host}")
   end
+
+  # built from pairs, not "/CN=../O=.." strings, so a "/" or "," in the org stays data
+  defp subject(attrs),
+    do: attrs |> Enum.map(fn {k, v} -> {Atom.to_string(k), v} end) |> X509.RDNSequence.new()
 
   # an IP needs an IP SAN; TLS clients don't match one against DNS names
   defp san(host) do

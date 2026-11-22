@@ -68,11 +68,16 @@ if config_env() != :test do
   config :kuiper_coordinator, :management,
     enabled: System.get_env("KUIPER_MANAGEMENT", to_string(agent_grpc?)) in ~w(true 1),
     # dev's data dir sits deep in the checkout, too long for a Unix socket path (macOS allows
-    # 103 bytes), so dev's socket goes in the per-user temp dir
+    # 103 bytes), so dev's socket goes in the temp dir, named from a hash of the data dir so two
+    # checkouts (or two users on a shared /tmp) don't collide
     socket:
       System.get_env("KUIPER_MANAGEMENT_SOCKET") ||
         if(config_env() == :dev,
-          do: Path.join(System.tmp_dir!(), "kuiper-phoenix-dev.sock"),
+          do:
+            Path.join(
+              System.tmp_dir!(),
+              "kuiper-phoenix-#{:crypto.hash(:sha256, data_dir) |> Base.encode16(case: :lower) |> binary_part(0, 12)}.sock"
+            ),
           else: Path.join(data_dir, "phoenix-coordinator.sock")
         )
 end

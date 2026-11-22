@@ -100,6 +100,11 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     {_, 0} =
       System.cmd("git", ["check-ignore", "-q", Path.join(dir, "ca.key")], cd: Path.dirname(dir))
 
+    # two checkouts get two dev sockets (Codex P2)
+    System.put_env("KUIPER_DATA_DIR", "/srv/other-checkout/.kuiper-data")
+    other = get_in(config(), [:kuiper_coordinator, :management, :socket])
+    assert other != socket and byte_size(other) <= 103
+
     System.put_env("KUIPER_DATA_DIR", "/srv/kf")
     System.put_env("KUIPER_CA_ORG", "Acme")
     assert agent_grpc()[:ca_key] == "/srv/kf/ca.key"

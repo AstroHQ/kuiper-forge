@@ -63,6 +63,15 @@ defmodule KuiperCoordinator.AgentGrpc.BootstrapTest do
              )
   end
 
+  test "an org with / or , in it stays one O value (Codex P2)", ctx do
+    settings = Keyword.put(ctx.settings, :ca_org, "Research/Development, Inc.")
+    Bootstrap.ensure!(settings)
+    ca = CA.load!(settings[:ca_cert], settings[:ca_key])
+    assert X509.Certificate.subject(ca.cert, "O") == ["Research/Development, Inc."]
+    assert X509.Certificate.subject(ca.cert, "CN") == ["Research/Development, Inc. CA"]
+    assert %{chain: [_]} = TLS.check!(settings)
+  end
+
   test "an IP hostname gets an IP SAN", ctx do
     settings = Keyword.put(ctx.settings, :server_hostname, "10.0.0.5")
     Bootstrap.ensure!(settings)
