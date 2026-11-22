@@ -1,8 +1,9 @@
 defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
   @moduledoc """
   Admin dashboard (parity UI2, UI3): counts, capacity, pending jobs, agents with their
-  availability switch (#40), and registration tokens (create shows the `kfr1_` bundle once,
-  delete). It refreshes on agent events and every few seconds for DB-side changes.
+  availability switch (#40), and registration tokens. Register agent opens a modal that
+  creates a token and shows its `kfr1_` bundle once, as a copyable command (D60); closing the
+  modal drops the bundle. Pending tokens can be deleted. It refreshes on agent events and every few seconds for DB-side changes.
   """
   use KuiperCoordinatorWeb, :live_view
 
@@ -18,10 +19,13 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
       :timer.send_interval(@refresh_ms, :refresh)
     end
 
-    {:ok, socket |> assign(page_title: "Dashboard", new_bundle: nil) |> load()}
+    {:ok, socket |> assign(page_title: "Dashboard") |> close_register() |> load()}
   end
 
   defp load(socket), do: assign(socket, :dash, Dashboard.build())
+
+  defp close_register(socket),
+    do: assign(socket, register_open: false, new_bundle: nil, register_error: nil)
 
   @impl true
   def handle_info(:refresh, socket), do: {:noreply, load(socket)}
@@ -30,7 +34,9 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
   def handle_info(_agent_change, socket), do: {:noreply, load(socket)}
 
   @impl true
-  def handle_event("create_token", _params, socket) do
+  def handle_event("register_agent", _params, socket) do
+    socket = assign(socket, register_open: true, new_bundle: nil, register_error: nil)
+
     case Agents.create_registration_token(3600, socket.assigns.current_admin.username) do
       {:ok, token} ->
         case bundle(token) do
@@ -42,14 +48,16 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
 
             {:noreply,
              socket
-             |> put_flash(:error, "Couldn't build the registration bundle: #{reason}")
+             |> assign(register_error: "Couldn't build the registration bundle: #{reason}")
              |> load()}
         end
 
       {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Failed to create token")}
+        {:noreply, assign(socket, register_error: "Failed to create token")}
     end
   end
+
+  def handle_event("close_register", _params, socket), do: {:noreply, close_register(socket)}
 
   def handle_event("delete_token", %{"token" => token}, socket) do
     Agents.delete_registration_token(token)
@@ -75,7 +83,7 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
       <.header>
         Dashboard
         <:actions>
-          <.button id="create-token" phx-click="create_token">Register agent</.button>
+          <.button id="register-agent" phx-click="register_agent">Register agent</.button>
         </:actions>
       </.header>
 
@@ -114,14 +122,6 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
         <div class="card-body">
           <h2 class="card-title">Register an agent</h2>
           <p class="text-sm opacity-70">Each token registers one agent and expires after an hour.</p>
-          <div :if={@new_bundle} class="alert alert-success flex-col items-start" id="new-bundle">
-            <span>Registration bundle created. Copy it now; it won't be shown again.</span>
-            <code class="break-all select-all" id="register-bundle">{@new_bundle}</code>
-            <span class="text-sm">
-              Run on the agent: <code>kuiper-tart-agent register '{@new_bundle}'</code>
-              (or <code>kuiper-proxmox-agent</code>)
-            </span>
-          </div>
           <p :if={@dash.tokens == []} class="text-sm opacity-60">No pending tokens.</p>
           <table :if={@dash.tokens != []} class="table table-sm" id="tokens">
             <thead>
@@ -259,7 +259,86 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
           </table>
         </div>
       </section>
+
+      <.register_modal
+        :if={@register_open}
+        bundle={@new_bundle}
+        error={@register_error}
+      />
     </Layouts.admin>
+    """
+  end
+
+  attr :bundle, :string, default: nil
+  attr :error, :string, default: nil
+
+  # DaisyUI modal (D51, D60): the bundle wraps inside the box instead of a flex column
+  defp register_modal(assigns) do
+    ~H"""
+    <div
+      id="register-modal"
+      class="modal modal-open"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="register-title"
+      phx-window-keydown="close_register"
+      phx-key="Escape"
+    >
+      <div class="modal-box w-11/12 max-w-3xl">
+        <h3 id="register-title" class="text-lg font-bold">Register an agent</h3>
+        <div :if={@error} id="register-error" class="alert alert-error mt-4" role="alert">
+          <.icon name="hero-exclamation-circle" class="size-5 shrink-0" />
+          <span>{@error}</span>
+        </div>
+        <div :if={@bundle} class="mt-4 space-y-3">
+          <p class="text-sm">
+            Registration token created. Copy it now; it won't be shown again.
+            It registers one agent and expires in an hour.
+          </p>
+          <p class="text-sm font-semibold">Run on the agent:</p>
+          <pre
+            id="register-command"
+            class="bg-base-200 rounded-box p-3 text-xs font-mono whitespace-pre-wrap break-all select-all"
+          >kuiper-tart-agent register '{@bundle}'</pre>
+          <p class="text-xs opacity-70">
+            Or use <code>kuiper-proxmox-agent</code>
+            or <code>kuiper-libvirt-agent</code>
+            in place of <code>kuiper-tart-agent</code>.
+          </p>
+        </div>
+        <div class="modal-action">
+          <button
+            :if={@bundle}
+            id="register-copy"
+            type="button"
+            class="btn btn-primary"
+            phx-hook=".CopyText"
+            data-copy-target="#register-command"
+          >
+            <.icon name="hero-clipboard-document" class="size-4" /> Copy
+          </button>
+          <button id="register-close" type="button" class="btn" phx-click="close_register">
+            Close
+          </button>
+        </div>
+      </div>
+      <div class="modal-backdrop" phx-click="close_register"></div>
+    </div>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyText">
+      export default {
+        mounted() {
+          this.el.addEventListener("click", () => {
+            const target = document.querySelector(this.el.dataset.copyTarget)
+            if (!target) return
+            const label = this.el.innerHTML
+            navigator.clipboard.writeText(target.innerText.trim()).then(() => {
+              this.el.textContent = "Copied"
+              setTimeout(() => { this.el.innerHTML = label }, 1500)
+            })
+          })
+        }
+      }
+    </script>
     """
   end
 
