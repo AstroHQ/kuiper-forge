@@ -19,7 +19,7 @@ defmodule KuiperCoordinator.Fleet.Loader do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @doc "`:off`, `{:error, reason}` or `{:running, mode, manager_pid}`."
+  @doc "`:off`, `{:error, reason}` or `{:running, %{forge_name => mode}, manager_pid}`."
   def status(server \\ __MODULE__), do: GenServer.call(server, :status)
 
   @impl true
@@ -80,11 +80,14 @@ defmodule KuiperCoordinator.Fleet.Loader do
 
     case Fleet.Manager.start_link(opts) do
       {:ok, pid} ->
+        modes = Map.new(fleet[:forges], &{&1.name, &1.mode})
+
         Logger.info(
-          "Fleet running in #{fleet[:mode]} mode with #{length(fleet[:forges])} forge(s)"
+          "Fleet running: " <>
+            Enum.map_join(modes, ", ", fn {name, mode} -> "#{name} #{mode}" end)
         )
 
-        %{state | config: config, manager: pid, status: {:running, fleet[:mode], pid}}
+        %{state | config: config, manager: pid, status: {:running, modes, pid}}
 
       {:error, reason} ->
         msg = "the fleet didn't start: #{inspect(reason)}"

@@ -7,10 +7,14 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
   signature), 401 for a bad signature, 400 for bad JSON, 503 when the job can't be persisted
   (GitHub redelivers). A persisted job is announced on PubSub topic `"fleet"`.
 
-  Config (`config :kuiper_coordinator, :webhook`): `:secret` (required to enable it), `:path`
-  (default `/webhook`), `:source` (`:github`, the default, or `:forgejo`, handled by
-  `KuiperCoordinatorWeb.Plugs.ForgejoWebhook`), `:forge` (default `github`), `:required_labels` (default
+  Config (`config :kuiper_coordinator, :webhook`): `:sources`, one per forge in webhook mode
+  (`%{forge: name, source: :github | :forgejo, secret: secret}`, plus `:scopes` for Forgejo;
+  none turns the plug off), `:path` (default `/webhook`), `:required_labels` (default
   `["self-hosted"]`), `:label_mappings`, `:max_body` (bytes, default 25 MB; larger is 413).
+
+  Every forge delivers to the same path. A delivery with `X-Forgejo-Event` goes to
+  `KuiperCoordinatorWeb.Plugs.ForgejoWebhook`; the forge it's from is the source of that kind
+  whose secret signed it (`source_for/3`), so a signature no source made is a 401.
   """
   @behaviour Plug
   import Plug.Conn
@@ -27,10 +31,11 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
   def call(%Plug.Conn{method: "POST"} = conn, _opts) do
     config = Application.get_env(:kuiper_coordinator, :webhook, [])
 
-    if config[:secret] && conn.request_path == Keyword.get(config, :path, "/webhook") do
-      case Keyword.get(config, :source, :github) do
-        :forgejo -> conn |> KuiperCoordinatorWeb.Plugs.ForgejoWebhook.handle(config) |> halt()
-        _ -> conn |> handle(config) |> halt()
+    if Keyword.get(config, :sources, []) != [] and
+         conn.request_path == Keyword.get(config, :path, "/webhook") do
+      case get_req_header(conn, "x-forgejo-event") do
+        [] -> conn |> handle(config) |> halt()
+        _ -> conn |> KuiperCoordinatorWeb.Plugs.ForgejoWebhook.handle(config) |> halt()
       end
     else
       conn
@@ -42,16 +47,19 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
   defp handle(conn, config) do
     with {:event, ["workflow_job"]} <- {:event, get_req_header(conn, "x-github-event")},
          {:ok, body, conn} <- read_full_body(conn, Keyword.get(config, :max_body, @max_body)),
-         {:sig, true} <-
-           {:sig, valid_signature?(config[:secret], body, header(conn, "x-hub-signature-256"))},
+         {:sig, %{forge: forge}} <-
+           {:sig,
+            source_for(config, :github, fn secret ->
+              valid_signature?(secret, body, header(conn, "x-hub-signature-256"))
+            end)},
          {:json, {:ok, %{} = event}} <- {:json, Jason.decode(body)} do
-      send_resp(conn, handle_event(event, config), "")
+      send_resp(conn, handle_event(event, Keyword.put(config, :forge, forge)), "")
     else
       {:event, other} ->
         Logger.debug("Ignoring webhook event type: #{inspect(other)}")
         send_resp(conn, 200, "")
 
-      {:sig, false} ->
+      {:sig, nil} ->
         Logger.warning("Webhook signature validation failed")
         send_resp(conn, 401, "")
 
@@ -192,6 +200,13 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhook do
   end
 
   defp dispatch_event(_event, _config), do: 200
+
+  @doc "The source of `kind` whose secret passes `valid?`, the forge a delivery is from. Otherwise nil."
+  def source_for(config, kind, valid?) do
+    config
+    |> Keyword.get(:sources, [])
+    |> Enum.find(&(Map.get(&1, :source, :github) == kind and valid?.(&1[:secret])))
+  end
 
   @doc "HMAC-SHA256 of the raw body against a `sha256=<hex>` header, in constant time."
   def valid_signature?(secret, body, "sha256=" <> hex) when is_binary(secret) do

@@ -45,31 +45,32 @@ defmodule KuiperCoordinator.Fleet.Forges do
   end
 
   @doc """
-  The webhook's source forge (Rust W1: the webhook's `:forge` by name, else the first GitHub
-  forge, else the first) and, for a Forgejo source, its runner scopes. Returns the webhook
-  config with `:forge`, `:source` and (Forgejo) `:scopes` filled in.
+  Fills in the webhook config's `:sources` (`%{forge: name, secret: secret}`, one per forge in
+  webhook mode) from the built forges: each gets its `:source` (`:github` or `:forgejo`) and,
+  for Forgejo, the forge's runner `:scopes`. A source that names no built forge is an error.
   """
   @spec webhook_config([{String.t(), KuiperCoordinator.Forge.t()}], keyword()) ::
           {:ok, keyword()} | {:error, String.t()}
   def webhook_config(forges, webhook) do
-    chosen =
-      case Keyword.get(webhook, :forge) do
-        nil ->
-          Enum.find(forges, fn {_, {mod, _}} -> mod == GitHub end) || List.first(forges)
+    sources = Keyword.get(webhook, :sources, [])
 
-        name ->
-          List.keyfind(forges, name, 0)
-      end
-
-    case chosen do
+    case Enum.find(sources, &(not List.keymember?(forges, &1.forge, 0))) do
       nil ->
-        {:error, "webhook forge '#{webhook[:forge]}' isn't a configured forge"}
+        filled =
+          Enum.map(sources, fn %{forge: name} = source ->
+            case List.keyfind(forges, name, 0) do
+              {_, {Forgejo, client}} ->
+                Map.merge(source, %{source: :forgejo, scopes: client.scopes})
 
-      {name, {Forgejo, client}} ->
-        {:ok, Keyword.merge(webhook, forge: name, source: :forgejo, scopes: client.scopes)}
+              _ ->
+                Map.put(source, :source, :github)
+            end
+          end)
 
-      {name, _} ->
-        {:ok, Keyword.merge(webhook, forge: name, source: :github)}
+        {:ok, Keyword.put(webhook, :sources, filled)}
+
+      %{forge: name} ->
+        {:error, "webhook forge '#{name}' isn't a configured forge"}
     end
   end
 

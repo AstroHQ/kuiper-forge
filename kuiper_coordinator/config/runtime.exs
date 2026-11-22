@@ -130,6 +130,13 @@ if config_env() != :test do
 end
 
 if config_env() == :dev do
+  # behind a tunnel (`mise run ngrok-server`) the public URL is the tunnel's, so the GitHub App
+  # form and anything else built from `Endpoint.url/0` point there instead of at localhost
+  if host = System.get_env("PHX_HOST") do
+    config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint,
+      url: [host: host, port: 443, scheme: "https"]
+  end
+
   # Reload browser tabs when matching files change.
   config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint,
     live_reload: [

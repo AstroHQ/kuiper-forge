@@ -4,9 +4,10 @@ defmodule KuiperCoordinatorWeb.AdminAuth do
 
   * `:fetch_admin` puts `:current_admin` (or nil) from the session's admin session id.
   * `:redirect_to_setup` sends every request to `/admin/setup` while there are no users (D50).
-  * `:require_admin` sends a 303 to the login page when there's no live session.
+  * `:require_admin` sends a 303 to the login page when there's no live session, and the login
+    comes back to the page that was asked for.
 
-  The session id is in the (signed, encrypted, SameSite=Strict) Phoenix session cookie; the row
+  The session id is in the (signed, encrypted, SameSite=Lax) Phoenix session cookie; the row
   in `admin_sessions` is the source of truth, so logout or expiry ends it on every request and
   every LiveView mount.
   """
@@ -17,6 +18,10 @@ defmodule KuiperCoordinatorWeb.AdminAuth do
   alias KuiperCoordinator.Admin
 
   @session_key "admin_session"
+
+  # the page a logged-out GET was for, so the login can carry on to it. GitHub's App callback (D40)
+  # has a single-use code in its query, and going to the dashboard instead throws it away
+  @return_key "admin_return_to"
 
   def session_key, do: @session_key
 
@@ -42,10 +47,30 @@ defmodule KuiperCoordinatorWeb.AdminAuth do
 
   def require_admin(conn, _opts) do
     conn
+    |> remember_path()
     |> put_status(303)
     |> redirect(to: ~p"/admin/login")
     |> halt()
   end
+
+  # only plain /admin paths are kept: `redirect(to:)` raises on ones it doesn't like (`//`, `/%`, a
+  # backslash), and a link someone crafted shouldn't end a login in a 500
+  @returnable ~r{\A/admin(/[\w.~-]+)*(\?[\w.~=&-]*)?\z}
+
+  defp remember_path(%{method: "GET"} = conn) do
+    query = if conn.query_string == "", do: "", else: "?" <> conn.query_string
+    path = conn.request_path <> query
+
+    if path =~ @returnable, do: put_session(conn, @return_key, path), else: conn
+  end
+
+  defp remember_path(conn), do: conn
+
+  @doc """
+  Returns the page that sent this browser to the login page. Otherwise the dashboard. Read it
+  before `log_in/2`, which clears the session.
+  """
+  def return_path(conn), do: get_session(conn, @return_key) || ~p"/admin/dashboard"
 
   @doc "Starts a session for `token`: a fresh session cookie, so no fixation."
   def log_in(conn, token) do

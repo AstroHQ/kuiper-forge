@@ -6,8 +6,10 @@ defmodule KuiperCoordinator.Fleet.Recovery do
   labels and label mappings as the webhook (`Webhooks.Labels`), so a scan never takes a job
   a webhook would have ignored.
 
-  `Fleet.Manager` runs it at startup and every `scan_ms` (Rust RECOVERY_SCAN_INTERVAL, 5 min).
-  In polling mode `poll/1` is the only source of jobs instead, every poll interval.
+  `Fleet.Manager` runs it at startup and every `scan_ms` (Rust RECOVERY_SCAN_INTERVAL, 5 min)
+  for the forges in webhook mode. For forges in polling mode `poll/2` is the only source of jobs
+  instead, every poll interval. Both take the forge names to work on (default: every forge in
+  the context), since each forge has its own mode and interval.
   """
   require Logger
 
@@ -27,16 +29,25 @@ defmodule KuiperCoordinator.Fleet.Recovery do
   optionally `:webhook`, the webhook config; defaults to `config :kuiper_coordinator,
   :webhook`). Returns how many pending jobs were dropped and how many were recovered.
   """
-  @spec scan(map()) :: %{dropped: non_neg_integer(), recovered: non_neg_integer()}
-  def scan(ctx) do
-    dropped = verify_pending(ctx)
-    recovered = recover_queued(ctx)
+  @spec scan(map(), [String.t()] | nil) :: %{
+          dropped: non_neg_integer(),
+          recovered: non_neg_integer()
+        }
+  def scan(ctx, names \\ nil) do
+    dropped = verify_pending(ctx, names)
+    recovered = recover_queued(ctx, names)
     %{dropped: dropped, recovered: recovered}
   end
 
-  @doc "Drops pending jobs their forge no longer lists as queued or waiting (Rust verify_pending_jobs)."
-  def verify_pending(ctx) do
-    Jobs.list_pending() |> Enum.count(&(verify_job(&1, ctx) == :dropped))
+  @doc """
+  Drops pending jobs their forge no longer lists as queued or waiting (Rust
+  verify_pending_jobs). With `names`, only those forges' jobs are checked, plus jobs of a forge
+  the context doesn't know at all (they have nowhere to run).
+  """
+  def verify_pending(ctx, names \\ nil) do
+    Jobs.list_pending()
+    |> Enum.filter(&(names == nil or &1.forge in names or not is_map_key(ctx.forges, &1.forge)))
+    |> Enum.count(&(verify_job(&1, ctx) == :dropped))
   end
 
   defp verify_job(%PendingJob{repository: nil} = job, _ctx) do
@@ -92,8 +103,8 @@ defmodule KuiperCoordinator.Fleet.Recovery do
   end
 
   @doc "Adds queued jobs found on the forges to the pending queue (Rust recover_queued_jobs)."
-  def recover_queued(ctx) do
-    {_scan, recovered} = list_and_recover(ctx)
+  def recover_queued(ctx, names \\ nil) do
+    {_scan, recovered} = list_and_recover(ctx, names)
     recovered
   end
 
@@ -102,9 +113,12 @@ defmodule KuiperCoordinator.Fleet.Recovery do
   adds newly queued jobs, then only the pending jobs it no longer listed are checked with
   their forge. Jobs on a forge that couldn't be listed are left alone.
   """
-  @spec poll(map()) :: %{dropped: non_neg_integer(), recovered: non_neg_integer()}
-  def poll(ctx) do
-    {scan, recovered} = list_and_recover(ctx)
+  @spec poll(map(), [String.t()] | nil) :: %{
+          dropped: non_neg_integer(),
+          recovered: non_neg_integer()
+        }
+  def poll(ctx, names \\ nil) do
+    {scan, recovered} = list_and_recover(ctx, names)
 
     dropped =
       case dropped_pending(Jobs.list_pending(), scan) do
@@ -136,14 +150,16 @@ defmodule KuiperCoordinator.Fleet.Recovery do
   def poll_interval_ms(nil), do: 120_000
   def poll_interval_ms(secs) when is_integer(secs), do: max(secs, 10) * 1000
 
-  # Lists every forge's queue, recording which forges answered and every job they listed.
-  defp list_and_recover(ctx) do
+  # Lists the forges' queues (every forge, or `names`), recording which forges answered and
+  # every job they listed.
+  defp list_and_recover(ctx, names) do
     config = Map.get_lazy(ctx, :webhook, fn -> webhook_config() end)
     required = Keyword.get(config, :required_labels, Labels.default_required())
     mappings = Keyword.get(config, :label_mappings, [])
 
     {scan, jobs} =
       ctx.forges
+      |> Enum.filter(fn {name, _} -> names == nil or name in names end)
       |> Enum.sort_by(&elem(&1, 0))
       |> Enum.reduce({%{forges: MapSet.new(), seen: MapSet.new()}, []}, fn {name, forge},
                                                                            {scan, acc} ->

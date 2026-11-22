@@ -70,6 +70,34 @@ defmodule KuiperCoordinator.Fleet.RecoveryTest do
     end
   end
 
+  describe "one forge at a time (each forge has its own mode and interval)" do
+    @two %{forges: %{"github" => {ForgeMock, :gh}, "other" => {ForgeMock, :other}}, webhook: []}
+
+    test "a scan of some forges lists and checks only those, plus jobs of forges that are gone" do
+      pending(1)
+      pending(2, %{job_key: "other:2", forge: "other"})
+      pending(3, %{job_key: "gone:3", forge: "gone"})
+
+      # nothing is asked of :other: Mox fails the test if it is
+      expect(ForgeMock, :job_status, fn :gh, "astro/app", "1" -> {:ok, nil} end)
+      expect(ForgeMock, :list_queued_jobs, fn :gh -> {:ok, [queued(9, ["self-hosted"])]} end)
+
+      assert Recovery.scan(@two, ["github"]) == %{dropped: 2, recovered: 1}
+      assert keys() == ["github:9", "other:2"]
+    end
+
+    test "a poll of some forges leaves the other forges' pending jobs alone" do
+      pending(1)
+      pending(2, %{job_key: "other:2", forge: "other"})
+
+      expect(ForgeMock, :list_queued_jobs, fn :other -> {:ok, []} end)
+      expect(ForgeMock, :job_status, fn :other, "astro/app", "2" -> {:ok, "completed"} end)
+
+      assert Recovery.poll(@two, ["other"]) == %{dropped: 1, recovered: 0}
+      assert keys() == ["github:1"]
+    end
+  end
+
   describe "recover_queued (Rust recover_queued_jobs)" do
     test "adds queued jobs the webhook would take, with their scope and labels" do
       created = ~U[2026-11-21 10:00:00.000000Z]

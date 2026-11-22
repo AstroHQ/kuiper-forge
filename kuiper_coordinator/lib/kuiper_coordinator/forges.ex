@@ -52,9 +52,31 @@ defmodule KuiperCoordinator.Forges do
   def delete_forge(%Forge{} = forge), do: forge |> Repo.delete() |> notify()
 
   defp save(cs, opts) do
-    with {:ok, cs} <- live_check(cs, opts) do
+    with {:ok, cs} <- cs |> one_fixed_capacity() |> live_check(opts) do
       cs |> Repo.insert_or_update() |> notify()
     end
+  end
+
+  # the agents' pools name no forge, so only one forge can fill them
+  defp one_fixed_capacity(cs) do
+    with :fixed_capacity <- Ecto.Changeset.get_field(cs, :mode),
+         %Forge{name: other} <- fixed_capacity_forge(cs.data.id) do
+      Ecto.Changeset.add_error(
+        cs,
+        :mode,
+        "forge '#{other}' already uses fixed capacity, and the pools fill one forge"
+      )
+    else
+      _ -> cs
+    end
+  end
+
+  defp fixed_capacity_forge(except_id) do
+    Forge
+    |> where([f], f.mode == :fixed_capacity)
+    |> then(&if(except_id, do: where(&1, [f], f.id != ^except_id), else: &1))
+    |> first(:id)
+    |> Repo.one()
   end
 
   defp live_check(%Ecto.Changeset{valid?: false} = cs, _opts),
@@ -99,7 +121,9 @@ defmodule KuiperCoordinator.Forges do
   defp action(_), do: :update
 
   @doc false
-  def spec(%Forge{type: :github} = f, lookback),
+  def spec(%Forge{} = f, lookback), do: Map.merge(client_spec(f, lookback), provisioning(f))
+
+  defp client_spec(%Forge{type: :github} = f, lookback),
     do: %{
       name: f.name,
       type: :github,
@@ -108,8 +132,15 @@ defmodule KuiperCoordinator.Forges do
       scan_lookback_hours: lookback
     }
 
-  def spec(%Forge{type: :forgejo} = f, _lookback),
+  defp client_spec(%Forge{type: :forgejo} = f, _lookback),
     do: %{name: f.name, type: :forgejo, url: f.url, token: f.token, scopes: f.scopes}
+
+  defp provisioning(%Forge{} = f),
+    do: %{
+      mode: f.mode,
+      runner_scope: f.runner_scope && elem(RunnerScope.parse(f.runner_scope), 1),
+      poll_interval_s: f.poll_interval_s
+    }
 
   ## settings
 
@@ -153,82 +184,43 @@ defmodule KuiperCoordinator.Forges do
   @doc """
   What the fleet runs on, from the stored forges and settings: `{:ok, %{fleet: opts | nil,
   webhook: opts}}` (`fleet: nil` with no forges: nothing is provisioned) or `{:error, reason}`
-  when the forges and settings don't fit together (say fixed capacity with no GitHub forge or
-  no runner scope). The admin UI can show the reason; the fleet stays off until it's fixed.
+  when the forges don't fit together. The admin UI can show the reason; the fleet stays off
+  until it's fixed.
+
+  Each forge spec carries its own mode. `webhook` is what the webhook plugs read: the path, the
+  job filters, and a source (`%{forge: name, secret: secret}`) for every forge in webhook mode.
   """
   @spec fleet_config() ::
           {:ok, %{fleet: keyword() | nil, webhook: keyword()}} | {:error, String.t()}
   def fleet_config do
-    settings = get_settings()
-
     case list_forges() do
       [] -> {:ok, %{fleet: nil, webhook: []}}
-      forges -> fleet_config(forges, settings, list_label_mappings())
+      forges -> fleet_config(forges, get_settings(), list_label_mappings())
     end
   end
 
   defp fleet_config(forges, s, mappings) do
-    specs = Enum.map(forges, &spec(&1, s.scan_lookback_hours))
-    scope = s.runner_scope && elem(RunnerScope.parse(s.runner_scope), 1)
-
-    with :ok <- check_fixed_capacity(s.mode, scope, forges),
-         {:ok, webhook} <- mode_settings(s, forges, mappings) do
-      fleet =
-        [
-          mode: s.mode,
-          forges: specs,
-          runner_scope: scope,
-          runner_group: s.runner_group,
-          idle_runner_timeout_s: s.idle_runner_timeout_s
-        ] ++ if(s.mode == :polling, do: [poll_interval_s: s.poll_interval_s], else: [])
-
-      {:ok, %{fleet: fleet, webhook: webhook}}
-    end
-  end
-
-  # C3: fixed capacity registers runners on one GitHub org or repo
-  defp check_fixed_capacity(:fixed_capacity, scope, forges) do
-    cond do
-      not Enum.any?(forges, &(&1.type == :github)) ->
+    # saving a forge refuses a second one; this is for rows that got there another way
+    case for(%Forge{mode: :fixed_capacity, name: name} <- forges, do: name) do
+      [_, _ | _] = names ->
         {:error,
-         "fixed capacity needs a GitHub forge; Forgejo forges use webhook or polling mode"}
+         "only one forge can use fixed capacity (#{Enum.join(names, ", ")} do): " <>
+           "the agents' pools fill one forge"}
 
-      scope == nil ->
-        {:error, "fixed capacity needs a runner scope (org or owner/repo)"}
+      _ ->
+        fleet = [
+          forges: Enum.map(forges, &spec(&1, s.scan_lookback_hours)),
+          idle_runner_timeout_s: s.idle_runner_timeout_s
+        ]
 
-      not RunnerScope.github?(scope) ->
-        {:error, "the fixed-capacity runner scope must be an org or owner/repo"}
+        sources =
+          for %Forge{mode: :webhook} = f <- forges, do: %{forge: f.name, secret: f.webhook_secret}
 
-      true ->
-        :ok
-    end
-  end
-
-  defp check_fixed_capacity(_mode, _scope, _forges), do: :ok
-
-  defp mode_settings(%Settings{mode: :fixed_capacity}, _forges, _mappings), do: {:ok, []}
-
-  defp mode_settings(%Settings{mode: :polling} = s, _forges, mappings),
-    do: {:ok, filters(s, mappings)}
-
-  defp mode_settings(%Settings{mode: :webhook} = s, forges, mappings) do
-    source =
-      case s.webhook_forge do
-        nil -> Enum.find(forges, &(&1.type == :github)) || hd(forges)
-        name -> Enum.find(forges, &(&1.name == name))
-      end
-
-    cond do
-      source == nil ->
-        {:error, "the webhook forge '#{s.webhook_forge}' isn't a stored forge"}
-
-      source.webhook_secret in [nil, ""] ->
-        {:error, "webhook mode needs a webhook secret on forge '#{source.name}'"}
-
-      true ->
         {:ok,
-         [path: s.webhook_path, secret: source.webhook_secret, forge: source.name] ++
-           filters(s, mappings)}
+         %{
+           fleet: fleet,
+           webhook: [path: s.webhook_path, sources: sources] ++ filters(s, mappings)
+         }}
     end
   end
 

@@ -2,7 +2,8 @@ defmodule KuiperCoordinatorWeb.Plugs.ForgejoWebhook do
   @moduledoc """
   Forgejo 17+ `workflow_job_*` webhooks (parity W4), ported from `handle_forgejo` in
   kuiper-forge/src/webhook.rs. `KuiperCoordinatorWeb.Plugs.GitHubWebhook` hands deliveries
-  here when the webhook's config has `source: :forgejo`.
+  here when they carry `X-Forgejo-Event`. The forge is the Forgejo source whose secret signed
+  the delivery.
 
   The event is `X-Forgejo-Event: workflow_job_<status>` and the signature
   `X-Forgejo-Signature: <hex>` (no `sha256=` prefix). Other events get 200 before the
@@ -14,8 +15,8 @@ defmodule KuiperCoordinatorWeb.Plugs.ForgejoWebhook do
   delivery; `running` and the finished states are announced on PubSub `"fleet"` as GitHub's
   `in_progress` and `completed` are.
 
-  Extra config (`config :kuiper_coordinator, :webhook`): `:scopes`, the Forgejo forge's
-  runner scopes (`KuiperCoordinator.Forge.RunnerScope`).
+  A Forgejo source (`config :kuiper_coordinator, :webhook`, `:sources`) also has `:scopes`,
+  the forge's runner scopes (`KuiperCoordinator.Forge.RunnerScope`).
   """
   import Plug.Conn
   require Logger
@@ -33,21 +34,22 @@ defmodule KuiperCoordinatorWeb.Plugs.ForgejoWebhook do
     with {:event, @prefix <> status} <- {:event, event_type},
          {:ok, body, conn} <-
            GitHubWebhook.read_full_body(conn, Keyword.get(config, :max_body, 25 * 1024 * 1024)),
-         {:sig, true} <-
-           {:sig, valid_signature?(config[:secret], body, header(conn, "x-forgejo-signature"))},
+         {:sig, %{forge: forge} = source} <-
+           {:sig,
+            GitHubWebhook.source_for(config, :forgejo, fn secret ->
+              valid_signature?(secret, body, header(conn, "x-forgejo-signature"))
+            end)},
          {:json, {:ok, event}} <- {:json, Jason.decode(body)},
          {:parse, {:ok, parsed}} <- {:parse, parse(event)} do
+      config = Keyword.merge(config, forge: forge, scopes: Map.get(source, :scopes, []))
       send_resp(conn, handle_event(status, event_type, parsed, config), "")
     else
       {:event, other} ->
         Logger.debug("Ignoring Forgejo webhook event type: #{inspect(other)}")
         send_resp(conn, 200, "")
 
-      {:sig, false} ->
-        Logger.warning(
-          "Forgejo webhook signature validation failed for #{event_type} on forge " <>
-            "'#{Keyword.get(config, :forge, "forgejo")}'"
-        )
+      {:sig, nil} ->
+        Logger.warning("Forgejo webhook signature validation failed for #{event_type}")
 
         send_resp(conn, 401, "")
 

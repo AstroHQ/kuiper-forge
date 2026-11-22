@@ -162,7 +162,7 @@ defmodule KuiperCoordinator.ForgesTest do
       assert_receive {:forges_changed}
       {:ok, _} = Forges.delete_forge(f)
       assert_receive {:forges_changed}
-      {:ok, _} = Forges.update_settings(%{mode: :polling})
+      {:ok, _} = Forges.update_settings(%{idle_runner_timeout_s: 300})
       assert_receive {:forges_changed}
       {:ok, m} = Forges.create_label_mapping(%{labels: ["gpu"]})
       assert_receive {:forges_changed}
@@ -173,24 +173,77 @@ defmodule KuiperCoordinator.ForgesTest do
     end
   end
 
+  describe "a forge's mode" do
+    test "polling by default, every 120 s" do
+      assert {:ok, %Forge{mode: :polling, poll_interval_s: 120}} =
+               Forges.create_forge(github_attrs())
+    end
+
+    test "webhook needs a webhook secret; a stored one counts on update" do
+      assert {:error, cs} = Forges.create_forge(github_attrs(%{mode: :webhook}))
+      assert errors(cs)[:webhook_secret]
+
+      {:ok, f} = Forges.create_forge(github_attrs(%{webhook_secret: "s"}))
+      assert {:ok, %Forge{mode: :webhook}} = Forges.update_forge(f, %{mode: :webhook})
+    end
+
+    test "fixed capacity is for a GitHub forge with an org or owner/repo scope (C3)" do
+      assert {:error, cs} = Forges.create_forge(forgejo_attrs(%{mode: :fixed_capacity}))
+      assert errors(cs)[:mode]
+
+      assert {:error, cs} = Forges.create_forge(github_attrs(%{mode: :fixed_capacity}))
+      assert errors(cs)[:runner_scope]
+
+      for bad <- ["@me", "*", "*/repo"] do
+        attrs = github_attrs(%{mode: :fixed_capacity, runner_scope: bad})
+        assert {:error, cs} = Forges.create_forge(attrs)
+        assert errors(cs)[:runner_scope]
+      end
+
+      assert {:ok, %Forge{mode: :fixed_capacity, runner_scope: "acme/repo"}} =
+               Forges.create_forge(
+                 github_attrs(%{mode: :fixed_capacity, runner_scope: "acme/repo"})
+               )
+    end
+
+    test "one forge at most uses fixed capacity; that forge can still be edited" do
+      fixed = %{mode: :fixed_capacity, runner_scope: "acme"}
+      {:ok, f} = Forges.create_forge(github_attrs(fixed))
+
+      assert {:error, cs} =
+               Forges.create_forge(github_attrs(Map.merge(fixed, %{name: "other", app_id: 43})))
+
+      assert [msg] = errors(cs)[:mode]
+      assert msg =~ "github"
+
+      assert {:ok, %Forge{runner_scope: "acme/repo"}} =
+               Forges.update_forge(f, %{runner_scope: "acme/repo"})
+    end
+
+    test "an unknown mode or a poll interval under 10 s is rejected" do
+      assert {:error, cs} = Forges.create_forge(github_attrs(%{mode: :sometimes}))
+      assert errors(cs)[:mode]
+      assert {:error, cs} = Forges.create_forge(github_attrs(%{poll_interval_s: 5}))
+      assert errors(cs)[:poll_interval_s]
+    end
+  end
+
   describe "settings" do
     test "defaults until saved, then stored as one row" do
-      assert %{mode: :fixed_capacity, idle_runner_timeout_s: 600, poll_interval_s: 120} =
+      assert %{idle_runner_timeout_s: 600, scan_lookback_hours: 168, webhook_path: "/webhook"} =
                Forges.get_settings()
 
-      assert {:ok, _} = Forges.update_settings(%{mode: :webhook, runner_scope: "acme"})
-      assert {:ok, _} = Forges.update_settings(%{poll_interval_s: 30})
-      assert %{mode: :webhook, runner_scope: "acme", poll_interval_s: 30} = Forges.get_settings()
+      assert {:ok, _} = Forges.update_settings(%{webhook_path: "/hooks"})
+      assert {:ok, _} = Forges.update_settings(%{scan_lookback_hours: 24})
+      assert %{webhook_path: "/hooks", scan_lookback_hours: 24} = Forges.get_settings()
       assert %{rows: [[1]]} = Repo.query!("SELECT count(*) FROM provisioning_settings")
     end
 
     test "bad values are rejected; a short idle timeout is raised to 120 s, 0 is off" do
-      assert {:error, cs} = Forges.update_settings(%{mode: :sometimes})
-      assert errors(cs)[:mode]
-      assert {:error, cs} = Forges.update_settings(%{runner_scope: "*/repo"})
-      assert errors(cs)[:runner_scope]
-      assert {:error, cs} = Forges.update_settings(%{poll_interval_s: 5})
-      assert errors(cs)[:poll_interval_s]
+      assert {:error, cs} = Forges.update_settings(%{webhook_path: "hook"})
+      assert errors(cs)[:webhook_path]
+      assert {:error, cs} = Forges.update_settings(%{scan_lookback_hours: 0})
+      assert errors(cs)[:scan_lookback_hours]
 
       assert {:ok, %{idle_runner_timeout_s: 120}} =
                Forges.update_settings(%{idle_runner_timeout_s: 60})
@@ -212,48 +265,47 @@ defmodule KuiperCoordinator.ForgesTest do
       assert {:ok, %{fleet: nil, webhook: []}} = Forges.fleet_config()
     end
 
-    test "fixed capacity: the GitHub forge and a parsed runner scope" do
-      {:ok, _} = Forges.create_forge(github_attrs())
-      assert {:error, msg} = Forges.fleet_config()
-      assert msg =~ "runner scope"
-
-      {:ok, _} = Forges.update_settings(%{runner_scope: "acme/repo", runner_group: "g"})
-      assert {:ok, %{fleet: fleet, webhook: []}} = Forges.fleet_config()
-      assert fleet[:mode] == :fixed_capacity
-      assert fleet[:runner_scope] == {:repo, "acme", "repo"}
-      assert fleet[:runner_group] == "g"
-
-      assert [%{name: "github", type: :github, app_id: 42, scan_lookback_hours: 168}] =
-               fleet[:forges]
-    end
-
-    test "fixed capacity with only Forgejo is refused (C3)" do
-      {:ok, _} = Forges.create_forge(forgejo_attrs())
-      {:ok, _} = Forges.update_settings(%{runner_scope: "acme"})
-      assert {:error, msg} = Forges.fleet_config()
-      assert msg =~ "GitHub"
-    end
-
-    test "polling: the interval, required labels and label mappings" do
-      {:ok, _} = Forges.create_forge(forgejo_attrs())
-
+    test "each forge's spec carries its own mode and what the mode needs" do
       {:ok, _} =
-        Forges.update_settings(%{
-          mode: :polling,
-          poll_interval_s: 30,
-          required_labels: ["self-hosted", " linux "]
-        })
+        Forges.create_forge(github_attrs(%{mode: :fixed_capacity, runner_scope: "acme/repo"}))
+
+      {:ok, _} = Forges.create_forge(forgejo_attrs(%{poll_interval_s: 30}))
+      {:ok, _} = Forges.update_settings(%{idle_runner_timeout_s: 300})
+
+      assert {:ok, %{fleet: fleet}} = Forges.fleet_config()
+      assert fleet[:idle_runner_timeout_s] == 300
+      refute Keyword.has_key?(fleet, :mode)
+
+      assert [
+               %{
+                 name: "github",
+                 type: :github,
+                 app_id: 42,
+                 scan_lookback_hours: 168,
+                 mode: :fixed_capacity,
+                 runner_scope: {:repo, "acme", "repo"}
+               },
+               %{
+                 name: "forgejo",
+                 url: "https://git.example.com",
+                 token: "tok",
+                 scopes: ["acme"],
+                 mode: :polling,
+                 poll_interval_s: 30,
+                 runner_scope: nil
+               }
+             ] = fleet[:forges]
+    end
+
+    test "the job filters: required labels and label mappings, whatever the modes" do
+      {:ok, _} = Forges.create_forge(forgejo_attrs())
+      {:ok, _} = Forges.update_settings(%{required_labels: ["self-hosted", " linux "]})
 
       {:ok, _} =
         Forges.create_label_mapping(%{labels: ["gpu"], runner_scope: "acme", forge: "forgejo"})
 
-      assert {:ok, %{fleet: fleet, webhook: webhook}} = Forges.fleet_config()
-      assert fleet[:mode] == :polling
-      assert fleet[:poll_interval_s] == 30
-
-      assert [%{name: "forgejo", url: "https://git.example.com", token: "tok", scopes: ["acme"]}] =
-               fleet[:forges]
-
+      assert {:ok, %{webhook: webhook}} = Forges.fleet_config()
+      assert webhook[:sources] == []
       assert webhook[:required_labels] == ["self-hosted", "linux"]
 
       assert webhook[:label_mappings] == [
@@ -266,21 +318,36 @@ defmodule KuiperCoordinator.ForgesTest do
              ]
     end
 
-    test "webhook: the secret is the source forge's, kept as text (F14)" do
-      {:ok, _} = Forges.create_forge(forgejo_attrs())
-      {:ok, _} = Forges.update_settings(%{mode: :webhook})
-      assert {:error, msg} = Forges.fleet_config()
-      assert msg =~ "webhook secret"
+    test "webhook: a source for every forge in webhook mode, its secret kept as text (F14)" do
+      {:ok, _} = Forges.create_forge(forgejo_attrs(%{mode: :webhook, webhook_secret: "fj"}))
+      {:ok, _} = Forges.create_forge(github_attrs(%{mode: :webhook, webhook_secret: "0123"}))
+      # has a secret, but polls: not a source
+      {:ok, _} =
+        Forges.create_forge(github_attrs(%{name: "polled", app_id: 43, webhook_secret: "x"}))
 
-      {:ok, _} = Forges.create_forge(github_attrs(%{webhook_secret: "0123"}))
+      {:ok, _} = Forges.update_settings(%{webhook_path: "/hooks"})
+
       assert {:ok, %{webhook: webhook}} = Forges.fleet_config()
-      assert webhook[:secret] == "0123"
-      assert webhook[:forge] == "github"
-      assert webhook[:path] == "/webhook"
+      assert webhook[:path] == "/hooks"
 
-      {:ok, _} = Forges.update_settings(%{webhook_forge: "nope"})
+      assert webhook[:sources] == [
+               %{forge: "github", secret: "0123"},
+               %{forge: "forgejo", secret: "fj"}
+             ]
+    end
+
+    test "two fixed-capacity forges (saving refuses the second) are an error" do
+      {:ok, _} = Forges.create_forge(github_attrs(%{mode: :fixed_capacity, runner_scope: "acme"}))
+
+      Repo.insert!(
+        struct(
+          Forge,
+          github_attrs(%{name: "other", mode: :fixed_capacity, runner_scope: "acme"})
+        )
+      )
+
       assert {:error, msg} = Forges.fleet_config()
-      assert msg =~ "nope"
+      assert msg =~ "github, other"
     end
   end
 end

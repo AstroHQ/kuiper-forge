@@ -24,14 +24,20 @@ defmodule KuiperCoordinatorWeb.Plugs.ForgejoWebhookTest do
     :ok
   end
 
+  # `:source` and `:scopes` are the one source's; the rest is the webhook's
   defp configure(opts \\ []) do
+    {source, opts} = Keyword.split(opts, [:source, :scopes])
+
+    source =
+      Map.merge(
+        %{forge: @forge, source: :forgejo, secret: @secret, scopes: [@lodge]},
+        Map.new(source)
+      )
+
     Application.put_env(
       :kuiper_coordinator,
       :webhook,
-      Keyword.merge(
-        [path: "/webhook", secret: @secret, forge: @forge, source: :forgejo, scopes: [@lodge]],
-        opts
-      )
+      Keyword.merge([path: "/webhook", sources: [source]], opts)
     )
   end
 
@@ -258,9 +264,9 @@ defmodule KuiperCoordinatorWeb.Plugs.ForgejoWebhookTest do
     assert [%{runner_group: "7", runner_scope: @lodge}] = Jobs.list_pending()
   end
 
-  test "a GitHub-source webhook ignores Forgejo deliveries" do
+  test "a Forgejo delivery is 401 when only a GitHub forge takes webhooks" do
     configure(source: :github)
-    assert deliver(fixture("waiting")) == 200
+    assert deliver(fixture("waiting")) == 401
     assert pending() == []
   end
 end

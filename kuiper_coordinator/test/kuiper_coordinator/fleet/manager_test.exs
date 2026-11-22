@@ -77,11 +77,84 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
     assert_receive :reconciled
   end
 
+  describe "forges in different modes, side by side" do
+    @mixed %{
+      "pools" => {ForgeMock, :pools},
+      "hooked" => {ForgeMock, :hooked},
+      "polled" => {ForgeMock, :polled}
+    }
+    @modes %{"pools" => :fixed_capacity, "hooked" => :webhook, "polled" => :polling}
+
+    test "the fixed-capacity forge fills the pools; only the others are scanned" do
+      test = self()
+
+      stub(AgentDispatchMock, :pool_definitions, fn ->
+        send(test, :reconciled)
+        []
+      end)
+
+      # :pools is never listed: Mox fails the test if it is
+      expect(ForgeMock, :list_queued_jobs, 2, fn client when client in [:hooked, :polled] ->
+        send(test, {:listed, client})
+        {:ok, []}
+      end)
+
+      pid = start(forges: @mixed, modes: @modes, runner_scope: @scope)
+      assert_receive :reconciled
+      assert_receive {:listed, :hooked}
+      assert_receive {:listed, :polled}
+
+      state = :sys.get_state(pid)
+      assert state.modes == @modes
+      assert %{forge_name: "pools", forge: {ForgeMock, :pools}, scope: @scope} = state.ctx
+
+      assert %{
+               "hooked" => %{kind: :webhook, every_ms: 300_000, last: hooked},
+               "polled" => %{kind: :polling, every_ms: 120_000, last: polled}
+             } = state.scans
+
+      assert is_integer(hooked) and is_integer(polled)
+      refute is_map_key(state.scans, "pools")
+      assert state.idle
+    end
+
+    test "a forge is scanned again only once its own interval has passed" do
+      test = self()
+      stub(AgentDispatchMock, :pool_definitions, fn -> [] end)
+
+      stub(ForgeMock, :list_queued_jobs, fn client ->
+        send(test, {:listed, client})
+        {:ok, []}
+      end)
+
+      pid = start(forges: @mixed, modes: @modes, runner_scope: @scope)
+      assert_receive {:listed, :hooked}
+      assert_receive {:listed, :polled}
+
+      # the poll is due at once, the webhook forge's scan isn't
+      :sys.replace_state(pid, &put_in(&1.scans["polled"].every_ms, 0))
+      send(pid, :tick)
+      assert_receive {:listed, :polled}
+      _ = :sys.get_state(pid)
+      refute_received {:listed, :hooked}
+    end
+
+    test "with no fixed-capacity forge the pools are left alone" do
+      stub(AgentDispatchMock, :select_agent, fn _, _ -> {:error, :no_available_agent} end)
+      stub(ForgeMock, :list_queued_jobs, fn _ -> {:ok, []} end)
+
+      # no pool_definitions expectation: Mox fails the test if the pools are reconciled
+      pid = start(forges: @mixed, modes: %{@modes | "pools" => :polling})
+      send(pid, :tick)
+      assert %{ctx: %{forge: nil, forge_name: nil, scope: nil}} = :sys.get_state(pid)
+    end
+  end
+
   test "fixed capacity with no runner scope creates nothing" do
     pid = start(mode: :fixed_capacity, runner_scope: nil)
     send(pid, :tick)
     # no pool_definitions expectation: Mox fails the test if it's called
-    assert %{mode: :fixed_capacity} = :sys.get_state(pid)
+    assert %{modes: %{"github" => :fixed_capacity}} = :sys.get_state(pid)
   end
 
   test "webhook mode processes pending jobs on a new job, a reprocess and a tick (P6, W7)" do
@@ -147,7 +220,7 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
     expect(AgentDispatchMock, :pool_definitions, fn -> raise "boom" end)
     pid = start(mode: :fixed_capacity, runner_scope: @scope)
     send(pid, :tick)
-    assert %{mode: :fixed_capacity} = :sys.get_state(pid)
+    assert %{modes: %{"github" => :fixed_capacity}} = :sys.get_state(pid)
     assert Process.alive?(pid)
   end
 
@@ -228,7 +301,10 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
     test "a scan that crashes is logged and the manager carries on" do
       expect(ForgeMock, :list_queued_jobs, fn :client -> raise "boom" end)
       pid = start(mode: :webhook, scan_ms: 60_000)
-      assert %{mode: :webhook, last_scan: at} = :sys.get_state(pid)
+
+      assert %{modes: %{"github" => :webhook}, scans: %{"github" => %{last: at}}} =
+               :sys.get_state(pid)
+
       assert is_integer(at)
       assert Process.alive?(pid)
     end
@@ -238,7 +314,7 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
       pid = start(mode: :fixed_capacity, runner_scope: @scope, scan_ms: 0)
       send(pid, :tick)
       # no list_queued_jobs expectation: Mox fails the test if it's called
-      assert %{last_scan: nil} = :sys.get_state(pid)
+      assert :sys.get_state(pid).scans == %{}
     end
   end
 
@@ -274,11 +350,11 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
 
     test "the poll interval sets the scan, and the tick is never slower than it" do
       {:ok, state, _} = Manager.init(mode: :polling, forges: @forges, poll_interval_s: 15)
-      assert %{scan_ms: 15_000, tick_ms: 15_000} = state
+      assert %{scans: %{"github" => %{every_ms: 15_000}}, tick_ms: 15_000} = state
       {:ok, state, _} = Manager.init(mode: :polling, forges: @forges, poll_interval_s: 1)
-      assert %{scan_ms: 10_000, tick_ms: 10_000} = state
+      assert %{scans: %{"github" => %{every_ms: 10_000}}, tick_ms: 10_000} = state
       {:ok, state, _} = Manager.init(mode: :polling, forges: @forges)
-      assert %{scan_ms: 120_000, tick_ms: 30_000} = state
+      assert %{scans: %{"github" => %{every_ms: 120_000}}, tick_ms: 30_000} = state
     end
 
     test "a tick polls again once the interval has passed, and a new job gets a pass" do
@@ -295,7 +371,7 @@ defmodule KuiperCoordinator.Fleet.ManagerTest do
       send(pid, :tick)
       assert_receive :polled
       Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, "fleet", :reprocess)
-      assert %{mode: :polling} = :sys.get_state(pid)
+      assert %{modes: %{"github" => :polling}} = :sys.get_state(pid)
     end
   end
 end

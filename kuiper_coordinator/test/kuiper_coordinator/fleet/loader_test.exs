@@ -45,18 +45,19 @@ defmodule KuiperCoordinator.Fleet.LoaderTest do
     assert Loader.status(loader) == :off
   end
 
+  defp github(extra \\ %{}),
+    do: Map.merge(%{name: "github", type: :github, app_id: 42, private_key: pem()}, extra)
+
   test "a stored forge starts the fleet; a change restarts it on the new config; delete stops it",
        %{loader: loader} do
-    {:ok, _} = Forges.update_settings(%{runner_scope: "acme"})
-
     {:ok, forge} =
-      Forges.create_forge(%{name: "github", type: :github, app_id: 42, private_key: pem()})
+      Forges.create_forge(github(%{mode: :fixed_capacity, runner_scope: "acme"}))
 
-    assert {:running, :fixed_capacity, pid1} = Loader.status(loader)
+    assert {:running, %{"github" => :fixed_capacity}, pid1} = Loader.status(loader)
     assert Process.alive?(pid1)
     assert :sys.get_state(pid1).ctx.scope == {:org, "acme"}
 
-    {:ok, _} = Forges.update_settings(%{runner_scope: "acme/repo"})
+    {:ok, forge} = Forges.update_forge(forge, %{runner_scope: "acme/repo"})
     pid2 = running_pid(loader)
     refute pid2 == pid1
     refute Process.alive?(pid1)
@@ -68,47 +69,61 @@ defmodule KuiperCoordinator.Fleet.LoaderTest do
   end
 
   test "an unchanged config leaves the running fleet alone", %{loader: loader} do
-    {:ok, _} = Forges.update_settings(%{runner_scope: "acme"})
-
-    {:ok, _} =
-      Forges.create_forge(%{name: "github", type: :github, app_id: 42, private_key: pem()})
-
+    {:ok, _} = Forges.create_forge(github())
     pid = running_pid(loader)
-    {:ok, _} = Forges.update_settings(%{runner_scope: "acme"})
+    {:ok, _} = Forges.update_settings(%{idle_runner_timeout_s: 600})
     assert running_pid(loader) == pid
   end
 
-  test "forges and settings that don't fit together turn the fleet off with the reason",
-       %{loader: loader} do
-    {:ok, _} = Forges.update_settings(%{runner_scope: "acme"})
+  test "each forge runs in its own mode, side by side", %{loader: loader} do
+    # the startup pass reconciles the fixed-capacity forge's pools; there are none here
+    Mox.stub(KuiperCoordinator.AgentDispatchMock, :pool_definitions, fn -> [] end)
+
+    {:ok, _} = Forges.create_forge(github(%{mode: :fixed_capacity, runner_scope: "acme"}))
 
     {:ok, _} =
-      Forges.create_forge(%{name: "github", type: :github, app_id: 42, private_key: pem()})
+      Forges.create_forge(
+        github(%{name: "hooked", app_id: 43, mode: :webhook, webhook_secret: "hook"})
+      )
 
+    {:ok, _} = Forges.create_forge(github(%{name: "polled", app_id: 44, poll_interval_s: 30}))
+
+    assert {:running, modes, pid} = Loader.status(loader)
+    assert modes == %{"github" => :fixed_capacity, "hooked" => :webhook, "polled" => :polling}
+
+    state = :sys.get_state(pid)
+    assert state.ctx.forge_name == "github"
+
+    assert %{"hooked" => %{kind: :webhook}, "polled" => %{kind: :polling, every_ms: 30_000}} =
+             state.scans
+
+    refute is_map_key(state.scans, "github")
+  end
+
+  test "forges that don't fit together turn the fleet off with the reason", %{loader: loader} do
+    {:ok, _} = Forges.create_forge(github(%{mode: :fixed_capacity, runner_scope: "acme"}))
     pid = running_pid(loader)
 
-    {:ok, _} = Forges.update_settings(%{mode: :webhook})
+    # saving refuses a second fixed-capacity forge, so this one goes in behind its back
+    KuiperCoordinator.Repo.insert!(
+      struct(Forges.Forge, github(%{name: "other", mode: :fixed_capacity, runner_scope: "acme"}))
+    )
+
+    {:ok, _} = Forges.update_settings(%{idle_runner_timeout_s: 300})
     assert {:error, msg} = Loader.status(loader)
-    assert msg =~ "webhook secret"
+    assert msg =~ "only one forge can use fixed capacity"
     refute Process.alive?(pid)
     assert Application.get_env(:kuiper_coordinator, :webhook) == []
   end
 
-  test "webhook mode publishes the webhook config for the plugs", %{loader: loader} do
-    {:ok, _} = Forges.update_settings(%{mode: :webhook})
+  test "a forge in webhook mode is published as a webhook source for the plugs",
+       %{loader: loader} do
+    {:ok, _} = Forges.create_forge(github(%{mode: :webhook, webhook_secret: "hook"}))
+    {:ok, _} = Forges.create_forge(github(%{name: "polled", app_id: 43}))
 
-    {:ok, _} =
-      Forges.create_forge(%{
-        name: "github",
-        type: :github,
-        app_id: 42,
-        private_key: pem(),
-        webhook_secret: "hook"
-      })
-
-    assert {:running, :webhook, _} = Loader.status(loader)
+    assert {:running, %{"github" => :webhook}, _} = Loader.status(loader)
     webhook = Application.get_env(:kuiper_coordinator, :webhook)
-    assert webhook[:secret] == "hook"
-    assert webhook[:source] == :github
+    assert webhook[:path] == "/webhook"
+    assert webhook[:sources] == [%{forge: "github", secret: "hook", source: :github}]
   end
 end

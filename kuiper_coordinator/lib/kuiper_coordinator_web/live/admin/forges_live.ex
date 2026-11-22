@@ -1,7 +1,8 @@
 defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
   @moduledoc """
-  The stored forges (D39): GitHub Apps and Forgejo instances, never their secrets, with
-  whether the fleet is running on them and why not when the forges and settings don't fit
+  The stored forges (D39): GitHub Apps and Forgejo instances with each one's provisioning
+  mode, never their secrets, with whether the fleet is running on them and why not when the
+  forges don't fit together
   (`Forges.fleet_config/0`, `Fleet.Loader.status/0`). Links to the add flows; edit and remove.
   Refreshes on `{:forges_changed}`.
   """
@@ -19,7 +20,6 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
   defp load(socket) do
     assign(socket,
       forges: Forges.list_forges(),
-      settings: Forges.get_settings(),
       config: Forges.fleet_config(),
       loader: loader_status()
     )
@@ -91,8 +91,9 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
     {:noreply, load(socket)}
   end
 
-  defp mode(:fixed_capacity), do: "fixed capacity"
-  defp mode(m), do: to_string(m)
+  defp mode(%{mode: :fixed_capacity, runner_scope: scope}), do: "fixed capacity · #{scope}"
+  defp mode(%{mode: :polling, poll_interval_s: s}), do: "polling · #{s} s"
+  defp mode(%{mode: m}), do: to_string(m)
 
   defp has_secret?(nil), do: false
   defp has_secret?(""), do: false
@@ -123,10 +124,6 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
 
       <section class="card bg-base-200 mb-4" id="fleet-state">
         <div class="card-body py-3">
-          <p>
-            Mode: <strong>{mode(@settings.mode)}</strong>
-            <span :if={@settings.runner_scope}>· scope <code>{@settings.runner_scope}</code></span>
-          </p>
           <p :if={match?({:error, _}, @config)} id="fleet-config-error" class="text-error">
             Fleet is off: {elem(@config, 1)}
           </p>
@@ -134,7 +131,7 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
             No forges stored, so nothing is provisioned.
           </p>
           <p :if={match?({:running, _, _}, @loader)} id="fleet-running" class="text-success">
-            Fleet running ({mode(elem(@loader, 1))}).
+            Fleet running on {map_size(elem(@loader, 1))} forge(s).
           </p>
           <p :if={match?({:error, _}, @loader)} id="fleet-loader-error" class="text-error">
             Fleet failed to start: {inspect(elem(@loader, 1))}
@@ -149,7 +146,7 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
       <table :if={@forges != []} class="table" id="forges">
         <thead>
           <tr>
-            <th>Name</th><th>Type</th><th>Where</th><th>Webhook secret</th><th></th>
+            <th>Name</th><th>Type</th><th>Where</th><th>Mode</th><th>Webhook secret</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -161,6 +158,7 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLive do
               <code>{f.url}</code>
               <span class="opacity-70">· {Enum.join(f.scopes, ", ")}</span>
             </td>
+            <td id={"forge-mode-#{f.id}"}>{mode(f)}</td>
             <td>{if has_secret?(f.webhook_secret), do: "set", else: "none"}</td>
             <td class="flex gap-1 justify-end">
               <button

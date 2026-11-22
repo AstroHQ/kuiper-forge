@@ -1,22 +1,32 @@
 defmodule KuiperCoordinator.Fleet.Manager do
   @moduledoc """
-  Runs provisioning (Rust FleetManager::run, parity P1, P6): `:fixed_capacity` reconciles the
-  agents' pools each tick, `:webhook` processes pending jobs each tick and whenever a job is
-  queued (`{:new_job, key}`), a job completes (`{:job_completed, key}`: it leaves the pending
-  queue, Rust fleet.rs JobCompleted) or a pass is asked for (`:reprocess`) on PubSub "fleet".
-  In webhook mode it also runs the forge scan (`Fleet.Recovery`, Rust scan_forges) at startup,
-  after a first pass over jobs left from a previous run, and then on the tick once `scan_ms`
-  has passed (Rust run_on_demand_loop). `:polling` is webhook mode without the webhook: the
-  scan (`Fleet.Recovery.poll/1`) is the only source of jobs and runs at startup and every
-  poll interval (`:poll_interval_s`, default 120, at least 10), with the tick never slower.
+  Runs provisioning (Rust FleetManager::run, parity P1, P6). Each forge has its own mode, and
+  the manager runs them side by side:
 
-  Options: `:mode`, `:forges` (a list of forge specs, built and validated at startup by
-  `Fleet.Forges`, fatal like Rust; or ready-made `%{name => Forge.t()}`), `:default_forge` (the
-  forge for fixed capacity; default the first spec), `:validate_forges` (default true), `:runner_scope`, `:tick_ms` (default 30 s, Rust's tick), `:scan_ms`
-  (default 5 min, Rust RECOVERY_SCAN_INTERVAL; the poll interval in polling mode), `:webhook` (label filters for the scan;
-  default `config :kuiper_coordinator, :webhook`), `:idle_runner_timeout_s` (on-demand modes:
-  Forgejo one-job runners idle past it are torn down, `Fleet.Idle`; default 600, 0 off, at
-  least 120), `:name`.
+    * `:fixed_capacity` - the agents' pools are reconciled each tick, with runners registered
+      on that forge. The pools name no forge, so one forge at most is in this mode.
+    * `:webhook` - pending jobs are processed each tick and whenever a job is queued
+      (`{:new_job, key}`), a job completes (`{:job_completed, key}`: it leaves the pending
+      queue, Rust fleet.rs JobCompleted) or a pass is asked for (`:reprocess`) on PubSub
+      "fleet". The forge scan (`Fleet.Recovery.scan/2`, Rust scan_forges) runs at startup,
+      after a first pass over jobs left from a previous run, and then on the tick once the
+      scan interval has passed (Rust run_on_demand_loop).
+    * `:polling` - webhook mode without the webhook: the scan (`Fleet.Recovery.poll/2`) is the
+      forge's only source of jobs and runs at startup and every poll interval, with the tick
+      never slower.
+
+  Options: `:forges` (a list of forge specs, built and validated at startup by `Fleet.Forges`,
+  fatal like Rust; or ready-made `%{name => Forge.t()}`). A spec carries its forge's `:mode`,
+  `:runner_scope` (fixed capacity) and `:poll_interval_s` (polling: default 120, at least 10).
+  `:mode`, `:runner_scope` and `:poll_interval_s` as options are for the forges that don't say
+  (every ready-made forge, say), and `:modes` (`%{name => mode}`) sets ready-made forges apart.
+  `:default_forge` (which fixed-capacity forge fills the pools, when several are; default the
+  first), `:validate_forges` (default true), `:tick_ms` (default 30 s, Rust's tick), `:scan_ms`
+  (every forge's scan interval; default 5 min for webhook forges, Rust RECOVERY_SCAN_INTERVAL,
+  and the poll interval for polling ones), `:webhook` (label filters for the scan; default
+  `config :kuiper_coordinator, :webhook`), `:idle_runner_timeout_s` (webhook and polling
+  forges: Forgejo one-job runners idle past it are torn down, `Fleet.Idle`; default 600, 0 off,
+  at least 120), `:name`.
   Started (and restarted on every forge or settings change) by `Fleet.Loader`, from the forges
   stored in Postgres (D39).
   """
@@ -51,44 +61,36 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
   @impl true
   def init(opts) do
-    mode = Keyword.get(opts, :mode, :fixed_capacity)
+    with {:ok, forges, order, settings, opts} <- build_forges(Keyword.fetch!(opts, :forges), opts),
+         nil <-
+           Enum.find_value(order, &if(settings[&1].mode not in @modes, do: settings[&1].mode)) do
+      on_demand? = Enum.any?(settings, fn {_, s} -> s.mode in @on_demand end)
+      fixed = fixed_capacity_forge(order, settings, opts)
+      scans = scans(settings, opts)
 
-    with {:mode, true} <- {:mode, mode in @modes},
-         {:ok, forges, opts} <- build_forges(Keyword.fetch!(opts, :forges), mode, opts) do
-      {default_name, default_forge} = default_forge(forges, opts)
-
-      scan_ms =
-        Keyword.get_lazy(opts, :scan_ms, fn ->
-          if mode == :polling,
-            do: Recovery.poll_interval_ms(opts[:poll_interval_s]),
-            else: Recovery.default_interval_ms()
-        end)
-
-      # never slower than the poll, so a short poll interval is honoured (Rust check_interval)
+      # never slower than the shortest poll, so it is honoured (Rust check_interval)
       default_tick =
-        if mode == :polling, do: min(@default_tick_ms, scan_ms), else: @default_tick_ms
+        Enum.min([@default_tick_ms | for({_, %{kind: :polling, every_ms: ms}} <- scans, do: ms)])
 
       state = %{
-        mode: mode,
+        modes: Map.new(settings, fn {name, s} -> {name, s.mode} end),
+        on_demand?: on_demand?,
         tick_ms: Keyword.get(opts, :tick_ms, default_tick),
-        scan_ms: scan_ms,
-        last_scan: nil,
+        # name => %{kind: :webhook | :polling, every_ms: ms, last: monotonic ms | nil}
+        scans: scans,
         grace_ms: Keyword.get(opts, :disconnect_grace_ms, @disconnect_grace_ms),
         # agent_id => the stamp of its latest disconnect, until it reconnects or fails over
         disconnects: %{},
         # fixed capacity: runner_name => when DestroyRunner was sent to drain it (F16)
         draining: %{},
-        # idle teardown of one-job runners (F13-F15); nil when off or in fixed capacity
-        idle:
-          if(mode in @on_demand,
-            do: Idle.new(Keyword.get(opts, :idle_runner_timeout_s)),
-            else: nil
-          ),
+        # idle teardown of one-job runners (F13-F15); nil when off or with no on-demand forge
+        idle: if(on_demand?, do: Idle.new(Keyword.get(opts, :idle_runner_timeout_s)), else: nil),
+        # `forge_name`, `forge` and `scope` are the fixed-capacity forge's; nil with none
         ctx: %{
           forges: forges,
-          forge_name: default_name,
-          forge: default_forge,
-          scope: Keyword.get(opts, :runner_scope),
+          forge_name: fixed,
+          forge: fixed && Map.get(forges, fixed),
+          scope: fixed && settings[fixed].runner_scope,
           async: Keyword.get(opts, :async, true)
         }
       }
@@ -99,8 +101,7 @@ defmodule KuiperCoordinator.Fleet.Manager do
           :error -> state
         end
 
-      if mode in @on_demand,
-        do: Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, "fleet")
+      if on_demand?, do: Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, "fleet")
 
       # runner events, connects and disconnects (F5, F7, P2, S4, S9)
       Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, AgentRegistry.topic())
@@ -108,53 +109,92 @@ defmodule KuiperCoordinator.Fleet.Manager do
       schedule(state)
       {:ok, state, {:continue, :startup}}
     else
-      {:mode, false} -> {:error, {:unknown_mode, mode}}
       {:error, msg} -> {:stop, {:forges, msg}}
+      mode -> {:error, {:unknown_mode, mode}}
     end
   end
 
   # Ready-made `%{name => {module, client}}` (tests) pass through. A list of specs is built and
   # validated here (fatal, as in Rust), so the clients' caches belong to this process, and the
-  # webhook learns its source forge and, for Forgejo, the scopes (`Fleet.Forges`).
-  defp build_forges(forges, _mode, opts) when is_map(forges), do: {:ok, forges, opts}
+  # webhook learns each source's kind and, for Forgejo, the scopes (`Fleet.Forges`).
+  # Returns the forges, their names in config order, and each one's provisioning settings.
+  defp build_forges(forges, opts) when is_map(forges) do
+    modes = Keyword.get(opts, :modes, %{})
+    order = forges |> Map.keys() |> Enum.sort()
+    settings = Map.new(order, &{&1, provisioning(%{mode: modes[&1]}, opts)})
+    {:ok, forges, order, settings, opts}
+  end
 
-  defp build_forges(specs, mode, opts) when is_list(specs) do
+  defp build_forges(specs, opts) when is_list(specs) do
+    specs = Enum.map(specs, &Map.new/1)
+    settings = Map.new(specs, &{&1[:name], provisioning(&1, opts)})
+
     with {:ok, built} <-
            Forges.build(specs,
              validate: Keyword.get(opts, :validate_forges, true),
              req_options: Keyword.get(opts, :req_options, [])
            ),
-         :ok <- check_mode(mode, built),
-         :ok <- configure_webhook(mode, built) do
-      {name, _} = hd(built)
-      {:ok, Map.new(built), Keyword.put_new(opts, :default_forge, name)}
+         :ok <- check_fixed_capacity(built, settings),
+         :ok <- configure_webhook(built, settings) do
+      {:ok, Map.new(built), Enum.map(built, &elem(&1, 0)), settings, opts}
     end
   end
 
+  defp provisioning(spec, opts) do
+    %{
+      mode: spec[:mode] || Keyword.get(opts, :mode, :fixed_capacity),
+      runner_scope: spec[:runner_scope] || Keyword.get(opts, :runner_scope),
+      poll_interval_s: spec[:poll_interval_s] || Keyword.get(opts, :poll_interval_s)
+    }
+  end
+
   # C3: fixed capacity needs registration tokens, which Forgejo one-job runners don't have.
-  defp check_mode(:fixed_capacity, built) do
-    if Enum.any?(built, fn {_, {mod, _}} -> mod == KuiperCoordinator.Forgejo.Client end),
+  defp check_fixed_capacity(built, settings) do
+    forgejo? = fn {name, {mod, _}} ->
+      mod == KuiperCoordinator.Forgejo.Client and settings[name].mode == :fixed_capacity
+    end
+
+    if Enum.any?(built, forgejo?),
       do: {:error, "fixed_capacity mode doesn't support Forgejo forges (one-job runners only)"},
       else: :ok
   end
 
-  defp check_mode(_mode, _built), do: :ok
+  defp configure_webhook(built, settings) do
+    if Enum.any?(settings, fn {_, s} -> s.mode == :webhook end) do
+      webhook = Application.get_env(:kuiper_coordinator, :webhook, [])
 
-  defp configure_webhook(:webhook, built) do
-    webhook = Application.get_env(:kuiper_coordinator, :webhook, [])
-
-    with {:ok, webhook} <- Forges.webhook_config(built, webhook) do
-      Application.put_env(:kuiper_coordinator, :webhook, webhook)
+      with {:ok, webhook} <- Forges.webhook_config(built, webhook) do
+        Application.put_env(:kuiper_coordinator, :webhook, webhook)
+      end
+    else
+      :ok
     end
   end
 
-  defp configure_webhook(_mode, _built), do: :ok
+  defp fixed_capacity_forge(order, settings, opts) do
+    fixed = Enum.filter(order, &(settings[&1].mode == :fixed_capacity))
+    default = Keyword.get(opts, :default_forge)
+    if default in fixed, do: default, else: List.first(fixed)
+  end
 
-  # Webhook mode: jobs left from a previous run first, then the forge scan (Rust order).
+  defp scans(settings, opts) do
+    for {name, %{mode: mode} = s} <- settings, mode in @on_demand, into: %{} do
+      every =
+        Keyword.get_lazy(opts, :scan_ms, fn ->
+          if mode == :polling,
+            do: Recovery.poll_interval_ms(s.poll_interval_s),
+            else: Recovery.default_interval_ms()
+        end)
+
+      {name, %{kind: mode, every_ms: every, last: nil}}
+    end
+  end
+
+  # On-demand forges: jobs left from a previous run first, then the forge scan (Rust order).
   @impl true
-  def handle_continue(:startup, %{mode: mode} = state) when mode in @on_demand do
+  def handle_continue(:startup, %{on_demand?: true} = state) do
     run_pass(state)
-    {:noreply, scan(state)}
+    {:noreply, scan(state, Map.keys(state.scans))}
   end
 
   def handle_continue(:startup, state), do: {:noreply, state}
@@ -164,19 +204,18 @@ defmodule KuiperCoordinator.Fleet.Manager do
     state = drain(state)
     run_pass(state)
     state = check_idle(state)
-    state = if scan_due?(state), do: scan(state), else: state
+    state = scan(state, due_scans(state))
     schedule(state)
     {:noreply, state}
   end
 
-  def handle_info({:new_job, _key}, %{mode: mode} = state) when mode in @on_demand,
-    do: pass(state)
+  def handle_info({:new_job, _key}, %{on_demand?: true} = state), do: pass(state)
 
-  def handle_info(:reprocess, %{mode: mode} = state) when mode in @on_demand, do: pass(state)
+  def handle_info(:reprocess, %{on_demand?: true} = state), do: pass(state)
 
   # Rust fleet.rs JobCompleted: the job leaves the pending queue (a job cancelled or finished
   # before a runner took it), and an agent may be free, so pending jobs get a pass.
-  def handle_info({:job_completed, key}, %{mode: mode} = state) when mode in @on_demand do
+  def handle_info({:job_completed, key}, %{on_demand?: true} = state) do
     KuiperCoordinator.Jobs.remove_pending(key)
     pass(state)
   rescue
@@ -307,7 +346,9 @@ defmodule KuiperCoordinator.Fleet.Manager do
 
   # Fixed capacity drains switched-off agents before the reconcile (Rust reconcile order, F16).
   # A drain that raises is logged and keeps the old state; the next tick tries again.
-  defp drain(%{mode: :fixed_capacity} = state) do
+  defp drain(%{ctx: %{forge: nil}} = state), do: state
+
+  defp drain(state) do
     %{state | draining: Drain.run(state.draining, state.ctx, System.monotonic_time(:millisecond))}
   rescue
     e ->
@@ -315,10 +356,8 @@ defmodule KuiperCoordinator.Fleet.Manager do
       state
   end
 
-  defp drain(state), do: state
-
-  # A pass that raises is logged; the next tick tries again.
-  defp run_pass(%{mode: mode, ctx: ctx} = state) do
+  # The pools first, then pending jobs. A pass that raises is logged; the next tick tries again.
+  defp run_pass(%{ctx: ctx} = state) do
     ctx =
       Map.put(
         ctx,
@@ -326,34 +365,41 @@ defmodule KuiperCoordinator.Fleet.Manager do
         Idle.backing_off(Map.get(state, :idle), System.monotonic_time(:millisecond))
       )
 
-    case mode do
-      :fixed_capacity -> FixedCapacity.reconcile(ctx)
-      m when m in @on_demand -> OnDemand.process_pending(ctx)
-    end
-  rescue
-    e ->
-      Logger.error("fleet #{mode} pass failed: " <> Exception.format(:error, e, __STACKTRACE__))
+    if ctx.forge, do: guarded("fixed_capacity", fn -> FixedCapacity.reconcile(ctx) end)
+    if state.on_demand?, do: guarded("on-demand", fn -> OnDemand.process_pending(ctx) end)
   end
 
-  defp scan_due?(%{mode: mode, last_scan: nil}) when mode in @on_demand, do: true
+  defp guarded(what, fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.error("fleet #{what} pass failed: " <> Exception.format(:error, e, __STACKTRACE__))
+  end
 
-  defp scan_due?(%{mode: mode, last_scan: at, scan_ms: ms}) when mode in @on_demand,
-    do: System.monotonic_time(:millisecond) - at >= ms
+  defp due_scans(%{scans: scans}) do
+    now = System.monotonic_time(:millisecond)
+    for {name, %{last: last, every_ms: ms}} <- scans, last == nil or now - last >= ms, do: name
+  end
 
-  defp scan_due?(_state), do: false
+  # Polling forges are polled, webhook forges get the recovery scan. Recovered jobs get a pass
+  # straight away (Rust recover_queued_jobs).
+  defp scan(state, []), do: state
 
-  # Recovered jobs get a pass straight away (Rust recover_queued_jobs).
-  defp scan(state) do
-    state = %{state | last_scan: System.monotonic_time(:millisecond)}
+  defp scan(state, names) do
+    now = System.monotonic_time(:millisecond)
+
+    scans =
+      Map.new(state.scans, fn {n, s} -> {n, if(n in names, do: %{s | last: now}, else: s)} end)
+
+    state = %{state | scans: scans}
+    {polled, scanned} = Enum.split_with(names, &(scans[&1].kind == :polling))
 
     try do
-      result =
-        if state.mode == :polling, do: Recovery.poll(state.ctx), else: Recovery.scan(state.ctx)
+      results =
+        if(polled == [], do: [], else: [Recovery.poll(state.ctx, polled)]) ++
+          if(scanned == [], do: [], else: [Recovery.scan(state.ctx, scanned)])
 
-      case result do
-        %{recovered: n} when n > 0 -> run_pass(state)
-        _ -> :ok
-      end
+      if Enum.any?(results, &(&1.recovered > 0)), do: run_pass(state)
     rescue
       e ->
         Logger.error("fleet forge scan failed: " <> Exception.format(:error, e, __STACKTRACE__))
@@ -363,11 +409,4 @@ defmodule KuiperCoordinator.Fleet.Manager do
   end
 
   defp schedule(%{tick_ms: ms}), do: Process.send_after(self(), :tick, ms)
-
-  defp default_forge(forges, opts) do
-    name =
-      Keyword.get(opts, :default_forge) || forges |> Map.keys() |> Enum.sort() |> List.first()
-
-    {name, Map.get(forges, name)}
-  end
 end

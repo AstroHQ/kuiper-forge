@@ -25,10 +25,12 @@ defmodule KuiperCoordinatorWeb.AdminSessionController do
           LoginThrottle.succeeded(ip)
           Logger.info("admin login username=#{user.username} ip=#{ip}")
 
+          to = AdminAuth.return_path(conn)
+
           conn
           |> AdminAuth.log_in(token)
           |> put_status(303)
-          |> redirect(to: ~p"/admin/dashboard")
+          |> redirect(to: to)
 
         :error ->
           LoginThrottle.failed(ip)
