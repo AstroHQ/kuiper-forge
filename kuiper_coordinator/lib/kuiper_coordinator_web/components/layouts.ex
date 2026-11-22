@@ -115,6 +115,7 @@ defmodule KuiperCoordinatorWeb.Layouts do
       {:dashboard, "Dashboard", ~p"/admin/dashboard"},
       {:metrics, "Metrics", ~p"/admin/metrics"},
       {:errors, "Errors", ~p"/admin/errors"},
+      {:forges, "Forges", ~p"/admin/forges"},
       {:users, "Users", ~p"/admin/users"},
       {:api_tokens, "API tokens", ~p"/admin/api-tokens"}
     ]
