@@ -93,14 +93,33 @@ gRPC, default 9543), the CA and server cert paths (`KUIPER_DATA_DIR` or
 `KUIPER_CA_CERT`, `KUIPER_CA_KEY`, `KUIPER_SERVER_CERT`, `KUIPER_SERVER_KEY`),
 and `KUIPER_ENCRYPTION_KEY` (required in prod; `openssl rand -base64 32`).
 
-Forges (GitHub Apps, Forgejo instances) and provisioning settings (mode, runner
-scope and group, poll interval, idle timeout, required labels, label mappings)
+Forges (GitHub Apps, Forgejo instances) and the provisioning settings they share
+(idle timeout, scan lookback, required labels, webhook path, label mappings)
 are stored in Postgres and edited in the admin UI (`KuiperCoordinator.Forges`).
 Secrets among them (GitHub App private keys, Forgejo tokens, webhook secrets)
 are encrypted with `KUIPER_ENCRYPTION_KEY`; lose it and they have to be entered
 again. A forge is checked against its API when it's saved and rejected if it
 doesn't work; every change reloads the fleet without a restart. With no forge
 stored, nothing is provisioned.
+
+### Provisioning modes
+
+Each forge has its own mode, set on the forge's page, and forges in different
+modes run side by side. This differs from the Rust coordinator, which has one
+`[provisioning] mode` for all of them.
+
+- **Webhook**: jobs come from the forge's deliveries. It needs a webhook secret.
+  Every forge in this mode delivers to the same path (`/webhook` by default);
+  the secret that signed a delivery says which forge it's from. A scan every
+  5 minutes picks up deliveries that were missed.
+- **Polling** (the default): jobs come from scanning the forge every poll
+  interval (120 s by default, at least 10).
+- **Fixed capacity** (GitHub only): the agents' pools are kept full of runners
+  registered in the forge's runner scope (an org or `owner/repo`). The pools
+  name no forge, so one forge at most can be in this mode.
+
+A GitHub App made from the admin UI starts in webhook mode when its webhook box
+is checked, else in polling mode.
 
 ## Admin UI
 

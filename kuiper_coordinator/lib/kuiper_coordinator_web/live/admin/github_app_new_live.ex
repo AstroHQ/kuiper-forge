@@ -31,7 +31,8 @@ defmodule KuiperCoordinatorWeb.Admin.GitHubAppNewLive do
       {:ok, %{name: name, org: org, base_url: base, webhook: webhook?}} ->
         state =
           GitHubManifest.sign_state(KuiperCoordinatorWeb.Endpoint, %{
-            "admin" => socket.assigns.current_admin.id
+            "admin" => socket.assigns.current_admin.id,
+            "webhook" => webhook?
           })
 
         manifest =
@@ -108,7 +109,7 @@ defmodule KuiperCoordinatorWeb.Admin.GitHubAppNewLive do
         <.input
           field={@form[:webhook]}
           type="checkbox"
-          label="Webhook mode (workflow_job events); off for pool-only"
+          label="Webhook mode (workflow_job events); off to poll for jobs instead"
         />
         <.button class="btn btn-primary">Create GitHub App</.button>
       </.form>

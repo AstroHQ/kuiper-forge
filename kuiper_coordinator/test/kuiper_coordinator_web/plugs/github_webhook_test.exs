@@ -12,8 +12,7 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhookTest do
 
     Application.put_env(:kuiper_coordinator, :webhook,
       path: "/webhook",
-      secret: @secret,
-      forge: "github",
+      sources: [%{forge: "github", source: :github, secret: @secret}],
       label_mappings: [
         %{labels: ["self-hosted", "macOS"], runner_scope: nil, runner_group: "mac", forge: nil},
         %{
@@ -176,6 +175,28 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhookTest do
     assert [%{job_key: "github:7"}] = Jobs.list_pending()
   end
 
+  test "with several forges in webhook mode, the secret that signed picks the forge", %{
+    conn: conn
+  } do
+    config = Application.get_env(:kuiper_coordinator, :webhook)
+
+    sources = [
+      %{forge: "github", source: :github, secret: @secret},
+      %{forge: "fj", source: :forgejo, secret: "second", scopes: []},
+      %{forge: "second", source: :github, secret: "second"}
+    ]
+
+    Application.put_env(:kuiper_coordinator, :webhook, Keyword.put(config, :sources, sources))
+
+    body = event("queued", 71, ["self-hosted", "macOS"])
+    assert deliver(conn, body, sig: sign(body, "second")).status == 200
+    assert [%{job_key: "second:71", forge: "second"}] = Jobs.list_pending()
+
+    body = event("queued", 72, ["self-hosted", "macOS"])
+    assert deliver(conn, body, sig: sign(body, "nobody")).status == 401
+    assert [_one] = Jobs.list_pending()
+  end
+
   test "a job without self-hosted is ignored by default (W5, #4)", %{conn: conn} do
     assert deliver(conn, event("queued", 3, ["macOS"])).status == 200
     assert Jobs.list_pending() == []
@@ -242,8 +263,7 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhookDbDownTest do
 
     Application.put_env(:kuiper_coordinator, :webhook,
       path: "/webhook",
-      secret: "s",
-      forge: "github"
+      sources: [%{forge: "github", source: :github, secret: "s"}]
     )
 
     on_exit(fn -> Application.put_env(:kuiper_coordinator, :webhook, old || []) end)

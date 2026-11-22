@@ -50,34 +50,33 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLiveTest do
 
     html =
       view
-      |> form("#settings-form", settings: %{poll_interval_s: "3", webhook_path: "hook"})
+      |> form("#settings-form", settings: %{scan_lookback_hours: "0", webhook_path: "hook"})
       |> render_submit()
 
-    assert html =~ "must be greater than or equal to 10"
+    assert html =~ "must be greater than 0"
     assert html =~ "must start with /"
     assert Forges.get_settings().id == 1 and is_nil(Forges.get_settings().inserted_at)
 
     view
     |> form("#settings-form",
       settings: %{
-        mode: "webhook",
-        poll_interval_s: "30",
         idle_runner_timeout_s: "60",
+        scan_lookback_hours: "24",
         required_labels: "self-hosted, macos ,,arm64",
-        webhook_path: "/gh",
-        webhook_forge: "astro"
+        webhook_path: "/gh"
       }
     )
     |> render_submit()
 
     assert_receive {:forges_changed}
     s = Forges.get_settings()
-    assert s.mode == :webhook
-    assert s.poll_interval_s == 30
+    assert s.scan_lookback_hours == 24
     assert s.idle_runner_timeout_s == 120
     assert s.required_labels == ["self-hosted", "macos", "arm64"]
     assert s.webhook_path == "/gh"
     assert render(view) =~ "Saved provisioning settings"
+    # the mode is each forge's own now
+    refute has_element?(view, ~s|[name="settings[mode]"]|)
   end
 
   test "adds, edits and removes label mappings", %{conn: conn} do

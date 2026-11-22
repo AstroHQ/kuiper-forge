@@ -1,8 +1,8 @@
 defmodule KuiperCoordinatorWeb.Admin.ProvisioningLive do
   @moduledoc """
-  How runners are provisioned (D39): the one settings row (mode, fixed-capacity scope and
-  group, idle timeout, poll interval, scan lookback, required labels, webhook path and forge)
-  and the label mappings that route jobs to a scope and group. Everything is saved through
+  What every forge's provisioning shares (D39): the one settings row (idle timeout, scan
+  lookback, required labels, webhook path) and the label mappings that route jobs to a scope
+  and group. Each forge's mode is on its own page. Everything is saved through
   `Forges`, whose broadcast makes `Fleet.Loader` restart the fleet; no reload step here.
   Lists (labels) are edited as comma-separated text.
   """
@@ -11,8 +11,7 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLive do
   alias KuiperCoordinator.Forges
   alias KuiperCoordinator.Forges.LabelMapping
 
-  @settings_fields ~w(mode runner_scope runner_group idle_runner_timeout_s poll_interval_s
-                      scan_lookback_hours webhook_path webhook_forge)
+  @settings_fields ~w(idle_runner_timeout_s scan_lookback_hours webhook_path)
   @mapping_fields ~w(runner_scope runner_group forge position)
 
   @impl true
@@ -135,13 +134,6 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLive do
   defp field_errors(form, field),
     do: Enum.map(Keyword.get_values(form.source.errors, field), &translate_error/1)
 
-  defp mode_options,
-    do: [
-      {"Fixed capacity (pools)", "fixed_capacity"},
-      {"Webhook", "webhook"},
-      {"Polling", "polling"}
-    ]
-
   @impl true
   def render(assigns) do
     ~H"""
@@ -149,8 +141,8 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLive do
       <.header>
         Provisioning
         <:subtitle>
-          How runners are made for the stored forges. Saving restarts the fleet with the new
-          settings; runners and queued jobs carry over.
+          What every forge shares; a forge's mode is set on the forge itself. Saving restarts
+          the fleet with the new settings; runners and queued jobs carry over.
         </:subtitle>
         <:actions>
           <.link navigate={~p"/admin/forges"} class="btn btn-sm">Forges</.link>
@@ -163,21 +155,10 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLive do
         phx-submit="save_settings"
         class="max-w-xl space-y-2 mb-8"
       >
-        <.input field={@settings_form[:mode]} type="select" label="Mode" options={mode_options()} />
-        <.input
-          field={@settings_form[:runner_scope]}
-          label="Runner scope (fixed capacity), like org or owner/repo"
-        />
-        <.input field={@settings_form[:runner_group]} label="Runner group (GitHub, optional)" />
         <.input
           field={@settings_form[:idle_runner_timeout_s]}
           type="number"
           label="Idle runner timeout, seconds (0 off, at least 120)"
-        />
-        <.input
-          field={@settings_form[:poll_interval_s]}
-          type="number"
-          label="Poll interval, seconds (polling mode, at least 10)"
         />
         <.input
           field={@settings_form[:scan_lookback_hours]}
@@ -191,13 +172,9 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLive do
           value={list_text(@settings_form, :required_labels)}
           errors={field_errors(@settings_form, :required_labels)}
         />
-        <.input field={@settings_form[:webhook_path]} label="Webhook path (webhook mode)" />
         <.input
-          field={@settings_form[:webhook_forge]}
-          type="select"
-          label="Webhook source forge (blank: derived from the forges)"
-          prompt=""
-          options={@forge_names}
+          field={@settings_form[:webhook_path]}
+          label="Webhook path (every forge in webhook mode delivers here)"
         />
         <.button class="btn btn-primary">Save settings</.button>
       </.form>

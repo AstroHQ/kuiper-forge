@@ -4,7 +4,7 @@ defmodule KuiperCoordinator.Forges.GitHubAppSink do
   `KuiperCoordinator.Forges`. The App is saved without the live check, since GitHub only
   installs it after this (the check wants an installation); the Forges page shows the fleet's
   state once it's installed. The forge is named after the App's slug, with the App ID added
-  when that name is taken. Override with `config :kuiper_coordinator, :github_manifest,
+  when that name is taken, and takes the App's `:mode` (default polling). Override with `config :kuiper_coordinator, :github_manifest,
   sink: Module` (tests).
   """
 
@@ -27,7 +27,8 @@ defmodule KuiperCoordinator.Forges.GitHubAppSink do
       type: :github,
       app_id: app.app_id,
       private_key: app.private_key,
-      webhook_secret: app.webhook_secret
+      webhook_secret: app.webhook_secret,
+      mode: Map.get(app, :mode, :polling)
     }
 
     case Forges.create_forge(attrs, validate: false) do

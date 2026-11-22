@@ -47,10 +47,10 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLiveTest do
     assert {:error, {:redirect, %{to: "/admin/login"}}} = live(conn, ~p"/admin/forges")
   end
 
-  test "lists forges without secrets, with the fleet's state", %{conn: conn} do
-    github!()
+  test "lists forges without secrets, each with its mode", %{conn: conn} do
+    gh = github!(%{mode: :fixed_capacity, runner_scope: "astro/ci"})
 
-    {:ok, _} =
+    {:ok, fj} =
       Forges.create_forge(%{
         name: "knope",
         type: :forgejo,
@@ -69,8 +69,42 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLiveTest do
     refute html =~ "fjtoken-secret"
     refute html =~ "whs1"
     assert has_element?(view, "#forges-nav-link.btn-active") or html =~ "Forges"
-    # default settings are fixed capacity with no runner scope: the reason is shown
-    assert has_element?(view, "#fleet-config-error", "runner scope")
+    assert has_element?(view, "#forge-mode-#{gh.id}", "fixed capacity · astro/ci")
+    assert has_element?(view, "#forge-mode-#{fj.id}", "polling · 120 s")
+    refute has_element?(view, "#fleet-config-error")
+  end
+
+  test "a forge's mode is set on its own form, with what the mode needs", %{conn: conn} do
+    f = github!()
+    {:ok, view, _} = live(conn, ~p"/admin/forges/#{f.id}/edit")
+
+    html = view |> form("#forge-form", forge: %{mode: "fixed_capacity"}) |> render_submit()
+    assert html =~ "is needed for fixed capacity"
+    assert Forges.get_forge!(f.id).mode == :polling
+
+    view
+    |> form("#forge-form", forge: %{mode: "fixed_capacity", runner_scope: "astro"})
+    |> render_submit()
+
+    assert_redirect(view, ~p"/admin/forges")
+    assert %{mode: :fixed_capacity, runner_scope: "astro"} = Forges.get_forge!(f.id)
+
+    {:ok, view, _} = live(conn, ~p"/admin/forges/#{f.id}/edit")
+
+    view
+    |> form("#forge-form", forge: %{mode: "webhook", poll_interval_s: "45"})
+    |> render_submit()
+
+    # the stored webhook secret counts
+    assert %{mode: :webhook, poll_interval_s: 45} = Forges.get_forge!(f.id)
+  end
+
+  test "a Forgejo forge has no fixed capacity to pick", %{conn: conn} do
+    {:ok, view, _} = live(conn, ~p"/admin/forges/forgejo/new")
+    assert has_element?(view, ~s|#forge-form option[value="polling"]|)
+    assert has_element?(view, ~s|#forge-form option[value="webhook"]|)
+    refute has_element?(view, ~s|#forge-form option[value="fixed_capacity"]|)
+    refute has_element?(view, ~s|[name="forge[runner_scope]"]|)
   end
 
   test "the nav has Forges", %{conn: conn} do
@@ -227,9 +261,14 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLiveTest do
 
       assert GitHubAppSink.impl() == GitHubAppSink
       assert {:ok, f} = GitHubAppSink.save_github_app(@app, "alice")
-      assert %{name: "kuiper-forge", type: :github, app_id: 4242} = f
+      assert %{name: "kuiper-forge", type: :github, app_id: 4242, mode: :polling} = f
       assert Forges.get_forge!(f.id).private_key == @pem
       assert Forges.get_forge!(f.id).webhook_secret == "whs"
+    end
+
+    test "the App's mode is the forge's" do
+      assert {:ok, %{mode: :webhook}} =
+               GitHubAppSink.save_github_app(Map.put(@app, :mode, :webhook), "alice")
     end
 
     test "a taken name gets the App id appended" do

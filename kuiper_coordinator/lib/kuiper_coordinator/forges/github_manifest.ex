@@ -29,6 +29,8 @@ defmodule KuiperCoordinator.Forges.GitHubManifest do
   @events ["workflow_job"]
 
   @type app :: %{
+          # the provisioning mode the new forge starts in, set by the callback
+          optional(:mode) => :webhook | :polling,
           app_id: integer(),
           slug: String.t(),
           name: String.t(),

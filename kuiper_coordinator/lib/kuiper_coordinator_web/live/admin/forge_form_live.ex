@@ -1,7 +1,8 @@
 defmodule KuiperCoordinatorWeb.Admin.ForgeFormLive do
   @moduledoc """
-  Add a Forgejo forge, or edit any stored forge (D39). Saving runs `Forges`' live check and
-  shows its message when the forge doesn't answer right. Secrets (private key, token, webhook
+  Add a Forgejo forge, or edit any stored forge (D39), with its provisioning mode and what
+  that mode needs. Saving runs `Forges`' live check and shows its message when the forge
+  doesn't answer right. Secrets (private key, token, webhook
   secret) are never filled back in: left blank on edit, the stored one stays.
   """
   use KuiperCoordinatorWeb, :live_view
@@ -73,7 +74,7 @@ defmodule KuiperCoordinatorWeb.Admin.ForgeFormLive do
 
   def handle_event("save", _params, socket), do: {:noreply, socket}
 
-  @fields ~w(name app_id private_key url token webhook_secret)
+  @fields ~w(name app_id private_key url token webhook_secret mode runner_scope poll_interval_s)
 
   defp attrs(params, forge) do
     base =
@@ -92,6 +93,16 @@ defmodule KuiperCoordinatorWeb.Admin.ForgeFormLive do
 
   defp str(v) when is_binary(v), do: v
   defp str(_), do: nil
+
+  # fixed capacity fills pools with registration-token runners, which Forgejo doesn't have
+  defp mode_options(:github),
+    do: [
+      {"Webhook", "webhook"},
+      {"Polling", "polling"},
+      {"Fixed capacity (pools)", "fixed_capacity"}
+    ]
+
+  defp mode_options(_type), do: [{"Webhook", "webhook"}, {"Polling", "polling"}]
 
   defp base_errors(form) do
     for {msg, _} <- Keyword.get_values(form.source.errors, :base), do: msg
@@ -149,10 +160,26 @@ defmodule KuiperCoordinatorWeb.Admin.ForgeFormLive do
           />
         <% end %>
         <.input
+          field={@form[:mode]}
+          type="select"
+          label="Mode: how jobs on this forge get runners"
+          options={mode_options(@forge.type)}
+        />
+        <.input
           field={@form[:webhook_secret]}
           type="password"
           label={secret_label("Webhook secret (webhook mode)", @forge)}
           autocomplete="off"
+        />
+        <.input
+          field={@form[:poll_interval_s]}
+          type="number"
+          label="Poll interval, seconds (polling mode, at least 10)"
+        />
+        <.input
+          :if={@forge.type == :github}
+          field={@form[:runner_scope]}
+          label="Runner scope (fixed capacity), like org or owner/repo"
         />
         <div class="flex gap-2">
           <.button class="btn btn-primary">Save</.button>

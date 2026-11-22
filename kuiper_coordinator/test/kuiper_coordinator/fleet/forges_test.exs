@@ -103,23 +103,27 @@ defmodule KuiperCoordinator.Fleet.ForgesTest do
     assert {:error, _} = Forges.build([])
   end
 
-  test "the webhook's source: named, else the first GitHub, else the first (W1); Forgejo brings its scopes" do
+  test "each webhook source gets its forge's kind; Forgejo brings its scopes" do
     {:ok, built} =
       Forges.build(
         [@fj, [name: "github", type: :github, app_id: 1, private_key: "x"]],
         validate: false
       )
 
-    assert {:ok, w} = Forges.webhook_config(built, secret: "s")
-    assert w[:forge] == "github" and w[:source] == :github and w[:secret] == "s"
+    sources = [%{forge: "github", secret: "g"}, %{forge: "fj", secret: "f"}]
+    assert {:ok, w} = Forges.webhook_config(built, path: "/hook", sources: sources)
+    assert w[:path] == "/hook"
 
-    assert {:ok, w} = Forges.webhook_config(built, forge: "fj")
-    assert w[:source] == :forgejo and w[:scopes] == [{:org, "acme"}]
+    assert w[:sources] == [
+             %{forge: "github", secret: "g", source: :github},
+             %{forge: "fj", secret: "f", source: :forgejo, scopes: [{:org, "acme"}]}
+           ]
 
-    assert {:ok, w} = Forges.webhook_config(Enum.take(built, 1), [])
-    assert w[:forge] == "fj"
+    assert {:ok, w} = Forges.webhook_config(built, [])
+    assert w[:sources] == []
 
-    assert {:error, _} = Forges.webhook_config(built, forge: "nope")
+    assert {:error, msg} = Forges.webhook_config(built, sources: [%{forge: "nope", secret: "s"}])
+    assert msg =~ "nope"
   end
 
   describe "the fleet manager builds its forges at startup" do
@@ -132,7 +136,7 @@ defmodule KuiperCoordinator.Fleet.ForgesTest do
           else: Application.delete_env(:kuiper_coordinator, :webhook)
       end)
 
-      Application.put_env(:kuiper_coordinator, :webhook, secret: "s", forge: "fj")
+      Application.put_env(:kuiper_coordinator, :webhook, sources: [%{forge: "fj", secret: "s"}])
       :ok
     end
 
@@ -151,12 +155,24 @@ defmodule KuiperCoordinator.Fleet.ForgesTest do
       assert msg =~ "write:organization"
     end
 
-    test "webhook mode points the webhook at the Forgejo forge and its scopes" do
-      assert {:ok, %{ctx: %{forge_name: "fj", forges: %{"fj" => {Forgejo, _}}}}, _} =
+    test "a forge in webhook mode gets its kind and scopes into the webhook's sources" do
+      assert {:ok, %{modes: %{"fj" => :webhook}, ctx: %{forges: %{"fj" => {Forgejo, _}}}}, _} =
                init(:webhook, forgejo())
 
-      w = Application.get_env(:kuiper_coordinator, :webhook)
-      assert w[:source] == :forgejo and w[:scopes] == [{:org, "acme"}] and w[:secret] == "s"
+      assert Application.get_env(:kuiper_coordinator, :webhook)[:sources] == [
+               %{forge: "fj", secret: "s", source: :forgejo, scopes: [{:org, "acme"}]}
+             ]
+    end
+
+    test "a spec's own mode wins over the fleet-wide one" do
+      assert {:ok, %{modes: %{"fj" => :polling}, scans: %{"fj" => %{kind: :polling}}}, _} =
+               Manager.init(
+                 name: nil,
+                 mode: :webhook,
+                 forges: [Map.put(@fj, :mode, :polling)],
+                 req_options: forgejo(),
+                 tick_ms: 60_000
+               )
     end
 
     test "fixed capacity with a Forgejo forge is refused (C3)" do

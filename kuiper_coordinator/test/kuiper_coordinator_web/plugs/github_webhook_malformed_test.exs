@@ -10,8 +10,7 @@ defmodule KuiperCoordinatorWeb.Plugs.GitHubWebhookMalformedTest do
 
     Application.put_env(:kuiper_coordinator, :webhook,
       path: "/webhook",
-      secret: @secret,
-      forge: "github",
+      sources: [%{forge: "github", source: :github, secret: @secret}],
       label_mappings: []
     )
 

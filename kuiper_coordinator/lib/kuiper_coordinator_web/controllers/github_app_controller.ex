@@ -2,7 +2,8 @@ defmodule KuiperCoordinatorWeb.GitHubAppController do
   @moduledoc """
   GitHub's redirect back from the App manifest flow (D40). The state must be one this
   coordinator signed for the admin who's signed in; only then is the single-use code
-  exchanged and the App handed to the forge sink. Then on to GitHub to install it.
+  exchanged and the App handed to the forge sink, in webhook mode when the form asked for
+  deliveries, else polling. Then on to GitHub to install it.
   """
   use KuiperCoordinatorWeb, :controller
 
@@ -14,9 +15,10 @@ defmodule KuiperCoordinatorWeb.GitHubAppController do
     admin = conn.assigns.current_admin
     opts = Keyword.take(GitHubManifest.config(), [:base_url, :req_options])
 
-    with {:ok, %{"admin" => id}} when id == admin.id <-
+    with {:ok, %{"admin" => id} = state} when id == admin.id <-
            GitHubManifest.verify_state(conn, str(params["state"])),
          {:convert, {:ok, app}} <- {:convert, GitHubManifest.convert(str(params["code"]), opts)},
+         app = Map.put(app, :mode, mode(state, app)),
          {:save, {:ok, _}} <- {:save, GitHubAppSink.impl().save_github_app(app, admin.username)} do
       Logger.info("GitHub App #{app.slug} (#{app.app_id}) created by #{admin.username}")
       redirect(conn, external: GitHubManifest.install_url(app))
@@ -38,6 +40,11 @@ defmodule KuiperCoordinatorWeb.GitHubAppController do
         back(conn, "That GitHub link isn't valid for this session. Please start again.")
     end
   end
+
+  defp mode(%{"webhook" => true}, %{webhook_secret: secret}) when secret not in [nil, ""],
+    do: :webhook
+
+  defp mode(_state, _app), do: :polling
 
   defp back(conn, message) do
     conn |> put_flash(:error, message) |> redirect(to: ~p"/admin/forges/github/new")
