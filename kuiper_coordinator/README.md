@@ -72,7 +72,7 @@ stored, nothing is provisioned.
 
 ## Admin UI
 
-Off unless `KUIPER_ADMIN=true`; served at `/admin` on the HTTP port, with the
+Always on (login required); served at `/admin` on the HTTP port, with the
 read-only JSON API at `/api/v1` (bearer `kfapi_` tokens made on the API tokens
 page). Create the first user with `KUIPER_ADMIN_PASSWORD=... bin/kuiper_coordinator
 eval 'KuiperCoordinator.Release.create_admin("admin")'`.

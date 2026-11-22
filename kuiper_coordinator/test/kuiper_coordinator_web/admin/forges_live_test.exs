@@ -15,7 +15,7 @@ defmodule KuiperCoordinatorWeb.Admin.ForgesLiveTest do
 
   setup %{conn: conn} do
     old_admin = Application.get_env(:kuiper_coordinator, :admin)
-    Application.put_env(:kuiper_coordinator, :admin, enabled: true, session_timeout_secs: 3600)
+    Application.put_env(:kuiper_coordinator, :admin, session_timeout_secs: 3600)
     on_exit(fn -> Application.put_env(:kuiper_coordinator, :admin, old_admin || []) end)
 
     Admin.LoginThrottle.reset()

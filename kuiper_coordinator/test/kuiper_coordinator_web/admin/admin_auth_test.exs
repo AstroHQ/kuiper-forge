@@ -1,6 +1,6 @@
 defmodule KuiperCoordinatorWeb.AdminAuthTest do
   @moduledoc """
-  The admin login flow (parity UI1, UI10): everything under /admin only when admin is enabled,
+  The admin login flow (parity UI1, UI10): /admin is always served (D49: no on/off switch),
   /admin goes to the dashboard, unauthenticated requests get a 303 to the login page, an expired
   session goes back to login, logout ends the session, and repeated failed logins are throttled.
   """
@@ -12,7 +12,7 @@ defmodule KuiperCoordinatorWeb.AdminAuthTest do
 
   setup do
     old = Application.get_env(:kuiper_coordinator, :admin)
-    Application.put_env(:kuiper_coordinator, :admin, enabled: true, session_timeout_secs: 3600)
+    Application.put_env(:kuiper_coordinator, :admin, session_timeout_secs: 3600)
     on_exit(fn -> Application.put_env(:kuiper_coordinator, :admin, old || []) end)
     KuiperCoordinator.Admin.LoginThrottle.reset()
     {:ok, _} = Admin.create_user("alice", "correct horse", "correct horse")
@@ -23,10 +23,13 @@ defmodule KuiperCoordinatorWeb.AdminAuthTest do
     post(conn, ~p"/admin/login", %{"username" => user, "password" => pw})
   end
 
-  test "admin routes 404 when admin is disabled", %{conn: conn} do
-    Application.put_env(:kuiper_coordinator, :admin, enabled: false)
-    assert conn |> get(~p"/admin/login") |> response(404)
-    assert conn |> get(~p"/admin/dashboard") |> response(404)
+  test "admin routes are served with no admin config at all, login still required (D49)",
+       %{conn: conn} do
+    Application.delete_env(:kuiper_coordinator, :admin)
+    assert conn |> get(~p"/admin/login") |> html_response(200) =~ "password"
+    conn = get(conn, ~p"/admin/dashboard")
+    assert redirected_to(conn, 303) == ~p"/admin/login"
+    assert {:error, {:redirect, %{to: "/admin/login"}}} = live(build_conn(), ~p"/admin/metrics")
   end
 
   test "unauthenticated requests get a 303 to the login page", %{conn: conn} do

@@ -187,4 +187,19 @@ defmodule KuiperCoordinator.AgentUpdatesTest do
     assert AgentUpdates.enabled_from_env("true")
     for off <- ["0", "false", " No ", "off"], do: refute(AgentUpdates.enabled_from_env(off))
   end
+
+  describe "child/0 (D49: no admin on/off switch)" do
+    setup do
+      old = Application.get_env(:kuiper_coordinator, :admin)
+      on_exit(fn -> Application.put_env(:kuiper_coordinator, :admin, old || []) end)
+    end
+
+    test "runs on KUIPER_UPDATE_CHECK alone" do
+      Application.put_env(:kuiper_coordinator, :admin, update_check: true)
+      assert AgentUpdates.child() == AgentUpdates
+
+      Application.put_env(:kuiper_coordinator, :admin, update_check: false)
+      assert AgentUpdates.child() == nil
+    end
+  end
 end
