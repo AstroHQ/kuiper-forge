@@ -111,7 +111,9 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     assert job =~ "CI / </span>test" and job =~ "astro/app" and job =~ "No matching agent"
   end
 
-  test "an unreadable CA shows a flash with the reason and keeps the page alive", %{conn: conn} do
+  test "an unreadable CA shows the reason inside the modal and keeps the page alive", %{
+    conn: conn
+  } do
     old = Application.get_env(:kuiper_coordinator, :agent_grpc)
 
     missing =
@@ -125,23 +127,48 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     on_exit(fn -> Application.put_env(:kuiper_coordinator, :agent_grpc, old || []) end)
 
     {:ok, view, _} = live(conn, ~p"/admin/dashboard")
-    html = view |> element("#create-token") |> render_click()
+    view |> element("#register-agent") |> render_click()
 
-    assert html =~ "Couldn&#39;t build the registration bundle"
-    assert html =~ "cannot read server CA certificate"
+    error = view |> element("#register-modal #register-error") |> render()
+    assert error =~ "Couldn&#39;t build the registration bundle"
+    assert error =~ "cannot read server CA certificate"
+    refute has_element?(view, "#register-modal #register-command")
     assert Process.alive?(view.pid)
     assert render(view) =~ "No pending tokens"
     assert Agents.list_registration_tokens() == []
+
+    view |> element("#register-close") |> render_click()
+    refute has_element?(view, "#register-modal")
   end
 
-  test "creating a token shows a kfr1_ bundle once; deleting removes it", %{conn: conn} do
+  test "Register agent opens a modal with the kfr1_ bundle in a copyable command", %{conn: conn} do
     {ca_cert, ca_key} = KuiperCoordinator.AgentGrpcCase.fixture_ca()
     KuiperCoordinator.CA.install!(ca_cert, ca_key)
     {:ok, view, html} = live(conn, ~p"/admin/dashboard")
     assert html =~ "No pending tokens"
+    refute has_element?(view, "#register-modal")
 
-    html = view |> element("#create-token") |> render_click()
-    [_, bundle] = Regex.run(~r/id="register-bundle">(kfr1_[A-Za-z0-9_-]+)</, html)
+    view |> element("#register-agent") |> render_click()
+    assert has_element?(view, "#register-modal.modal.modal-open")
+    assert has_element?(view, "#register-modal", "Copy it now; it won't be shown again")
+    # keyboard users land in the dialog and Tab stays there
+    assert has_element?(view, "#register-modal #register-box.modal-box[phx-mounted]")
+    assert has_element?(view, "#register-box #register-box-start[tabindex]")
+
+    command = view |> element("#register-modal #register-command") |> render()
+
+    [_, bundle] =
+      Regex.run(~r/kuiper-tart-agent register &#39;(kfr1_[A-Za-z0-9_-]+)&#39;/, command)
+
+    # wraps inside the modal instead of squeezing into a column or running off the edge
+    assert command =~ ~r/class="[^"]*break-all/
+    assert command =~ ~r/class="[^"]*whitespace-pre-wrap/
+    assert has_element?(view, "#register-modal", "kuiper-proxmox-agent")
+    assert has_element?(view, "#register-modal", "kuiper-libvirt-agent")
+    assert has_element?(view, "#register-copy[phx-hook][data-copy-target='#register-command']")
+    # the hook owns the label, so a refresh patch can't undo "Copied"
+    assert has_element?(view, "#register-copy #register-copy-label[phx-update='ignore']", "Copy")
+
     [%{token: token, created_by: "alice"}] = Agents.list_registration_tokens()
 
     json =
@@ -154,8 +181,36 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     assert json["u"] == "https://ci.example:9543"
     assert json["m"] == "ca"
 
-    assert view |> element("#token-#{token} button") |> render_click() =~ "No pending tokens"
-    assert Agents.list_registration_tokens() == []
+    # the bundle lives only in the modal, not on the page behind it
+    refute view |> element("#registration") |> render() =~ bundle
+  end
+
+  test "closing the modal drops the bundle; the token stays pending until deleted", %{conn: conn} do
+    {ca_cert, ca_key} = KuiperCoordinator.AgentGrpcCase.fixture_ca()
+    KuiperCoordinator.CA.install!(ca_cert, ca_key)
+    {:ok, view, _} = live(conn, ~p"/admin/dashboard")
+
+    view |> element("#register-agent") |> render_click()
+    command = view |> element("#register-command") |> render()
+    [_, bundle] = Regex.run(~r/(kfr1_[A-Za-z0-9_-]+)/, command)
+
+    html = view |> element("#register-close") |> render_click()
+    refute has_element?(view, "#register-modal")
+    refute html =~ bundle
+    assert :sys.get_state(view.pid).socket.assigns.new_bundle == nil
+
+    [%{token: token}] = Agents.list_registration_tokens()
+    assert has_element?(view, "#token-#{token}")
+
+    # reopening makes a fresh token; the old bundle never comes back
+    view |> element("#register-agent") |> render_click()
+    refute view |> element("#register-command") |> render() =~ bundle
+
+    view |> element("#register-modal") |> render_keydown(%{"key" => "Escape"})
+    refute has_element?(view, "#register-modal")
+
+    view |> element("#token-#{token} button") |> render_click()
+    refute has_element?(view, "#token-#{token}")
   end
 
   test "the availability switch marks an agent unavailable and back", %{conn: conn} do
