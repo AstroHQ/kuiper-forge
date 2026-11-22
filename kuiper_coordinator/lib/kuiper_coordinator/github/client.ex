@@ -139,6 +139,7 @@ defmodule KuiperCoordinator.GitHub.Client do
   Unregisters a runner only if it isn't running a job (G7): `:removed`, `:busy` (GitHub says
   busy, or refuses the delete with 422), or `:not_registered`.
   """
+  @impl KuiperCoordinator.Forge
   @spec remove_idle_runner(t(), scope(), String.t()) ::
           {:ok, :removed | :busy | :not_registered} | {:error, term()}
   def remove_idle_runner(c, scope, name) do

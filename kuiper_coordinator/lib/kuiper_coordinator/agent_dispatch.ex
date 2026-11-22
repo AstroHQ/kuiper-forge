@@ -63,6 +63,9 @@ defmodule KuiperCoordinator.AgentDispatch do
   """
   @callback pool_definitions() :: [PoolDefinition.t()]
 
+  @doc "Connected agents that are switched off (unavailable_at set), to drain (F16)."
+  @callback unavailable_agents() :: [agent_id()]
+
   @doc "Free slots for the pool (Rust agent_capacity / legacy_pool_capacity)."
   @callback pool_capacity(PoolDefinition.t()) :: non_neg_integer()
 
@@ -70,6 +73,7 @@ defmodule KuiperCoordinator.AgentDispatch do
   @callback select_pool_agent(PoolDefinition.t()) :: {:ok, agent_id()} | :none
 
   def pool_definitions, do: impl().pool_definitions()
+  def unavailable_agents, do: impl().unavailable_agents()
   def pool_capacity(%PoolDefinition{} = pool), do: impl().pool_capacity(pool)
   def select_pool_agent(%PoolDefinition{} = pool), do: impl().select_pool_agent(pool)
 
@@ -109,6 +113,8 @@ defmodule KuiperCoordinator.AgentDispatch.None do
   def hostname(_agent_id), do: nil
   @impl true
   def pool_definitions, do: []
+  @impl true
+  def unavailable_agents, do: []
   @impl true
   def pool_capacity(_pool), do: 0
   @impl true

@@ -13,6 +13,13 @@ defmodule KuiperCoordinator.Forge do
               :ok | {:error, term()}
   @callback scope_url(client :: term(), RunnerScope.t()) :: String.t()
 
+  @doc """
+  Unregisters a runner only if it isn't running a job (Rust remove_idle_runner, used to drain
+  unavailable agents, F16): `:removed`, `:busy`, or `:not_registered` (still booting, or gone).
+  """
+  @callback remove_idle_runner(client :: term(), RunnerScope.t(), runner_name :: String.t()) ::
+              {:ok, :removed | :busy | :not_registered} | {:error, term()}
+
   @doc "Which runner the forge's jobs need: \"github\" or \"forgejo\" (forge.rs runner_kind, R5)."
   @callback runner_kind(client :: term()) :: String.t()
 
@@ -58,6 +65,10 @@ defmodule KuiperCoordinator.Forge do
 
   def registration_token({mod, client}, scope), do: mod.registration_token(client, scope)
   def remove_runner({mod, client}, scope, name), do: mod.remove_runner(client, scope, name)
+
+  def remove_idle_runner({mod, client}, scope, name),
+    do: mod.remove_idle_runner(client, scope, name)
+
   def scope_url({mod, client}, scope), do: mod.scope_url(client, scope)
   def runner_kind({mod, client}), do: mod.runner_kind(client)
   def list_queued_jobs({mod, client}), do: mod.list_queued_jobs(client)
