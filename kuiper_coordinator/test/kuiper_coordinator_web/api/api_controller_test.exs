@@ -12,7 +12,7 @@ defmodule KuiperCoordinatorWeb.ApiControllerTest do
 
   setup %{conn: conn} do
     old = Application.get_env(:kuiper_coordinator, :admin)
-    Application.put_env(:kuiper_coordinator, :admin, enabled: true, session_timeout_secs: 3600)
+    Application.put_env(:kuiper_coordinator, :admin, session_timeout_secs: 3600)
     on_exit(fn -> Application.put_env(:kuiper_coordinator, :admin, old || []) end)
     {:ok, token, _} = ApiTokens.create("ci", "alice")
     %{conn: conn, token: token, authed: put_req_header(conn, "authorization", "Bearer #{token}")}
@@ -80,9 +80,11 @@ defmodule KuiperCoordinatorWeb.ApiControllerTest do
       assert json_response(conn, 401)["error"] == "missing bearer token"
     end
 
-    test "is off (404) while the admin UI is off, like Rust", %{authed: authed} do
-      Application.put_env(:kuiper_coordinator, :admin, enabled: false)
-      assert response(get(authed, ~p"/api/v1/status"), 404)
+    test "is served with no admin config at all (D49), bearer token still required",
+         %{conn: conn, authed: authed} do
+      Application.delete_env(:kuiper_coordinator, :admin)
+      assert json_response(get(authed, ~p"/api/v1/status"), 200)
+      assert json_response(get(conn, ~p"/api/v1/status"), 401)
     end
   end
 

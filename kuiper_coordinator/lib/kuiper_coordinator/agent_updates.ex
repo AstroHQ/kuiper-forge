@@ -50,14 +50,14 @@ defmodule KuiperCoordinator.AgentUpdates do
   def enabled_from_env(v),
     do: String.downcase(String.trim(v)) not in ~w(0 false no off)
 
-  @doc "A child spec when the admin UI and the check are on, else nil."
+  @doc "A child spec when the check is on (KUIPER_UPDATE_CHECK), else nil."
   def child do
     admin = Application.get_env(:kuiper_coordinator, :admin, [])
 
-    if Keyword.get(admin, :enabled, false) and Keyword.get(admin, :update_check, false) do
+    if Keyword.get(admin, :update_check, false) do
       __MODULE__
     else
-      if Keyword.get(admin, :enabled, false), do: Logger.info("Agent update check is off")
+      Logger.info("Agent update check is off")
       nil
     end
   end

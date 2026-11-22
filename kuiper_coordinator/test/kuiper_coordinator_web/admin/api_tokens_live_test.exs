@@ -9,7 +9,7 @@ defmodule KuiperCoordinatorWeb.Admin.ApiTokensLiveTest do
 
   setup %{conn: conn} do
     old = Application.get_env(:kuiper_coordinator, :admin)
-    Application.put_env(:kuiper_coordinator, :admin, enabled: true, session_timeout_secs: 3600)
+    Application.put_env(:kuiper_coordinator, :admin, session_timeout_secs: 3600)
     on_exit(fn -> Application.put_env(:kuiper_coordinator, :admin, old || []) end)
     Admin.LoginThrottle.reset()
     {:ok, _} = Admin.create_user("alice", "correct horse", "correct horse")
