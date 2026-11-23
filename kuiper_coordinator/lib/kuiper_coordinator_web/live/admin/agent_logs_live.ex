@@ -22,6 +22,9 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
     {"error", "Errors only"}
   ]
 
+  # hand-written Tailwind, not daisyUI's btn (AGENTS.md)
+  @outline_btn "inline-flex items-center rounded-md border border-base-300 px-3 py-1 text-sm font-medium hover:bg-base-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+
   @impl true
   def mount(%{"agent_id" => agent_id}, _session, socket) do
     agent = Agents.get_agent(agent_id) || raise NotFound
@@ -46,8 +49,9 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
         before: before,
         live?: live?
       )
-      |> load()
+      # subscribe first: a batch stored after the snapshot query then always reaches us
       |> follow(live?)
+      |> load()
 
     {:noreply, socket}
   end
@@ -119,7 +123,7 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, levels: @levels)
+    assigns = assign(assigns, levels: @levels, outline_btn: @outline_btn)
 
     ~H"""
     <Layouts.admin flash={@flash} current_admin={@current_admin} active={:dashboard}>
@@ -145,7 +149,7 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
         <.link
           :if={@older}
           patch={path(@agent.agent_id, @level, @older, false)}
-          class="btn btn-sm btn-outline"
+          class={@outline_btn}
           id="older-logs"
         >
           Older
@@ -153,7 +157,7 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
         <.link
           :if={@before}
           patch={path(@agent.agent_id, @level, nil, false)}
-          class="btn btn-sm btn-outline"
+          class={@outline_btn}
           id="newest-logs"
         >
           Newest
@@ -193,9 +197,9 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
           <button
             id="log-jump"
             type="button"
-            class="btn btn-sm btn-primary absolute bottom-3 right-6 shadow hidden"
+            class="absolute bottom-3 right-6 hidden rounded-md bg-sky-600 px-3 py-1 text-sm font-medium text-white shadow-lg hover:bg-sky-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 cursor-pointer"
           >
-            <.icon name="hero-arrow-down" class="size-4" /> Jump to newest
+            <.icon name="hero-arrow-down" class="size-4 -mt-0.5" /> Jump to newest
           </button>
         </div>
       </div>

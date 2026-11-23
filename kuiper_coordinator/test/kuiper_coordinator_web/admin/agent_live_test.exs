@@ -284,5 +284,67 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
       refute render(still) =~ "later line"
       assert render(view) =~ "later line"
     end
+
+    test "live tail and paging controls are hand-written Tailwind, not daisyUI btn",
+         %{conn: conn} do
+      agent!("agent_mac")
+      for i <- 1..501, do: log!("agent_mac", i, 3, "line #{i}")
+
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs")
+      refute has_element?(view, "#log-jump.btn")
+      assert has_element?(view, "#log-jump")
+      refute has_element?(view, "#older-logs.btn")
+      assert has_element?(view, "#older-logs")
+
+      view |> element("#older-logs") |> render_click()
+      refute has_element?(view, "#newest-logs.btn")
+      assert has_element?(view, "#newest-logs")
+    end
+
+    test "a batch stored right after the live page's snapshot query still shows up",
+         %{conn: conn} do
+      agent!("agent_mac")
+      log!("agent_mac", 1_000, 3, "old line")
+      test_pid = self()
+      once = :atomics.new(1, [])
+      handler = "race-#{System.unique_integer()}"
+
+      # runs in the LiveView process right after its snapshot query returns: the upload commits
+      # (and broadcasts) after the snapshot was read but before the page would have subscribed
+      :telemetry.attach(
+        handler,
+        [:kuiper_coordinator, :repo, :query],
+        &__MODULE__.store_mid_load/4,
+        %{test_pid: test_pid, once: once}
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs?live=1")
+      assert :atomics.get(once, 1) == 1
+      assert render(view) =~ "racing line"
+    end
   end
+
+  def store_mid_load(_event, _measure, %{source: "agent_logs", query: q}, cfg) do
+    if self() != cfg.test_pid and q =~ "LIMIT" and q =~ "DESC" and
+         :atomics.compare_exchange(cfg.once, 1, 0, 1) == :ok do
+      :ok =
+        Agents.insert_log_batch(
+          "agent_mac",
+          [
+            %{
+              timestamp_micros: 5_000,
+              seq: 1,
+              level: "INFO",
+              target: "agent",
+              message: "racing line"
+            }
+          ],
+          0
+        )
+    end
+  end
+
+  def store_mid_load(_, _, _, _), do: :ok
 end
