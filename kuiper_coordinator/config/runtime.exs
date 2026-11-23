@@ -61,6 +61,12 @@ rust_database_url =
         System.get_env("KUIPER_DATABASE__DATABASE", "kuiper_forge") <> "_phoenix"
 
     port = System.get_env("KUIPER_DATABASE__PORT", "5432")
+    # an IPv6 literal goes in brackets, or its colons run into the port's (Codex)
+    host =
+      if String.contains?(host, ":") and not String.starts_with?(host, "["),
+        do: "[#{host}]",
+        else: host
+
     "ecto://#{userinfo}@#{host}:#{port}/#{URI.encode(database, &URI.char_unreserved?/1)}"
   end
 
@@ -250,7 +256,16 @@ if config_env() == :prod do
       server; Phoenix can't use the Rust coordinator's SQLite file)
       """
 
-  maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
+  # an IPv6 database host (ECTO_IPV6, or an IPv6 literal in the URL, like one made from Rust's
+  # KUIPER_DATABASE__HOST) needs an inet6 socket
+  ipv6_host? =
+    match?(
+      {:ok, _},
+      :inet.parse_ipv6strict_address(String.to_charlist(URI.parse(database_url).host || ""))
+    )
+
+  maybe_ipv6 =
+    if System.get_env("ECTO_IPV6") in ~w(true 1) or ipv6_host?, do: [:inet6], else: []
 
   config :kuiper_coordinator, KuiperCoordinator.Repo,
     # ssl: true,

@@ -286,6 +286,28 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     refute List.keymember?(app[:env_aliases], "KUIPER_DATABASE__*", 0)
   end
 
+  test "an IPv6 KUIPER_DATABASE__HOST goes in brackets and gets an inet6 socket (Codex)" do
+    put_prod_env(%{
+      "DATABASE_URL" => nil,
+      "KUIPER_DATABASE__PATH" => nil,
+      "KUIPER_DATABASE__HOST" => "2001:db8::10",
+      "KUIPER_DATABASE__PASSWORD" => "pw"
+    })
+
+    repo = config(:prod)[:kuiper_coordinator][KuiperCoordinator.Repo]
+    assert repo[:url] == "ecto://kuiper:pw@[2001:db8::10]:5432/kuiper_forge_phoenix"
+    parsed = Ecto.Repo.Supervisor.parse_url(repo[:url])
+    assert parsed[:hostname] == "2001:db8::10"
+    assert parsed[:port] == 5432
+    assert repo[:socket_options] == [:inet6]
+
+    # a name or an IPv4 address keeps the default socket
+    System.put_env("KUIPER_DATABASE__HOST", "10.0.0.5")
+    repo = config(:prod)[:kuiper_coordinator][KuiperCoordinator.Repo]
+    assert repo[:url] =~ "@10.0.0.5:5432/"
+    assert repo[:socket_options] == []
+  end
+
   test "Rust's SQLite path isn't a database for Phoenix: without DATABASE_URL boot stops" do
     put_prod_env(%{"DATABASE_URL" => nil})
     assert_raise RuntimeError, ~r/DATABASE_URL is missing.*SQLite/s, fn -> config(:prod) end

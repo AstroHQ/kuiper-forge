@@ -22,6 +22,13 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
     <<@v2_sig, 0x21, 0x11, byte_size(addrs <> tlv)::16>> <> addrs <> tlv
   end
 
+  # a valid PROXY v2 TCP4 header whose payload is `len` bytes, padded with a NOOP TLV
+  def v2_tcp4_padded(len) do
+    addrs = <<203, 0, 113, 7, 10, 0, 0, 1, 51234::16, 9543::16>>
+    pad = len - byte_size(addrs) - 3
+    <<@v2_sig, 0x21, 0x11, len::16>> <> addrs <> <<0x04, pad::16>> <> :binary.copy(<<0>>, pad)
+  end
+
   # PROXY v2 LOCAL (a balancer's own health check): no addresses
   def v2_local, do: <<@v2_sig, 0x20, 0x00, 0::16>>
 
@@ -112,6 +119,19 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
       :ok = :gen_tcp.send(sock, bad)
       assert {:error, :closed} = :gen_tcp.recv(sock, 0, 2_000), inspect(bad)
     end
+  end
+
+  test "a PROXY v2 header longer than Rust's 536-byte cap is dropped before its payload (Codex)",
+       ctx do
+    sock = raw_connect(ctx)
+    # declares 1000 bytes and sends them: reading them all would leave the connection waiting
+    # for a TLS ClientHello instead of closing it
+    :ok = :gen_tcp.send(sock, v2_tcp4_padded(1000))
+    assert {:error, :closed} = :gen_tcp.recv(sock, 0, 2_000)
+
+    # the largest header Rust takes (536 bytes in all) is still read
+    via = start_balancer(ctx, v2_tcp4_padded(520))
+    assert {:ok, _} = connect(via)
   end
 
   # a dropped connection never starts TLS; its ssl and Cowboy processes must still go (its

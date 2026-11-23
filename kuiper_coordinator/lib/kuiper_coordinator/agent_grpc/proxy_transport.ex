@@ -9,7 +9,7 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyTransport do
   `P` (v1) or `0x0D` (v2) has a header read off it; anything else (a TLS ClientHello starts with
   `0x16`) is a direct connection, so in-cluster agents can skip the balancer. The header is read
   exactly (v1 up to its CRLF, at most 107 bytes; v2 its 16 fixed bytes plus the length they
-  give), never into the TLS bytes behind it, within `:proxy_header_timeout` (5 s, as Rust).
+  give, at most 536 bytes in all as in Rust), never into the TLS bytes behind it, within `:proxy_header_timeout` (5 s, as Rust).
   A malformed or slow header closes the connection.
 
   Everything else is `:ranch_ssl`. Peeking needs the socket-backed `gen_tcp`
@@ -20,6 +20,7 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyTransport do
 
   @default_timeout 5_000
   @v2_sig <<"\r\n\r\n", 0, "\r\nQUIT\n">>
+  @v2_max_header 536
 
   @doc "Puts this transport in place of `:ranch_ssl` in a gRPC Cowboy child spec."
   def wrap_child_spec(%{start: {m, f, [scheme, endpoint, servers, port, {rm, rf, ra}]}} = spec) do
@@ -99,6 +100,7 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyTransport do
 
   defp read_header(tcp, 0x0D, deadline) do
     with {:ok, <<@v2_sig, _ver_cmd, _fam, len::16>> = fixed} <- recv_exact(tcp, 16, deadline),
+         :ok <- check_v2_length(len),
          {:ok, rest} <- recv_exact(tcp, len, deadline) do
       {:ok, fixed <> rest}
     else
@@ -106,6 +108,11 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyTransport do
       error -> error
     end
   end
+
+  # Rust rejects a v2 header once it reaches 536 bytes (server.rs), so a client can't make the
+  # acceptor buffer a declared 64 KiB payload
+  defp check_v2_length(len) when len <= @v2_max_header - 16, do: :ok
+  defp check_v2_length(_len), do: {:error, :v2_too_long}
 
   defp read_v1(_tcp, acc, _deadline) when byte_size(acc) > 107, do: {:error, :v1_too_long}
 
