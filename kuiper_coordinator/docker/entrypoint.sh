@@ -11,7 +11,17 @@ case "$cmd" in
     /app/bin/migrate
     exec /app/bin/server
     ;;
-  migrate | server | import_rust | kuiper_coordinator)
+  import_rust)
+    # the Rust image always runs with --config $KUIPER_DATA_DIR/config.toml: read the same file,
+    # when it's there, unless the command line names one
+    conf="${KUIPER_DATA_DIR:-/data}/config.toml"
+    case " $* " in
+      *" --config "* | *" --config="*) ;;
+      *) [ -f "$conf" ] && set -- "$@" --config "$conf" ;;
+    esac
+    exec /app/bin/import_rust "$@"
+    ;;
+  migrate | server | kuiper_coordinator)
     exec "/app/bin/$cmd" "$@"
     ;;
   *)

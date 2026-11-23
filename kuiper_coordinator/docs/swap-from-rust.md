@@ -70,7 +70,8 @@ import_rust --sqlite /data/kuiper.db --config /data/config.toml
 ```
 
 `--config` is optional. It exits 2 on conflicts (what Phoenix already has and differs), 1 on an
-error. Rerunning is safe. It migrates the Phoenix database first (creating it when it's missing),
+error. Rerunning is safe. In the image, `--config /data/config.toml` is added when that file is
+there and no `--config` is given, the file the Rust image runs with. It migrates the Phoenix database first (creating it when it's missing),
 so it runs before Phoenix has ever started. See the README's import section for what's copied.
 
 ## Docker (compose)
@@ -120,8 +121,8 @@ The swap:
    ReadWriteOnce).
 2. Create the `kuiper-coordinator` Secret (database URL, CA cert, keys).
 3. Paste the Rust StatefulSet's env block (with its Secrets) into both import Jobs: an
-   env-configured install's forges are only there. The Jobs add `--config /data/config.toml`
-   when the PVC has one. `kubectl apply -f import-dry-run-job.yaml` and read its log (`kubectl logs job/kuiper-import-rust-dry-run`);
+   env-configured install's forges are only there. The image's `import_rust` adds
+   `--config /data/config.toml` when the volume has one, as the Rust image reads it. `kubectl apply -f import-dry-run-job.yaml` and read its log (`kubectl logs job/kuiper-import-rust-dry-run`);
    then `kubectl apply -f import-job.yaml` and read that one's. Each Job runs once: to run one
    again, `kubectl delete -f` it first.
 4. Apply the StatefulSet, Service and routes. Agents reconnect through the same route.

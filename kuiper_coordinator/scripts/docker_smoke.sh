@@ -84,7 +84,7 @@ ca_fingerprint() {
 agent_tls() {
   docker run --rm -v "$vol:/data" --entrypoint cat "$IMAGE" /data/ca.crt >"$work/ca.crt"
   echo | openssl s_client -connect "127.0.0.1:$agent_port" -servername localhost -CAfile "$work/ca.crt" \
-    -verify_return_error 2>&1 | grep -q "Verify return code: 0 (ok)"
+    -verify_return_error 2>&1 | grep "Verify return code: 0 (ok)" >/dev/null
 }
 
 echo "== import_rust on a fresh database, before Phoenix ever started (the swap's order)"
@@ -100,6 +100,29 @@ db.commit()
 PY
 chmod 0644 "$work/kuiper.db"
 docker run --rm -v "$vol:/data" -v "$work:/w:ro" --entrypoint cp "$IMAGE" /w/kuiper.db /data/kuiper.db
+# the Rust image's /data/config.toml: import_rust reads it without being told, as Rust does
+cat >"$work/config.toml" <<'TOML'
+[[forges]]
+name = "smoke-forgejo"
+type = "forgejo"
+url = "https://git.example.test/"
+token = "smoke-token"
+scopes = ["smoke"]
+
+[provisioning]
+mode = "webhook"
+
+[provisioning.webhook]
+secret = "smoke-webhook-secret"
+forge = "smoke-forgejo"
+TOML
+chmod 0644 "$work/config.toml"
+docker run --rm -v "$vol:/data" -v "$work:/w:ro" --entrypoint cp "$IMAGE" /w/config.toml /data/config.toml
+docker run --rm --network "$net" -v "$vol:/data" "${app_env[@]}" "$IMAGE" import_rust --sqlite /data/kuiper.db --dry-run \
+  >"$work/import.log" 2>&1 || { echo "import_rust dry run with /data/config.toml failed:"; tail -20 "$work/import.log"; exit 1; }
+grep -q "forges: 1 new" "$work/import.log" || { echo "import_rust didn't read /data/config.toml:"; tail -20 "$work/import.log"; exit 1; }
+echo "import_rust read the forge from /data/config.toml on its own"
+docker run --rm -v "$vol:/data" --entrypoint rm "$IMAGE" /data/config.toml
 for flag in --dry-run ""; do
   docker run --rm --network "$net" -v "$vol:/data" "${app_env[@]}" "$IMAGE" import_rust --sqlite /data/kuiper.db $flag \
     >"$work/import.log" 2>&1 || { echo "import_rust $flag failed on a fresh database:"; tail -20 "$work/import.log"; exit 1; }
@@ -116,7 +139,10 @@ probe() { curl -s -o /dev/null -w '%{http_code}' -H "Host: 10.244.0.7:9480" "$@"
 code="$(probe -H 'X-Forwarded-Proto: https')"
 case "$code" in 2* | 302) ;; *) echo "probe with X-Forwarded-Proto got $code"; exit 1 ;; esac
 echo "readiness probe's X-Forwarded-Proto header gets $code, not the HTTPS redirect"
-docker logs "$id-app" 2>&1 | grep -q "KUIPER_GRPC__PROXY_PROTOCOL" || { echo "PROXY alias not used"; exit 1; }
+# into a variable first: grep -q stops at the match, and with pipefail the docker logs it cut
+# off would fail the check
+logs="$(docker logs "$id-app" 2>&1)"
+grep -q "KUIPER_GRPC__PROXY_PROTOCOL" <<<"$logs" || { echo "PROXY alias not used"; tail -30 <<<"$logs"; exit 1; }
 agent_tls || { echo "agent port 9443 didn't do TLS with a cert from /data/ca.crt"; exit 1; }
 echo "agent port 9443 does TLS from the CA made in /data"
 owner="$(docker run --rm -v "$vol:/data" --entrypoint stat "$IMAGE" -c '%u:%g %a' /data/ca.key)"
