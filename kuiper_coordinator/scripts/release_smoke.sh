@@ -40,8 +40,7 @@ data="$work/data"
 export KUIPER_AGENT_PORT="$agent_port" KUIPER_DATA_DIR="$data"
 unset KUIPER_AGENT_GRPC KUIPER_CA_CERT KUIPER_CA_KEY KUIPER_SERVER_CERT KUIPER_SERVER_KEY
 
-echo "== create the database and migrate"
-"$rel/bin/kuiper_coordinator" eval 'KuiperCoordinator.Release.create_db()'
+echo "== migrate (bin/migrate creates the database)"
 "$rel/bin/migrate"
 
 echo "== bin/import_rust: a Rust SQLite DB with an env-only GitHub forge (the prod k8s shape)"

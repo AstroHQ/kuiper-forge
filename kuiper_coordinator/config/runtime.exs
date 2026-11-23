@@ -16,6 +16,105 @@ import Config
 #
 # Alternatively, you can use `mix phx.gen.release` to generate a `bin/server`
 # script that automatically sets the env var above.
+# The Rust coordinator's env names (figment's KUIPER_<SECTION>__<KEY>) work as aliases for
+# Phoenix's own, so a Rust deployment's env block (Docker, k8s) carries over unchanged (D73).
+# Phoenix's own name wins when both are set. The aliases used are logged at boot, never values.
+rust_env_aliases = [
+  {"KUIPER_CA_CERT", "KUIPER_TLS__CA_CERT"},
+  {"KUIPER_CA_KEY", "KUIPER_TLS__CA_KEY"},
+  {"KUIPER_SERVER_CERT", "KUIPER_TLS__SERVER_CERT"},
+  {"KUIPER_SERVER_KEY", "KUIPER_TLS__SERVER_KEY"},
+  {"KUIPER_SERVER_CA_CERT", "KUIPER_TLS__SERVER_CA_CERT"},
+  {"KUIPER_SERVER_TRUST_MODE", "KUIPER_TLS__SERVER_TRUST_MODE"},
+  {"KUIPER_SERVER_USE_NATIVE_ROOTS", "KUIPER_TLS__SERVER_USE_NATIVE_ROOTS"},
+  {"KUIPER_AGENT_PROXY_PROTOCOL", "KUIPER_GRPC__PROXY_PROTOCOL"},
+  {"KUIPER_COORDINATOR_URL", "KUIPER_ADMIN__COORDINATOR_URL"},
+  {"KUIPER_ADMIN_SESSION_TIMEOUT", "KUIPER_ADMIN__SESSION_TIMEOUT_SECS"},
+  {"KUIPER_UPDATE_CHECK", "KUIPER_ADMIN__UPDATE_CHECK"},
+  {"KUIPER_METRICS_RETENTION_DAYS", "KUIPER_METRICS__RETENTION_DAYS"}
+]
+
+# figment trims every env value before parsing it (so "true\n" from a ConfigMap built from a
+# file is true in Rust); Rust names are trimmed the same way, so they mean what they mean there
+rust_env = fn name ->
+  case System.get_env(name) do
+    nil -> nil
+    v -> String.trim(v)
+  end
+end
+
+env = fn name, default ->
+  case List.keyfind(rust_env_aliases, name, 0) do
+    {^name, rust} -> System.get_env(name) || rust_env.(rust) || default
+    nil -> System.get_env(name) || default
+  end
+end
+
+# booleans and integers ignore stray whitespace, from either name
+env_bool = fn name, default -> String.trim(env.(name, default)) in ~w(true 1) end
+env_int = fn name, default -> String.to_integer(String.trim(env.(name, default))) end
+
+# Rust's Postgres settings (KUIPER_DATABASE__HOST/PORT/USER/PASSWORD/DATABASE) make a
+# DATABASE_URL when it's unset, for a new database on the same server (D75): Phoenix's own
+# tables must not land in the Rust coordinator's, so the name is KUIPER_PHOENIX_DATABASE, else
+# the Rust database's name with _phoenix after it. Rust's SQLite (KUIPER_DATABASE__PATH) has
+# no server to share, so it isn't an alias.
+rust_database_url =
+  if (host = rust_env.("KUIPER_DATABASE__HOST")) && !System.get_env("DATABASE_URL") do
+    userinfo =
+      [
+        rust_env.("KUIPER_DATABASE__USER") || "kuiper",
+        rust_env.("KUIPER_DATABASE__PASSWORD")
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map_join(":", &URI.encode(&1, fn c -> URI.char_unreserved?(c) end))
+
+    database =
+      System.get_env("KUIPER_PHOENIX_DATABASE") ||
+        (rust_env.("KUIPER_DATABASE__DATABASE") || "kuiper_forge") <> "_phoenix"
+
+    port = rust_env.("KUIPER_DATABASE__PORT") || "5432"
+    # an IPv6 literal goes in brackets, or its colons run into the port's (Codex)
+    host =
+      if String.contains?(host, ":") and not String.starts_with?(host, "["),
+        do: "[#{host}]",
+        else: host
+
+    "ecto://#{userinfo}@#{host}:#{port}/#{URI.encode(database, &URI.char_unreserved?/1)}"
+  end
+
+# Rust's agent listener, KUIPER_GRPC__LISTEN_ADDR (like 0.0.0.0:9443 or [::]:9443), gives the
+# agent port and address when KUIPER_AGENT_PORT is unset, so the published port stays the same
+# (only read when KUIPER_AGENT_PORT is unset, so Phoenix's own setting can override a stale one)
+{rust_grpc_ip, rust_grpc_port} =
+  case !System.get_env("KUIPER_AGENT_PORT") && System.get_env("KUIPER_GRPC__LISTEN_ADDR") do
+    v when v in [nil, false] ->
+      {nil, nil}
+
+    addr ->
+      with [_, host, port] <- Regex.run(~r/^\[?([^\]]*)\]?:(\d+)$/, String.trim(addr)),
+           {:ok, ip} <- :inet.parse_address(String.to_charlist(host)) do
+        {ip, port}
+      else
+        _ -> raise "KUIPER_GRPC__LISTEN_ADDR must be an IP address and port, like 0.0.0.0:9443"
+      end
+  end
+
+agent_port = String.to_integer(System.get_env("KUIPER_AGENT_PORT") || rust_grpc_port || "9543")
+
+config :kuiper_coordinator,
+       :env_aliases,
+       for(
+         {phoenix, rust} <- rust_env_aliases,
+         System.get_env(rust) && !System.get_env(phoenix),
+         do: {rust, phoenix}
+       ) ++
+         if(rust_grpc_port,
+           do: [{"KUIPER_GRPC__LISTEN_ADDR", "KUIPER_AGENT_PORT"}],
+           else: []
+         ) ++
+         if(rust_database_url, do: [{"KUIPER_DATABASE__*", "DATABASE_URL"}], else: [])
+
 if System.get_env("PHX_SERVER") do
   config :kuiper_coordinator, KuiperCoordinatorWeb.Endpoint, server: true
 end
@@ -42,6 +141,10 @@ if config_env() != :test do
       do: Path.expand("../.kuiper-data", __DIR__),
       else: "/var/lib/kuiper-forge"
 
+  # KUIPER_DATA_DIR must be writable (first-launch certs, the Management socket). Rust takes its
+  # data dir as a CLI flag, not env, and its TLS files may be read-only mounts (cert-manager),
+  # so it isn't derived from them; the Phoenix Docker image sets KUIPER_DATA_DIR=/data, the
+  # Rust image's volume.
   data_dir = System.get_env("KUIPER_DATA_DIR", default_data_dir)
   # on unless KUIPER_AGENT_GRPC is false or 0 (D58)
   agent_grpc? = System.get_env("KUIPER_AGENT_GRPC", "true") not in ~w(false 0)
@@ -50,15 +153,18 @@ if config_env() != :test do
     enabled: agent_grpc?,
     data_dir: data_dir,
     ca_org: System.get_env("KUIPER_CA_ORG", "Kuiper Forge"),
-    port: String.to_integer(System.get_env("KUIPER_AGENT_PORT", "9543")),
-    ca_cert: System.get_env("KUIPER_CA_CERT", Path.join(data_dir, "ca.crt")),
-    ca_key: System.get_env("KUIPER_CA_KEY", Path.join(data_dir, "ca.key")),
-    server_cert: System.get_env("KUIPER_SERVER_CERT", Path.join(data_dir, "server.crt")),
-    server_key: System.get_env("KUIPER_SERVER_KEY", Path.join(data_dir, "server.key")),
-    server_ca_cert: System.get_env("KUIPER_SERVER_CA_CERT"),
-    server_use_native_roots:
-      System.get_env("KUIPER_SERVER_USE_NATIVE_ROOTS", "false") in ~w(true 1),
-    server_trust_mode: System.get_env("KUIPER_SERVER_TRUST_MODE", "ca"),
+    port: agent_port,
+    ip: rust_grpc_ip || {0, 0, 0, 0},
+    ca_cert: env.("KUIPER_CA_CERT", Path.join(data_dir, "ca.crt")),
+    ca_key: env.("KUIPER_CA_KEY", Path.join(data_dir, "ca.key")),
+    server_cert: env.("KUIPER_SERVER_CERT", Path.join(data_dir, "server.crt")),
+    server_key: env.("KUIPER_SERVER_KEY", Path.join(data_dir, "server.key")),
+    server_ca_cert: env.("KUIPER_SERVER_CA_CERT", nil),
+    server_use_native_roots: env_bool.("KUIPER_SERVER_USE_NATIVE_ROOTS", "false"),
+    server_trust_mode: env.("KUIPER_SERVER_TRUST_MODE", "ca"),
+    # optional PROXY v1/v2 header before TLS, for a TLS-passthrough balancer like Traefik's
+    # TLSRoute (Rust grpc.proxy_protocol, A3); direct connections still work with it on
+    proxy_protocol: env_bool.("KUIPER_AGENT_PROXY_PROTOCOL", "false"),
     # the name agents and browsers use; the server cert is checked against it at startup
     server_hostname: System.get_env("KUIPER_SERVER_HOSTNAME") || System.get_env("PHX_HOST")
 
@@ -115,18 +221,18 @@ end
 # and KUIPER_ADMIN_PASSWORD set.
 if config_env() != :test do
   config :kuiper_coordinator, :admin,
-    session_timeout_secs:
-      String.to_integer(System.get_env("KUIPER_ADMIN_SESSION_TIMEOUT", "3600")),
-    # agent-facing URL in registration bundles (Rust [admin] coordinator_url)
-    coordinator_url: System.get_env("KUIPER_COORDINATOR_URL", "https://localhost:9543"),
+    session_timeout_secs: env_int.("KUIPER_ADMIN_SESSION_TIMEOUT", "3600"),
+    # agent-facing URL in registration bundles (Rust [admin] coordinator_url); by default the
+    # agent port's, wherever it came from (Codex P1)
+    coordinator_url: env.("KUIPER_COORDINATOR_URL", "https://localhost:#{agent_port}"),
     # flag agents behind the newest GitHub release (Rust [admin] update_check, #75)
     # (KuiperCoordinator.AgentUpdates.enabled_from_env/1)
     update_check:
-      String.downcase(String.trim(System.get_env("KUIPER_UPDATE_CHECK", "true"))) not in ~w(0 false no off)
+      String.downcase(String.trim(env.("KUIPER_UPDATE_CHECK", "true"))) not in ~w(0 false no off)
 
   # run history for the metrics page (parity C7/MX7: [metrics] retention_days 90)
   config :kuiper_coordinator, :metrics,
-    retention_days: String.to_integer(System.get_env("KUIPER_METRICS_RETENTION_DAYS", "90"))
+    retention_days: env_int.("KUIPER_METRICS_RETENTION_DAYS", "90")
 end
 
 if config_env() == :dev do
@@ -155,13 +261,24 @@ end
 
 if config_env() == :prod do
   database_url =
-    System.get_env("DATABASE_URL") ||
+    System.get_env("DATABASE_URL") || rust_database_url ||
       raise """
       environment variable DATABASE_URL is missing.
       For example: ecto://USER:PASS@HOST/DATABASE
+      (or the Rust coordinator's KUIPER_DATABASE__HOST/PORT/USER/PASSWORD for a Postgres
+      server; Phoenix can't use the Rust coordinator's SQLite file)
       """
 
-  maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
+  # an IPv6 database host (ECTO_IPV6, or an IPv6 literal in the URL, like one made from Rust's
+  # KUIPER_DATABASE__HOST) needs an inet6 socket
+  ipv6_host? =
+    match?(
+      {:ok, _},
+      :inet.parse_ipv6strict_address(String.to_charlist(URI.parse(database_url).host || ""))
+    )
+
+  maybe_ipv6 =
+    if System.get_env("ECTO_IPV6") in ~w(true 1) or ipv6_host?, do: [:inet6], else: []
 
   config :kuiper_coordinator, KuiperCoordinator.Repo,
     # ssl: true,

@@ -10,7 +10,27 @@ defmodule KuiperCoordinator.Release do
     load_app()
 
     for repo <- repos() do
+      ensure_db(repo.__adapter__(), repo.config())
       {:ok, _, _} = Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :up, all: true))
+    end
+  end
+
+  # bin/migrate makes the database when it's missing: from the Rust coordinator's
+  # KUIPER_DATABASE__* the URL names a new <db>_phoenix database on its server (D75). A role
+  # that can't create databases only gets a warning; the migration then says what's wrong.
+  @doc false
+  def ensure_db(adapter, config) do
+    case adapter.storage_up(config) do
+      :ok ->
+        IO.puts(:stderr, "created the #{config[:database]} database")
+        :created
+
+      {:error, :already_up} ->
+        :ok
+
+      {:error, e} ->
+        IO.puts(:stderr, "could not create the #{config[:database]} database: #{inspect(e)}")
+        {:error, e}
     end
   end
 
