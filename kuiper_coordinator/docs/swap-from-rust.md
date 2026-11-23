@@ -33,7 +33,7 @@ sets `KUIPER_DATA_DIR=/data`.
 | *(none)* / `start` | migrate (creating the database if it's missing), then serve |
 | `migrate` | only migrate |
 | `server` | serve without migrating |
-| `import_rust --sqlite /data/kuiper.db [--dry-run]` | copy agents, tokens, admins, API tokens and forges from Rust |
+| `import_rust --sqlite /data/kuiper.db [--dry-run]` | migrate (creating the database), then copy agents, tokens, admins, API tokens and forges from Rust |
 
 On a first launch with an empty `/data` it makes the CA and server cert there, as the Rust
 entrypoint does.
@@ -70,7 +70,8 @@ import_rust --sqlite /data/kuiper.db --config /data/config.toml
 ```
 
 `--config` is optional. It exits 2 on conflicts (what Phoenix already has and differs), 1 on an
-error. Rerunning is safe. See the README's import section for what's copied.
+error. Rerunning is safe. It migrates the Phoenix database first (creating it when it's missing),
+so it runs before Phoenix has ever started. See the README's import section for what's copied.
 
 ## Docker (compose)
 
@@ -107,14 +108,17 @@ with PROXY protocol on the agent port. Apply them in your gitops repo, not from 
 - `service.yaml`: 9443 (agents) and 9480 (HTTP).
 - `ingressroute.yaml`: a Traefik `IngressRouteTCP` passing TLS through to 9443 with PROXY v2
   (as the Rust coordinator's), and an `IngressRoute` for `/admin`, `/webhook` and `/api` on 9480.
-- `import-job.yaml`: the one-time import, mounting the same PVC.
+- `import-dry-run-job.yaml` and `import-job.yaml`: the import's dry run, then the one-time import,
+  each mounting the same PVC.
 
 The swap:
 
 1. `kubectl scale statefulset kuiper-forge --replicas=0` and wait for the pod to go (the PVC is
    ReadWriteOnce).
 2. Create the `kuiper-coordinator` Secret (database URL, CA cert, keys).
-3. Apply `import-job.yaml` with `--dry-run` first; read its log; then without it.
+3. `kubectl apply -f import-dry-run-job.yaml` and read its log (`kubectl logs job/kuiper-import-rust-dry-run`);
+   then `kubectl apply -f import-job.yaml` and read that one's. Each Job runs once: to run one
+   again, `kubectl delete -f` it first.
 4. Apply the StatefulSet, Service and routes. Agents reconnect through the same route.
 5. Move the forges' webhook URL if its host changed, and check `/admin`.
 

@@ -1,5 +1,7 @@
-# One-time import from the Rust coordinator's SQLite on its PVC (stop the Rust pod first: the
-# PVC is ReadWriteOnce). Run with --dry-run, read the log, then again without it.
+# The one-time import from the Rust coordinator's SQLite on its PVC, after
+# import-dry-run-job.yaml's log looks right (stop the Rust pod first: the PVC is
+# ReadWriteOnce). It migrates the Phoenix database first. Rerunning is safe: `kubectl delete -f`
+# this file, then `apply -f` it again.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -16,7 +18,7 @@ spec:
       containers:
         - name: import
           image: ghcr.io/astrohq/kuiper-coordinator:latest
-          args: [import_rust, --sqlite, /data/kuiper.db, --dry-run]
+          args: [import_rust, --sqlite, /data/kuiper.db]
           # the Rust env block, so env-configured forges (KUIPER_GITHUB__*, KUIPER_PROVISIONING__*)
           # come across: copy it from the Rust StatefulSet, with its Secrets
           env:

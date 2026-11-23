@@ -87,7 +87,26 @@ agent_tls() {
     -verify_return_error 2>&1 | grep -q "Verify return code: 0 (ok)"
 }
 
-echo "== first boot: default command migrates (creating the database) and serves"
+echo "== import_rust on a fresh database, before Phoenix ever started (the swap's order)"
+# the Rust coordinator's SQLite schema, as sqlx makes it: shared migrations, then sqlite's
+mig="$app_dir/../kuiper-forge/migrations"
+python3 - "$work/kuiper.db" "$mig" <<'PY'
+import glob, os, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+for d in ("shared", "sqlite"):
+    for f in sorted(glob.glob(os.path.join(sys.argv[2], d, "*.sql"))):
+        db.executescript(open(f).read())
+db.commit()
+PY
+chmod 0644 "$work/kuiper.db"
+docker run --rm -v "$vol:/data" -v "$work:/w:ro" --entrypoint cp "$IMAGE" /w/kuiper.db /data/kuiper.db
+for flag in --dry-run ""; do
+  docker run --rm --network "$net" -v "$vol:/data" "${app_env[@]}" "$IMAGE" import_rust --sqlite /data/kuiper.db $flag \
+    >"$work/import.log" 2>&1 || { echo "import_rust $flag failed on a fresh database:"; tail -20 "$work/import.log"; exit 1; }
+done
+echo "import_rust migrated the fresh database and imported (dry run, then for real)"
+
+echo "== first boot: default command migrates and serves"
 boot
 echo "HTTP on 9480 answers"
 # the k8s readiness probe (deploy/k8s/statefulset.yaml) hits the pod IP over plain HTTP: prod's
