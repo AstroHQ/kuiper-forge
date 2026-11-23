@@ -18,7 +18,9 @@ spec:
       containers:
         - name: import
           image: ghcr.io/astrohq/kuiper-coordinator:latest
-          # the image adds --config /data/config.toml when the PVC has one, as the Rust image reads it
+          # the image adds --config /data/config.toml when the PVC has one, as the Rust image reads it.
+          # A Rust coordinator on Postgres: replace `--sqlite, /data/kuiper.db` with
+          # `--from, postgres://USER:PASS@HOST:PORT/DB` (its KUIPER_DATABASE__* values).
           args: [import_rust, --sqlite, /data/kuiper.db, --dry-run]
           # Paste the Rust StatefulSet's env block here, with its Secrets (and any volumeMounts and
           # volumes its private_key_path / token_path files come from, below): an env-configured
