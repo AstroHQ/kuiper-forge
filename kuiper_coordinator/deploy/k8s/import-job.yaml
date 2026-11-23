@@ -18,9 +18,18 @@ spec:
       containers:
         - name: import
           image: ghcr.io/astrohq/kuiper-coordinator:latest
-          args: [import_rust, --sqlite, /data/kuiper.db]
-          # the Rust env block, so env-configured forges (KUIPER_GITHUB__*, KUIPER_PROVISIONING__*)
-          # come across: copy it from the Rust StatefulSet, with its Secrets
+          # forges and provisioning come from the Rust config.toml on the PVC when it has one
+          # (the Rust image's default /data/config.toml), and from the Rust env block below
+          args:
+            - sh
+            - -c
+            - >-
+              if [ -f /data/config.toml ]; then set -- --config /data/config.toml; fi;
+              exec /app/bin/import_rust --sqlite /data/kuiper.db "$@"
+          # Paste the Rust StatefulSet's env block here, with its Secrets: an env-configured
+          # install's forges (KUIPER_GITHUB__*, KUIPER_PROVISIONING__*) are only
+          # there, and without them the import copies agents and users but no forges (its report
+          # lists none). Then Phoenix's own:
           env:
             - name: DATABASE_URL
               valueFrom:

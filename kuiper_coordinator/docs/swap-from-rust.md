@@ -119,7 +119,9 @@ The swap:
 1. `kubectl scale statefulset kuiper-forge --replicas=0` and wait for the pod to go (the PVC is
    ReadWriteOnce).
 2. Create the `kuiper-coordinator` Secret (database URL, CA cert, keys).
-3. `kubectl apply -f import-dry-run-job.yaml` and read its log (`kubectl logs job/kuiper-import-rust-dry-run`);
+3. Paste the Rust StatefulSet's env block (with its Secrets) into both import Jobs: an
+   env-configured install's forges are only there. The Jobs add `--config /data/config.toml`
+   when the PVC has one. `kubectl apply -f import-dry-run-job.yaml` and read its log (`kubectl logs job/kuiper-import-rust-dry-run`);
    then `kubectl apply -f import-job.yaml` and read that one's. Each Job runs once: to run one
    again, `kubectl delete -f` it first.
 4. Apply the StatefulSet, Service and routes. Agents reconnect through the same route.
