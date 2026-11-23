@@ -4,9 +4,12 @@ defmodule KuiperCoordinator.Application do
   @moduledoc false
 
   use Application
+  require Logger
 
   @impl true
   def start(_type, _args) do
+    log_env_aliases()
+
     children =
       [
         KuiperCoordinatorWeb.Telemetry,
@@ -36,6 +39,14 @@ defmodule KuiperCoordinator.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: KuiperCoordinator.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # names only, never values (D73)
+  @doc false
+  def log_env_aliases do
+    for {rust, phoenix} <- Application.get_env(:kuiper_coordinator, :env_aliases, []) do
+      Logger.info("config: using the Rust coordinator's #{rust} for #{phoenix}")
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration
