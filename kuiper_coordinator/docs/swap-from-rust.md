@@ -81,12 +81,15 @@ so it runs before Phoenix has ever started. See the README's import section for 
    volumes: the Phoenix file mounts them as external `docker_pgdata` and `docker_kuiper-data`
    (the names Compose gave them from that folder; check with `docker volume ls`), so its Postgres
    is the Rust one's, with the Rust tables for the import.
-2. Point the service at the Phoenix image, keep its `/data` volume and env, add `SECRET_KEY_BASE`,
-   `KUIPER_ENCRYPTION_KEY`, `PHX_HOST` and `DATABASE_URL` (or keep `KUIPER_DATABASE__*`), and
-   publish `9480` for the admin UI beside `9443`.
-3. `docker compose run --rm kuiper-coordinator import_rust --sqlite /data/kuiper.db --dry-run`, then
-   without `--dry-run` (with Rust on Postgres: `--from postgres://...`).
-4. `docker compose up -d kuiper-coordinator`. Agents reconnect on their own.
+2. `cp deploy/phoenix.env.sample deploy/phoenix.env` and fill in `SECRET_KEY_BASE`,
+   `KUIPER_ENCRYPTION_KEY` and `PHX_HOST`. The compose file reads the Rust service's
+   `kuiper-forge/docker/.env` as it is, keeps `KUIPER_DATABASE__*` (Phoenix makes its own
+   database beside Rust's), and publishes `9480` for the admin UI beside `9443`.
+3. From `kuiper_coordinator/`, import from the Rust Postgres (the compose stack's backend), dry
+   run first, then without `--dry-run`:
+   `docker compose -f deploy/docker-compose.yml run --rm kuiper-coordinator import_rust --from postgres://kuiper:kuiper@postgres/kuiper_forge --dry-run`
+   (a SQLite-built Rust image: `--sqlite /data/kuiper.db`).
+4. `docker compose -f deploy/docker-compose.yml up -d kuiper-coordinator`. Agents reconnect on their own.
 5. Point the forges' webhook URL at the HTTP port (`https://<host>/webhook` through your proxy) and
    log in at `/admin` with the Rust admin users (their passwords carry over; TOTP is set again).
 

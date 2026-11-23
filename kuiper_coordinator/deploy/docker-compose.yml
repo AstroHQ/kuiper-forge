@@ -28,7 +28,10 @@ services:
     volumes:
       - kuiper-data:/data
     env_file:
-      - .env          # the Rust service's; add SECRET_KEY_BASE, KUIPER_ENCRYPTION_KEY, PHX_HOST
+      # the Rust service's, where it is (paths are from this file's folder)
+      - ../../kuiper-forge/docker/.env
+      # Phoenix's own: copy phoenix.env.sample to phoenix.env and fill it in
+      - phoenix.env
     environment:
       # Rust's Postgres settings: Phoenix makes DATABASE_URL for kuiper_forge_phoenix beside it
       KUIPER_DATABASE__HOST: postgres
