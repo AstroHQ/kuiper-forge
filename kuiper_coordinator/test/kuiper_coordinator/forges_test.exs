@@ -239,11 +239,13 @@ defmodule KuiperCoordinator.ForgesTest do
       assert %{rows: [[1]]} = Repo.query!("SELECT count(*) FROM provisioning_settings")
     end
 
-    test "bad values are rejected; a short idle timeout is raised to 120 s, 0 is off" do
+    test "bad values are rejected; a short idle timeout is raised to 120 s, 0 is off; lookback 0 is no filter" do
       assert {:error, cs} = Forges.update_settings(%{webhook_path: "hook"})
       assert errors(cs)[:webhook_path]
-      assert {:error, cs} = Forges.update_settings(%{scan_lookback_hours: 0})
+      assert {:error, cs} = Forges.update_settings(%{scan_lookback_hours: -1})
       assert errors(cs)[:scan_lookback_hours]
+      # 0 turns the lookback filter off, as in the Rust coordinator (G9)
+      assert {:ok, %{scan_lookback_hours: 0}} = Forges.update_settings(%{scan_lookback_hours: 0})
 
       assert {:ok, %{idle_runner_timeout_s: 120}} =
                Forges.update_settings(%{idle_runner_timeout_s: 60})

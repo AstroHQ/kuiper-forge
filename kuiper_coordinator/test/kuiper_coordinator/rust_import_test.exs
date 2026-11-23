@@ -183,6 +183,43 @@ defmodule KuiperCoordinator.RustImportTest do
     assert Repo.aggregate(Agent, :count) == 2
   end
 
+  test "polling settings the Rust coordinator takes import and rerun clean", %{
+    url: url,
+    dir: dir
+  } do
+    config = Path.join(dir, "polling.toml")
+    System.put_env("RUST_IMPORT_TEST_FJ_TOKEN", @forgejo_token)
+    on_exit(fn -> System.delete_env("RUST_IMPORT_TEST_FJ_TOKEN") end)
+
+    # lookback 0 is "scan every repo"; an idle timeout under 120 s is raised to 120 by both
+    File.write!(config, """
+    [[forges]]
+    name = "knope"
+    type = "forgejo"
+    url = "https://git.example.test"
+    token_env = "RUST_IMPORT_TEST_FJ_TOKEN"
+    scopes = ["@jfro"]
+
+    [provisioning]
+    mode = "polling"
+    idle_runner_timeout_secs = 60
+
+    [provisioning.polling]
+    interval_secs = 30
+    queued_scan_lookback_hours = 0
+    """)
+
+    assert {:ok, _} = RustImport.run(from: url, config: config)
+    assert %{scan_lookback_hours: 0, idle_runner_timeout_s: 120} = Forges.get_settings()
+    fj = Forges.get_forge_by_name("knope")
+    assert fj.mode == :polling and fj.poll_interval_s == 30 and fj.token == @forgejo_token
+
+    assert {:ok, report} = RustImport.run(from: url, config: config)
+    refute RustImport.conflicts?(report)
+    out = report |> RustImport.format_report() |> IO.iodata_to_binary()
+    assert out =~ "provisioning settings: 1 unchanged"
+  end
+
   test "bad inputs give clear errors", %{dir: dir, url: url} do
     assert {:error, msg} = RustImport.run(from: "sqlite://" <> Path.join(dir, "nope.db"))
     assert msg =~ "no such file"

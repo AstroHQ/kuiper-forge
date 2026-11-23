@@ -390,29 +390,37 @@ defmodule KuiperCoordinator.RustImport do
 
   defp plan_settings(attrs, ledger) do
     key = ledger_key("settings", "1")
+    # compare what Phoenix would store (a short idle timeout is raised to 120 s, say)
+    cs = Settings.changeset(%Settings{}, attrs)
+    wanted = Ecto.Changeset.apply_changes(cs)
 
     case Repo.get(Settings, 1) do
       nil ->
-        if MapSet.member?(ledger, key) do
-          item(:settings, "settings", :skipped, "reset in Phoenix since the last import")
-        else
-          item(
-            :settings,
-            "settings",
-            :new,
-            nil,
-            fn ->
-              case Forges.update_settings(attrs) do
-                {:ok, _} -> :ok
-                {:error, cs} -> Repo.rollback("provisioning settings: #{errors(cs)}")
-              end
-            end,
-            key
-          )
+        cond do
+          MapSet.member?(ledger, key) ->
+            item(:settings, "settings", :skipped, "reset in Phoenix since the last import")
+
+          not cs.valid? ->
+            item(:settings, "settings", :conflict, "not valid in Phoenix: #{errors(cs)}")
+
+          true ->
+            item(
+              :settings,
+              "settings",
+              :new,
+              nil,
+              fn ->
+                case Forges.update_settings(attrs) do
+                  {:ok, _} -> :ok
+                  {:error, cs} -> Repo.rollback("provisioning settings: #{errors(cs)}")
+                end
+              end,
+              key
+            )
         end
 
       s ->
-        if Enum.all?(attrs, fn {k, v} -> Map.get(s, k) == v end),
+        if Enum.all?(Map.keys(attrs), &(Map.get(s, &1) == Map.get(wanted, &1))),
           do: item(:settings, "settings", :unchanged),
           else: item(:settings, "settings", :conflict, "Phoenix's differ; kept Phoenix's")
     end
