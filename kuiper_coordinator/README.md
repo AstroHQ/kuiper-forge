@@ -121,6 +121,43 @@ modes run side by side. This differs from the Rust coordinator, which has one
 A GitHub App made from the admin UI starts in webhook mode when its webhook box
 is checked, else in polling mode.
 
+## Moving over from the Rust coordinator
+
+`mix kuiper.import_rust` copies what a switch-over needs from a Rust coordinator, so nothing
+has to register again:
+
+```sh
+mix kuiper.import_rust --from sqlite:///var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml --dry-run
+mix kuiper.import_rust --from sqlite:///var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml
+```
+
+In a release:
+
+```sh
+bin/kuiper_coordinator eval 'KuiperCoordinator.Release.import_rust("postgres://kuiper@db/kuiper", config: "/etc/kuiper/config.toml", dry_run: true)'
+```
+
+- `--from` is the Rust database, `sqlite://PATH` or `postgres://USER:PASS@HOST/DB`. It's only
+  read. `--config` is optional; without it only the database is imported.
+- From the database: registered agents (revoked ones stay revoked; Phoenix loads the same CA, so
+  existing agent certs keep working), unexpired registration tokens, admin users (the Rust
+  Argon2id hashes log in as they are; TOTP secrets aren't imported) and API tokens (same SHA-256,
+  so Management clients keep their tokens).
+- From config.toml: forges with their secrets (`private_key_path`, `token_env`, `token_path`
+  are read the way the Rust coordinator reads them; other `KUIPER_*` overrides aren't),
+  provisioning settings and label mappings. The one global mode becomes a mode per forge: in
+  webhook mode the webhook forge takes deliveries and the others poll; in fixed capacity the
+  first forge fills the pools and the others poll. The dry run lists each forge with its mode.
+- Not imported: runners, pending jobs, sessions, agent logs, failures and run history. They're
+  short-lived and rebuild themselves.
+- `--dry-run` prints the counts and writes nothing. A real run writes everything in one
+  transaction.
+- Rerunning is safe. What Phoenix already has is left alone, and if it differs it's reported as
+  a conflict (the release function exits 2 then). The one change a rerun makes is a revocation
+  done on the Rust side since. What Phoenix removed after an import, like a used registration
+  token or a deleted user, isn't brought back.
+- The output never shows a secret: tokens show as their prefix.
+
 ## Admin UI
 
 Always on (login required); served at `/admin` on the HTTP port, with the

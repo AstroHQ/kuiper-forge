@@ -70,6 +70,22 @@ defmodule KuiperCoordinator.Release do
     end)
   end
 
+  @doc """
+  Imports agents, tokens, admin users, API tokens and (with `config:`) forges from a Rust
+  coordinator (`KuiperCoordinator.RustImport`):
+
+      bin/kuiper_coordinator eval 'KuiperCoordinator.Release.import_rust("sqlite:///var/lib/kuiper/kuiper.db", config: "/etc/kuiper/config.toml", dry_run: true)'
+
+  Exits 1 on an error, 2 when something conflicted (the rest is imported, conflicts are left
+  as Phoenix has them).
+  """
+  def import_rust(from, opts \\ []) do
+    with_repo(fn ->
+      report = KuiperCoordinator.RustImport.cli([{:from, from} | opts], &fail/1)
+      if KuiperCoordinator.RustImport.conflicts?(report), do: System.halt(2)
+    end)
+  end
+
   defp password! do
     case System.get_env("KUIPER_ADMIN_PASSWORD") do
       pw when pw in [nil, ""] -> fail("set KUIPER_ADMIN_PASSWORD")
