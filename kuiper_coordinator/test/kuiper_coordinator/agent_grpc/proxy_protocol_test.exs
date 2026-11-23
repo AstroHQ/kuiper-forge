@@ -151,23 +151,32 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
   @tag :no_server
   test "the Rust coordinator's prod env block boots the agent port behind a PROXY balancer",
        ctx do
+    # the Rust image's /data volume: its CA and server cert, nothing else set for the data dir
+    data = Path.join(ctx.dir, "data")
+    File.mkdir_p!(data)
+    File.cp!(ctx.certs.ca_cert, Path.join(data, "ca.crt"))
+    File.cp!(ctx.certs.ca_key, Path.join(data, "ca.key"))
+
     rust_env = %{
-      "KUIPER_TLS__CA_CERT" => ctx.certs.ca_cert,
-      "KUIPER_TLS__CA_KEY" => ctx.certs.ca_key,
+      "KUIPER_TLS__CA_CERT" => Path.join(data, "ca.crt"),
+      "KUIPER_TLS__CA_KEY" => Path.join(data, "ca.key"),
       "KUIPER_TLS__SERVER_CERT" => ctx.certs.server_cert,
       "KUIPER_TLS__SERVER_KEY" => ctx.certs.server_key,
       "KUIPER_TLS__SERVER_TRUST_MODE" => "chain",
       "KUIPER_TLS__SERVER_USE_NATIVE_ROOTS" => "true",
-      "KUIPER_GRPC__LISTEN_ADDR" => "0.0.0.0:9443",
+      "KUIPER_GRPC__LISTEN_ADDR" => "127.0.0.1:#{ctx.port}",
       "KUIPER_GRPC__PROXY_PROTOCOL" => "true",
       "KUIPER_ADMIN__COORDINATOR_URL" => "https://localhost:#{ctx.port}",
       "KUIPER_DATABASE__PATH" => "/data/kuiper.db",
-      "KUIPER_DATA_DIR" => ctx.dir,
       "PHX_HOST" => "localhost",
       "DATABASE_URL" => "ecto://kuiper:pw@pg/kuiper_phoenix",
       "SECRET_KEY_BASE" => String.duplicate("s", 64),
       "KUIPER_ENCRYPTION_KEY" => Base.encode64(:crypto.strong_rand_bytes(32))
     }
+
+    # nothing of Phoenix's own set
+    for name <- ~w(KUIPER_DATA_DIR KUIPER_AGENT_PORT KUIPER_CA_CERT),
+        do: assert(System.get_env(name) == nil)
 
     saved = Map.new(rust_env, fn {k, _} -> {k, System.get_env(k)} end)
     Enum.each(rust_env, fn {k, v} -> System.put_env(k, v) end)
@@ -184,9 +193,10 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
     assert settings[:proxy_protocol]
     assert settings[:server_cert] == ctx.certs.server_cert
     assert settings[:server_trust_mode] == "chain"
+    assert settings[:data_dir] == data
+    assert {settings[:ip], settings[:port]} == {{127, 0, 0, 1}, ctx.port}
 
-    settings =
-      Keyword.merge(settings, port: ctx.port, ip: {127, 0, 0, 1}, proxy_header_timeout: 300)
+    settings = Keyword.put(settings, :proxy_header_timeout, 300)
 
     Application.put_env(:kuiper_coordinator, :agent_grpc, settings)
     start_supervised!({KuiperCoordinator.AgentGrpc.Supervisor, settings})

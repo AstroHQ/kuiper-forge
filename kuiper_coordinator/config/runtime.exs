@@ -64,6 +64,27 @@ rust_database_url =
     "ecto://#{userinfo}@#{host}:#{port}/#{URI.encode(database, &URI.char_unreserved?/1)}"
   end
 
+# Rust's agent listener, KUIPER_GRPC__LISTEN_ADDR (like 0.0.0.0:9443 or [::]:9443), gives the
+# agent port and address when KUIPER_AGENT_PORT is unset, so the published port stays the same
+{rust_grpc_ip, rust_grpc_port} =
+  case System.get_env("KUIPER_GRPC__LISTEN_ADDR") do
+    nil ->
+      {nil, nil}
+
+    addr ->
+      with [_, host, port] <- Regex.run(~r/^\[?([^\]]*)\]?:(\d+)$/, String.trim(addr)),
+           {:ok, ip} <- :inet.parse_address(String.to_charlist(host)) do
+        {ip, port}
+      else
+        _ -> raise "KUIPER_GRPC__LISTEN_ADDR must be an IP address and port, like 0.0.0.0:9443"
+      end
+  end
+
+rust_ca_dir =
+  if !System.get_env("KUIPER_DATA_DIR") && !System.get_env("KUIPER_CA_CERT") do
+    if ca = System.get_env("KUIPER_TLS__CA_CERT"), do: Path.dirname(ca)
+  end
+
 config :kuiper_coordinator,
        :env_aliases,
        for(
@@ -71,6 +92,11 @@ config :kuiper_coordinator,
          System.get_env(rust) && !System.get_env(phoenix),
          do: {rust, phoenix}
        ) ++
+         if(rust_grpc_port && !System.get_env("KUIPER_AGENT_PORT"),
+           do: [{"KUIPER_GRPC__LISTEN_ADDR", "KUIPER_AGENT_PORT"}],
+           else: []
+         ) ++
+         if(rust_ca_dir, do: [{"KUIPER_TLS__CA_CERT's directory", "KUIPER_DATA_DIR"}], else: []) ++
          if(rust_database_url, do: [{"KUIPER_DATABASE__*", "DATABASE_URL"}], else: [])
 
 if System.get_env("PHX_SERVER") do
@@ -99,7 +125,12 @@ if config_env() != :test do
       do: Path.expand("../.kuiper-data", __DIR__),
       else: "/var/lib/kuiper-forge"
 
-  data_dir = System.get_env("KUIPER_DATA_DIR", default_data_dir)
+  # a Rust deployment keeps its CA on its writable volume (/data in its image) and has no data
+  # dir setting, so that volume is the data dir there (not /var/lib, which its user can't write)
+  data_dir =
+    System.get_env("KUIPER_DATA_DIR") ||
+      if(rust_ca_dir, do: rust_ca_dir, else: default_data_dir)
+
   # on unless KUIPER_AGENT_GRPC is false or 0 (D58)
   agent_grpc? = System.get_env("KUIPER_AGENT_GRPC", "true") not in ~w(false 0)
 
@@ -107,7 +138,8 @@ if config_env() != :test do
     enabled: agent_grpc?,
     data_dir: data_dir,
     ca_org: System.get_env("KUIPER_CA_ORG", "Kuiper Forge"),
-    port: String.to_integer(System.get_env("KUIPER_AGENT_PORT", "9543")),
+    port: String.to_integer(System.get_env("KUIPER_AGENT_PORT") || rust_grpc_port || "9543"),
+    ip: (!System.get_env("KUIPER_AGENT_PORT") && rust_grpc_ip) || {0, 0, 0, 0},
     ca_cert: env.("KUIPER_CA_CERT", Path.join(data_dir, "ca.crt")),
     ca_key: env.("KUIPER_CA_KEY", Path.join(data_dir, "ca.key")),
     server_cert: env.("KUIPER_SERVER_CERT", Path.join(data_dir, "server.crt")),
