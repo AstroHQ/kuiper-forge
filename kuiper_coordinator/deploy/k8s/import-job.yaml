@@ -1,0 +1,48 @@
+# One-time import from the Rust coordinator's SQLite on its PVC (stop the Rust pod first: the
+# PVC is ReadWriteOnce). Run with --dry-run, read the log, then again without it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kuiper-import-rust
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: import
+          image: ghcr.io/astrohq/kuiper-coordinator:latest
+          args: [import_rust, --sqlite, /data/kuiper.db, --dry-run]
+          # the Rust env block, so env-configured forges (KUIPER_GITHUB__*, KUIPER_PROVISIONING__*)
+          # come across: copy it from the Rust StatefulSet, with its Secrets
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: database-url}
+            - name: DATABASE_CA_CERT
+              value: /etc/kuiper/db-ca.crt
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: secret-key-base}
+            - name: KUIPER_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: encryption-key}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: db-ca
+              mountPath: /etc/kuiper
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-kuiper-forge-0
+        - name: db-ca
+          secret:
+            secretName: kuiper-coordinator
+            items:
+              - {key: db-ca.crt, path: db-ca.crt}

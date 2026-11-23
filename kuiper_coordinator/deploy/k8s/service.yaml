@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kuiper-forge
+spec:
+  selector:
+    app: kuiper-forge
+  ports:
+    - name: grpc
+      port: 9443
+      targetPort: grpc
+    - name: http
+      port: 9480
+      targetPort: http

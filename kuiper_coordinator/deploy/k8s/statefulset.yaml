@@ -1,0 +1,94 @@
+# Phoenix in place of the Rust coordinator's StatefulSet (see docs/swap-from-rust.md).
+# Same name, so the pod claims the Rust coordinator's PVC (data-kuiper-forge-0) and its CA.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kuiper-forge
+  labels:
+    app: kuiper-forge
+spec:
+  serviceName: kuiper-forge
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kuiper-forge
+  template:
+    metadata:
+      labels:
+        app: kuiper-forge
+    spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: kuiper-coordinator
+          image: ghcr.io/astrohq/kuiper-coordinator:latest
+          ports:
+            - name: grpc
+              containerPort: 9443
+            - name: http
+              containerPort: 9480
+          env:
+            # --- the Rust coordinator's env block, unchanged (D73) ---
+            - name: KUIPER_TLS__CA_CERT
+              value: /data/ca.crt
+            - name: KUIPER_TLS__CA_KEY
+              value: /data/ca.key
+            - name: KUIPER_TLS__SERVER_CERT
+              value: /data/server.crt
+            - name: KUIPER_TLS__SERVER_KEY
+              value: /data/server.key
+            - name: KUIPER_GRPC__LISTEN_ADDR
+              value: 0.0.0.0:9443
+            - name: KUIPER_GRPC__PROXY_PROTOCOL
+              value: "true"
+            - name: KUIPER_ADMIN__COORDINATOR_URL
+              value: https://kuiper.example.com
+            - name: KUIPER_NO_LOG_FILE
+              value: "true"
+            # Rust's SQLite path: only import_rust reads it; Phoenix needs DATABASE_URL
+            - name: KUIPER_DATABASE__PATH
+              value: /data/kuiper.db
+            # --- what Phoenix adds ---
+            - name: PHX_HOST
+              value: kuiper.example.com
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: database-url}
+            # DigitalOcean managed Postgres's CA (D77), from the same Secret
+            - name: DATABASE_CA_CERT
+              value: /etc/kuiper/db-ca.crt
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: secret-key-base}
+            - name: KUIPER_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: encryption-key}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: db-ca
+              mountPath: /etc/kuiper
+              readOnly: true
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: grpc}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+      volumes:
+        - name: db-ca
+          secret:
+            secretName: kuiper-coordinator
+            items:
+              - {key: db-ca.crt, path: db-ca.crt}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi

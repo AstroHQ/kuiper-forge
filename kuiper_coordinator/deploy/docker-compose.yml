@@ -1,0 +1,45 @@
+# The Phoenix swap of kuiper-forge/docker/docker-compose.yml (see docs/swap-from-rust.md):
+# the same Postgres, /data volume and Rust env, plus Phoenix's secrets and its HTTP port.
+#   docker compose -f deploy/docker-compose.yml run --rm kuiper-coordinator import_rust --from postgres://kuiper:kuiper@postgres/kuiper_forge --dry-run
+#   docker compose -f deploy/docker-compose.yml up -d
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: kuiper
+      POSTGRES_PASSWORD: kuiper
+      POSTGRES_DB: kuiper_forge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kuiper -d kuiper_forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kuiper-coordinator:
+    image: ghcr.io/astrohq/kuiper-coordinator:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9443:9443"   # agents, unchanged
+      - "9480:9480"   # admin UI, webhooks: put TLS in front of it
+    volumes:
+      - kuiper-data:/data
+    env_file:
+      - .env          # the Rust service's; add SECRET_KEY_BASE, KUIPER_ENCRYPTION_KEY, PHX_HOST
+    environment:
+      # Rust's Postgres settings: Phoenix makes DATABASE_URL for kuiper_forge_phoenix beside it
+      KUIPER_DATABASE__HOST: postgres
+      KUIPER_DATABASE__PORT: "5432"
+      KUIPER_DATABASE__USER: kuiper
+      KUIPER_DATABASE__PASSWORD: kuiper
+      KUIPER_DATABASE__DATABASE: kuiper_forge
+
+volumes:
+  pgdata:
+  # the Rust compose project's volume, so the CA and agent certs carry over
+  kuiper-data:
+    external: true
+    name: docker_kuiper-data

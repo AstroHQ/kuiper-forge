@@ -20,7 +20,7 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
            KUIPER_METRICS__RETENTION_DAYS KUIPER_DATABASE__PATH KUIPER_DATABASE__HOST
            KUIPER_DATABASE__PORT KUIPER_DATABASE__USER KUIPER_DATABASE__PASSWORD
            KUIPER_DATABASE__DATABASE KUIPER_PHOENIX_DATABASE KUIPER_NO_LOG_FILE
-           DATABASE_URL SECRET_KEY_BASE PHX_HOST PHX_SERVER)
+           DATABASE_URL DATABASE_CA_CERT SECRET_KEY_BASE PHX_HOST PHX_SERVER)
 
   setup do
     saved = Map.new(@vars, &{&1, System.get_env(&1)})
@@ -326,6 +326,31 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     repo = config(:prod)[:kuiper_coordinator][KuiperCoordinator.Repo]
     assert repo[:url] =~ "@10.0.0.5:5432/"
     assert repo[:socket_options] == []
+  end
+
+  test "a managed Postgres URL's sslmode turns TLS on, as libpq reads it (D77)" do
+    repo = fn url ->
+      put_prod_env(%{"DATABASE_URL" => url})
+      config(:prod)[:kuiper_coordinator][KuiperCoordinator.Repo]
+    end
+
+    # DigitalOcean's connection string: Ecto alone ignores sslmode and would try plain TCP
+    do_url = "postgresql://doadmin:pw@db-pg.b.db.ondigitalocean.com:25060/kuiper?sslmode=require"
+    assert repo.(do_url)[:ssl] == [verify: :verify_none]
+    assert repo.("ecto://u:p@h/db?sslmode=verify-full")[:ssl] == true
+    assert repo.("ecto://u:p@h/db?sslmode=verify-ca")[:ssl] == true
+    refute Keyword.has_key?(repo.("ecto://u:p@h/db"), :ssl)
+    refute Keyword.has_key?(repo.("ecto://u:p@h/db?sslmode=disable"), :ssl)
+
+    # the provider's CA file verifies the server, whatever the sslmode
+    System.put_env("DATABASE_CA_CERT", "/data/do-ca.crt")
+    assert repo.(do_url)[:ssl] == [cacertfile: "/data/do-ca.crt"]
+    assert repo.("ecto://u:p@h/db")[:ssl] == [cacertfile: "/data/do-ca.crt"]
+    System.delete_env("DATABASE_CA_CERT")
+
+    assert_raise RuntimeError, ~r/unknown sslmode: "requre"/, fn ->
+      repo.("ecto://u:p@h/db?sslmode=requre")
+    end
   end
 
   test "Rust's SQLite path isn't a database for Phoenix: without DATABASE_URL boot stops" do
