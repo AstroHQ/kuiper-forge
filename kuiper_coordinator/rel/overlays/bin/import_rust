@@ -1,0 +1,8 @@
+#!/bin/sh
+# Imports a Rust coordinator's agents, tokens, admins and forges into this app's database:
+#   bin/import_rust --sqlite /data/kuiper.db [--config /data/config.toml] [--dry-run]
+# (KuiperCoordinator.Release.import_rust_cli/1). Exits 1 on an error, 2 on conflicts.
+set -eu
+
+cd -P -- "$(dirname -- "$0")"
+exec ./kuiper_coordinator eval 'KuiperCoordinator.Release.import_rust_cli()' "$@"

@@ -127,24 +127,31 @@ is checked, else in polling mode.
 has to register again:
 
 ```sh
-mix kuiper.import_rust --from sqlite:///var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml --dry-run
-mix kuiper.import_rust --from sqlite:///var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml
+mix kuiper.import_rust --sqlite /var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml --dry-run
+mix kuiper.import_rust --sqlite /var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml
 ```
 
-In a release:
+In a release, `bin/import_rust` takes the same flags, so a k8s Job or initContainer with the Rust
+data volume mounted can run it:
 
 ```sh
-bin/kuiper_coordinator eval 'KuiperCoordinator.Release.import_rust("postgres://kuiper@db/kuiper", config: "/etc/kuiper/config.toml", dry_run: true)'
+bin/import_rust --sqlite /data/kuiper.db --dry-run
+bin/import_rust --from postgres://kuiper@db/kuiper --config /etc/kuiper/config.toml
 ```
 
-- `--from` is the Rust database, `sqlite://PATH` or `postgres://USER:PASS@HOST/DB`. It's only
-  read. `--config` is optional; without it only the database is imported.
+- `--sqlite PATH` or `--from sqlite://PATH|postgres://USER:PASS@HOST/DB` is the Rust database.
+  It's only read.
+- The forge config is built the way the Rust coordinator builds it: `--config` (optional), with
+  the Rust `KUIPER_X__Y` environment on top (`KUIPER_GITHUB__APP_ID`, `KUIPER_GITHUB__PRIVATE_KEY`,
+  `KUIPER_RUNNER_SCOPE__TYPE`, `KUIPER_PROVISIONING__MODE`, `KUIPER_PROVISIONING__WEBHOOK__SECRET`,
+  ...). An env-configured install (no forge in config.toml) imports from its env block alone; run
+  the import with the Rust coordinator's env. With neither, only the database is imported.
 - From the database: registered agents (revoked ones stay revoked; Phoenix loads the same CA, so
   existing agent certs keep working), unexpired registration tokens, admin users (the Rust
   Argon2id hashes log in as they are; TOTP secrets aren't imported) and API tokens (same SHA-256,
   so Management clients keep their tokens).
-- From config.toml: forges with their secrets (`private_key_path`, `token_env`, `token_path`
-  are read the way the Rust coordinator reads them; other `KUIPER_*` overrides aren't),
+- From the config: forges with their secrets (`private_key`, `private_key_path`, `token_env`,
+  `token_path` are read the way the Rust coordinator reads them),
   provisioning settings and label mappings. The one global mode becomes a mode per forge: in
   webhook mode the webhook forge takes deliveries and the others poll; in fixed capacity the
   first forge fills the pools and the others poll. The dry run lists each forge with its mode.
@@ -153,7 +160,7 @@ bin/kuiper_coordinator eval 'KuiperCoordinator.Release.import_rust("postgres://k
 - `--dry-run` prints the counts and writes nothing. A real run writes everything in one
   transaction.
 - Rerunning is safe. What Phoenix already has is left alone, and if it differs it's reported as
-  a conflict (the release function exits 2 then). The one change a rerun makes is a revocation
+  a conflict (`bin/import_rust` exits 2 then, 1 on an error). The one change a rerun makes is a revocation
   done on the Rust side since. What Phoenix removed after an import, like a used registration
   token or a deleted user, isn't brought back.
 - The output never shows a secret: tokens show as their prefix.

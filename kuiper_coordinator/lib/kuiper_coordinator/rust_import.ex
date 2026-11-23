@@ -56,13 +56,14 @@ defmodule KuiperCoordinator.RustImport do
     dry_run = opts[:dry_run] == true
 
     with {:from, from} when is_binary(from) and from != "" <- {:from, from},
-         {:ok, config} <- load_config(opts[:config]),
+         {:ok, config} <- Config.load(opts[:config], opts[:env] || System.get_env()),
          {:ok, source} <- Source.open(from) do
       try do
         with {:ok, items} <- plan(source, config) do
           report = %{
             from: Source.describe(from),
             config: opts[:config],
+            env_config: config != nil,
             dry_run: dry_run,
             items: items
           }
@@ -130,8 +131,38 @@ defmodule KuiperCoordinator.RustImport do
     end
   end
 
-  defp load_config(nil), do: {:ok, nil}
-  defp load_config(path), do: Config.load(path)
+  @doc """
+  Parses the command line the mix task and the release's `bin/import_rust` take:
+  `--sqlite PATH` or `--from URL`, `--config PATH`, `--dry-run`.
+  """
+  @spec parse_args([String.t()]) :: {:ok, keyword()} | {:error, String.t()}
+  def parse_args(argv) do
+    {opts, rest, invalid} =
+      OptionParser.parse(argv,
+        strict: [from: :string, sqlite: :string, config: :string, dry_run: :boolean]
+      )
+
+    cond do
+      invalid != [] or rest != [] ->
+        {:error,
+         "unknown arguments: " <>
+           Enum.join(Enum.map(invalid, &elem(&1, 0)) ++ rest, " ")}
+
+      opts[:sqlite] && opts[:from] ->
+        {:error, "give either --sqlite PATH or --from URL, not both"}
+
+      opts[:sqlite] not in [nil, ""] ->
+        {:ok,
+         [{:from, "sqlite://" <> Path.expand(opts[:sqlite])} | Keyword.delete(opts, :sqlite)]}
+
+      opts[:from] in [nil, ""] ->
+        {:error,
+         "give the Rust coordinator's database with --sqlite PATH or --from sqlite://PATH|postgres://..."}
+
+      true ->
+        {:ok, opts}
+    end
+  end
 
   ## planning
 
@@ -491,7 +522,14 @@ defmodule KuiperCoordinator.RustImport do
   @doc "The report as text: counts per kind, then each conflict, skip and note."
   @spec format_report(map()) :: iodata()
   def format_report(%{items: items} = r) do
-    head = "Rust import from #{r.from}#{if r.config, do: " and #{Path.expand(r.config)}"}"
+    config =
+      cond do
+        r.config -> " and #{Path.expand(r.config)} (with KUIPER_* environment)"
+        r[:env_config] -> " and the KUIPER_* environment"
+        true -> ""
+      end
+
+    head = "Rust import from #{r.from}#{config}"
     head = if r.dry_run, do: head <> " (dry run: nothing written)", else: head
 
     counts =

@@ -285,6 +285,107 @@ defmodule KuiperCoordinator.RustImportTest do
     assert Forges.get_forge_by_name("knope").token == @forgejo_token
   end
 
+  # astro-remote-infrastructure kuiper-forge/deployment.yaml: a SQLite StatefulSet with no
+  # forge config in config.toml, everything from KUIPER_X__Y env (config.rs Config::load)
+  @prod_env %{
+    "KUIPER_GITHUB__APP_ID" => "4242",
+    "KUIPER_RUNNER_SCOPE__TYPE" => "organization",
+    "KUIPER_RUNNER_SCOPE__NAME" => "AstroHQ",
+    "KUIPER_PROVISIONING__MODE" => "webhook",
+    "KUIPER_PROVISIONING__WEBHOOK__SECRET" => @webhook_secret,
+    "KUIPER_GRPC__PROXY_PROTOCOL" => "true"
+  }
+
+  defp put_env!(env) do
+    old = Map.new(env, fn {k, _} -> {k, System.get_env(k)} end)
+    System.put_env(env)
+
+    on_exit(fn ->
+      for {k, v} <- old, do: if(v, do: System.put_env(k, v), else: System.delete_env(k))
+    end)
+  end
+
+  test "an env-only Rust config (the prod k8s shape) imports its GitHub forge", %{db: db} do
+    pem = X509.PrivateKey.new_rsa(2048) |> X509.PrivateKey.to_pem()
+    put_env!(Map.put(@prod_env, "KUIPER_GITHUB__PRIVATE_KEY", pem))
+
+    dry =
+      capture_io(fn -> Mix.Tasks.Kuiper.ImportRust.run(["--sqlite", db, "--dry-run"]) end)
+
+    assert dry =~ ~r/agents: 2 new/
+    assert dry =~ ~r/forges: 1 new/
+    refute_secrets(dry)
+    assert Forges.list_forges() == []
+
+    out = capture_io(fn -> Mix.Tasks.Kuiper.ImportRust.run(["--sqlite", db]) end)
+    refute_secrets(out)
+
+    assert [gh] = Forges.list_forges()
+    assert gh.name == "github" and gh.type == :github and gh.app_id == 4242
+    assert gh.private_key == pem
+    assert gh.mode == :webhook and gh.webhook_secret == @webhook_secret
+    assert Repo.get!(Agent, "agent-live").hostname == "mac-mini-1"
+    assert Agents.valid_agent?("agent-live")
+
+    # a rerun is clean
+    again = capture_io(fn -> Mix.Tasks.Kuiper.ImportRust.run(["--sqlite", db]) end)
+    assert again =~ ~r/forges: 1 unchanged/
+    refute again =~ "conflict"
+  end
+
+  test "Rust env overrides win over config.toml, nested and typed", %{dir: dir} do
+    key = Path.join(dir, "app.pem")
+    config = Path.join(dir, "partial.toml")
+
+    File.write!(config, """
+    [github]
+    app_id = 1
+    private_key_path = "#{key}"
+
+    [provisioning]
+    mode = "polling"
+    """)
+
+    put_env!(%{
+      "KUIPER_GITHUB__APP_ID" => "4242",
+      "KUIPER_PROVISIONING__POLLING__INTERVAL_SECS" => "300",
+      "KUIPER_PROVISIONING__IDLE_RUNNER_TIMEOUT_SECS" => "900"
+    })
+
+    assert {:ok, cfg} = RustImport.Config.load(config)
+    assert [%{name: "github", app_id: 4242, mode: :polling, poll_interval_s: 300}] = cfg.forges
+    assert cfg.settings.idle_runner_timeout_s == 900
+
+    # without --config the env alone is the config; with no Rust forge env there's none
+    assert {:ok, %{forges: [%{app_id: 4242}]}} =
+             RustImport.Config.load(nil, %{
+               "KUIPER_GITHUB__APP_ID" => "4242",
+               "KUIPER_GITHUB__PRIVATE_KEY" => File.read!(key),
+               "KUIPER_PROVISIONING__MODE" => "polling"
+             })
+
+    assert {:ok, nil} = RustImport.Config.load(nil, %{"KUIPER_CA_ORG" => "KuiperOrg"})
+  end
+
+  test "the release command takes the same flags" do
+    assert {:ok, opts} =
+             RustImport.parse_args(["--sqlite", "/data/kuiper.db", "--config", "/data/c.toml"])
+
+    assert opts[:from] == "sqlite:///data/kuiper.db" and opts[:config] == "/data/c.toml"
+
+    assert {:ok, [from: "postgres://h/db", dry_run: true]} =
+             RustImport.parse_args(["--from", "postgres://h/db", "--dry-run"])
+
+    assert {:error, msg} = RustImport.parse_args(["--sqlite", "a.db", "--from", "sqlite://b"])
+    assert msg =~ "either"
+    assert {:error, _} = RustImport.parse_args(["--bogus"])
+    assert {:error, msg} = RustImport.parse_args([])
+    assert msg =~ "--sqlite"
+
+    script = Path.expand("../../rel/overlays/bin/import_rust", __DIR__)
+    assert File.read!(script) =~ "KuiperCoordinator.Release.import_rust_cli"
+  end
+
   test "reads a Rust Postgres database too" do
     cfg = Repo.config()
     db = "kuiper_rust_src#{System.get_env("MIX_TEST_PARTITION")}"

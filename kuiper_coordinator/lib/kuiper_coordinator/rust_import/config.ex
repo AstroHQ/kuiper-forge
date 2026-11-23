@@ -10,8 +10,12 @@ defmodule KuiperCoordinator.RustImport.Config do
   deliveries and the rest poll; in polling mode every forge polls; in fixed capacity the first
   forge fills the pools in `[runner_scope]` and the rest poll.
 
-  Only the file is read: `KUIPER_*` environment overrides the Rust coordinator also takes are
-  not, apart from a Forgejo forge's `token_env`.
+  Like the Rust coordinator's `Config::load` (figment: the TOML file, then
+  `Env::prefixed("KUIPER_").split("__")` merged on top), `KUIPER_X__Y` environment variables
+  override the file: `KUIPER_GITHUB__APP_ID` is `github.app_id`,
+  `KUIPER_PROVISIONING__WEBHOOK__SECRET` is `provisioning.webhook.secret`. With no file the
+  environment alone is the config, which is how env-configured installs (a k8s StatefulSet)
+  run the Rust coordinator.
   """
   alias KuiperCoordinator.Forge.RunnerScope
 
@@ -19,17 +23,99 @@ defmodule KuiperCoordinator.RustImport.Config do
 
   @type t :: %{forges: [map()], settings: map(), label_mappings: [map()]}
 
-  @spec load(Path.t()) :: {:ok, t()} | {:error, String.t()}
-  def load(path) do
+  # the parts of the Rust config the import reads; without any of them (and no file) there's
+  # no Rust config to import
+  @config_keys ~w(github forges provisioning runner_scope)
+
+  @doc """
+  Loads config.toml at `path` (nil for none) with the Rust `KUIPER_X__Y` overrides from `env`
+  on top. Returns `{:ok, nil}` when there's no file and no Rust forge or provisioning env.
+  """
+  @spec load(Path.t() | nil, %{String.t() => String.t()}) ::
+          {:ok, t() | nil} | {:error, String.t()}
+  def load(path, env \\ System.get_env())
+
+  def load(nil, env) do
+    overrides = env_overrides(env)
+
+    if Enum.any?(@config_keys, &Map.has_key?(overrides, &1)) do
+      case parse(overrides, File.cwd!()) do
+        {:ok, parsed} -> {:ok, parsed}
+        {:error, msg} -> {:error, "KUIPER_* environment: #{msg}"}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  def load(path, env) do
     path = Path.expand(path)
 
     with {:ok, text} <- read(path),
          {:ok, toml} <- decode(text, path),
-         {:ok, parsed} <- parse(toml, Path.dirname(path)) do
+         {:ok, parsed} <- parse(deep_merge(toml, env_overrides(env)), Path.dirname(path)) do
       {:ok, parsed}
     else
-      {:error, msg} -> {:error, "#{path}: #{msg}"}
+      {:error, msg} -> {:error, "#{path} (with KUIPER_* environment): #{msg}"}
     end
+  end
+
+  @doc """
+  The Rust coordinator's environment overrides as a TOML-shaped map: `KUIPER_` stripped, the
+  rest lowercased and split on `__` into nested keys, values parsed the way figment does
+  (`true`/`false`, integers, floats, `[a, b]` arrays, else the string as it is).
+  """
+  @spec env_overrides(%{String.t() => String.t()}) :: map()
+  def env_overrides(env) do
+    env
+    |> Enum.filter(fn {k, _} -> String.starts_with?(k, "KUIPER_") end)
+    |> Enum.sort()
+    |> Enum.reduce(%{}, fn {"KUIPER_" <> key, value}, acc ->
+      path = key |> String.downcase() |> String.split("__")
+
+      if Enum.any?(path, &(&1 == "")),
+        do: acc,
+        else: put_path(acc, path, env_value(value))
+    end)
+  end
+
+  defp put_path(acc, [k], v), do: Map.put(acc, k, v)
+
+  defp put_path(acc, [k | rest], v) do
+    inner = if is_map(acc[k]), do: acc[k], else: %{}
+    Map.put(acc, k, put_path(inner, rest, v))
+  end
+
+  defp env_value(v) do
+    t = String.trim(v)
+
+    cond do
+      t == "true" -> true
+      t == "false" -> false
+      Regex.match?(~r/\A[-+]?\d+\z/, t) -> String.to_integer(String.trim_leading(t, "+"))
+      Regex.match?(~r/\A[-+]?\d+\.\d+\z/, t) -> String.to_float(String.trim_leading(t, "+"))
+      String.starts_with?(t, "[") and String.ends_with?(t, "]") -> env_array(t, v)
+      quoted?(t) -> String.slice(t, 1..-2//1)
+      true -> v
+    end
+  end
+
+  defp env_array(t, raw) do
+    case Toml.decode("v = " <> t) do
+      {:ok, %{"v" => list}} -> list
+      _ -> raw
+    end
+  end
+
+  defp quoted?(t),
+    do: String.length(t) >= 2 and String.first(t) == "\"" and String.last(t) == "\""
+
+  # figment's merge: the later source wins, tables merge key by key
+  defp deep_merge(a, b) do
+    Map.merge(a, b, fn
+      _k, %{} = x, %{} = y -> deep_merge(x, y)
+      _k, _x, y -> y
+    end)
   end
 
   defp read(path) do
@@ -156,8 +242,8 @@ defmodule KuiperCoordinator.RustImport.Config do
         is_binary(f["token_path"]) ->
           read_secret(f["token_path"], dir, name, "token_path")
 
-        is_binary(f["token"]) ->
-          {:ok, f["token"]}
+        is_binary(scalar_string(f["token"])) ->
+          {:ok, scalar_string(f["token"])}
 
         true ->
           {:error, "forge '#{name}' needs token_env, token_path or token"}
@@ -207,14 +293,15 @@ defmodule KuiperCoordinator.RustImport.Config do
         {:error,
          "provisioning.webhook.forge #{inspect(webhook["forge"])} isn't a configured forge"}
 
-      not is_binary(webhook["secret"]) ->
+      not is_binary(scalar_string(webhook["secret"])) ->
         {:error, "webhook mode needs [provisioning.webhook] secret"}
 
       true ->
         {:ok,
          Enum.map(forges, fn f ->
            if f.name == target.name,
-             do: Map.merge(f, %{mode: :webhook, webhook_secret: webhook["secret"]}),
+             do:
+               Map.merge(f, %{mode: :webhook, webhook_secret: scalar_string(webhook["secret"])}),
              else: Map.put(f, :mode, :polling)
          end)}
     end
@@ -238,6 +325,12 @@ defmodule KuiperCoordinator.RustImport.Config do
       end
     end
   end
+
+  # an all-digit secret set through the environment parses as a number, as figment's does;
+  # the Rust structs take it as the string it was
+  defp scalar_string(v) when is_binary(v), do: v
+  defp scalar_string(v) when is_integer(v) or is_float(v), do: to_string(v)
+  defp scalar_string(_), do: nil
 
   defp label_mappings(list) when is_list(list) do
     Enum.reduce_while(Enum.with_index(list), {:ok, []}, fn {m, i}, {:ok, acc} ->

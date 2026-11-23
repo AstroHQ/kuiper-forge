@@ -86,6 +86,22 @@ defmodule KuiperCoordinator.Release do
     end)
   end
 
+  @doc """
+  `bin/import_rust`: `import_rust/2` from a command line, for a k8s Job or initContainer with
+  the Rust data volume mounted:
+
+      bin/import_rust --sqlite /data/kuiper.db [--config /data/config.toml] [--dry-run]
+
+  `--from sqlite://PATH|postgres://...` works too. The Rust `KUIPER_X__Y` environment applies
+  on top of `--config`, or alone without it. Exits as `import_rust/2` does.
+  """
+  def import_rust_cli(argv \\ System.argv()) do
+    case KuiperCoordinator.RustImport.parse_args(argv) do
+      {:ok, opts} -> import_rust(Keyword.fetch!(opts, :from), Keyword.delete(opts, :from))
+      {:error, msg} -> fail(msg)
+    end
+  end
+
   defp password! do
     case System.get_env("KUIPER_ADMIN_PASSWORD") do
       pw when pw in [nil, ""] -> fail("set KUIPER_ADMIN_PASSWORD")

@@ -44,6 +44,42 @@ echo "== create the database and migrate"
 "$rel/bin/kuiper_coordinator" eval 'KuiperCoordinator.Release.create_db()'
 "$rel/bin/migrate"
 
+echo "== bin/import_rust: a Rust SQLite DB with an env-only GitHub forge (the prod k8s shape)"
+rust_db="$work/rust/kuiper.db"
+mkdir -p "$work/rust"
+python3 -I - "$app_dir/../kuiper-forge/migrations" "$rust_db" <<'PY'
+import glob, os, sqlite3, sys
+mig, db = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db)
+for d in ("shared", "sqlite"):
+    for f in sorted(glob.glob(os.path.join(mig, d, "*.sql"))):
+        con.executescript(open(f).read())
+con.execute("""INSERT INTO registered_agents (agent_id, hostname, agent_type, labels, max_vms,
+  serial_number, created_at, expires_at, revoked, revoked_at, agent_version)
+  VALUES ('agent-smoke-rust', 'mac-mini-1', 'tart', '["macos"]', 2, '0a1b2c',
+  '2026-01-02T03:04:05+00:00', '2099-01-01T00:00:00+00:00', 0, NULL, '0.9.1')""")
+con.commit()
+PY
+openssl genrsa -out "$work/rust/app.pem" 2048 2>/dev/null
+smoke_secret="smoke-webhook-$(openssl rand -hex 8)"
+rust_env() {
+  KUIPER_GITHUB__APP_ID=4242 KUIPER_GITHUB__PRIVATE_KEY="$(cat "$work/rust/app.pem")" \
+  KUIPER_RUNNER_SCOPE__TYPE=organization KUIPER_RUNNER_SCOPE__NAME=AstroHQ \
+  KUIPER_PROVISIONING__MODE=webhook KUIPER_PROVISIONING__WEBHOOK__SECRET="$smoke_secret" "$@"
+}
+import_out="$(rust_env "$rel/bin/import_rust" --sqlite "$rust_db" --dry-run && rust_env "$rel/bin/import_rust" --sqlite "$rust_db")"
+echo "$import_out"
+# the rerun finds both already here, unchanged
+rerun="$(rust_env "$rel/bin/import_rust" --sqlite "$rust_db" --dry-run)"
+echo "$rerun"
+case "$import_out$rerun" in
+  *"$smoke_secret"*|*"PRIVATE KEY"*) echo "bin/import_rust printed a secret"; exit 1 ;;
+esac
+for want in "agents: 1 unchanged" "forges: 1 unchanged"; do
+  case "$rerun" in *"$want"*) ;; *) echo "bin/import_rust rerun didn't say '$want'"; exit 1 ;; esac
+done
+echo "bin/import_rust imported the env-only forge and the agent"
+
 echo "== boot bin/server"
 "$rel/bin/server" >"$work/server.log" 2>&1 &
 server_pid=$!

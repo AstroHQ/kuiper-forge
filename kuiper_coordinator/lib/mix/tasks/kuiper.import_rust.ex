@@ -5,12 +5,15 @@ defmodule Mix.Tasks.Kuiper.ImportRust do
   users, API tokens and, with `--config`, its forges, provisioning settings and label mappings
   into this app's database (`KuiperCoordinator.RustImport`).
 
-      mix kuiper.import_rust --from sqlite:///var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml --dry-run
+      mix kuiper.import_rust --sqlite /var/lib/kuiper/kuiper.db --config /etc/kuiper/config.toml --dry-run
 
-  `--from` takes `sqlite://PATH` or `postgres://USER:PASS@HOST/DB`; the database is only read.
+  `--sqlite PATH`, or `--from` with `sqlite://PATH` or `postgres://USER:PASS@HOST/DB`, names the
+  Rust database; it's only read. The Rust `KUIPER_X__Y` environment overrides apply on top of
+  `--config` the way the Rust coordinator applies them, and without `--config` the environment
+  alone is the forge config (env-configured installs).
   `--dry-run` prints what would change and writes nothing. Rerunning is safe: what's already
-  here is left alone and differences are reported as conflicts. In a release, use
-  `KuiperCoordinator.Release.import_rust/2`.
+  here is left alone and differences are reported as conflicts. In a release, run
+  `bin/import_rust` with the same flags.
   """
   use Mix.Task
 
@@ -18,21 +21,11 @@ defmodule Mix.Tasks.Kuiper.ImportRust do
 
   @impl Mix.Task
   def run(args) do
-    {opts, rest, invalid} =
-      OptionParser.parse(args, strict: [from: :string, config: :string, dry_run: :boolean])
+    case KuiperCoordinator.RustImport.parse_args(args) do
+      {:error, msg} ->
+        Mix.raise(msg)
 
-    cond do
-      invalid != [] or rest != [] ->
-        Mix.raise(
-          "unknown arguments: #{Enum.map_join(invalid, " ", &elem(&1, 0))} #{Enum.join(rest, " ")}"
-        )
-
-      opts[:from] in [nil, ""] ->
-        Mix.raise(
-          "give the Rust coordinator's database with --from sqlite://PATH or postgres://..."
-        )
-
-      true ->
+      {:ok, opts} ->
         {:ok, _} = Application.ensure_all_started([:ssl, :postgrex, :ecto_sql])
         repo = KuiperCoordinator.Repo
 
