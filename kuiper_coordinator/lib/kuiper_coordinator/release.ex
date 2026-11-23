@@ -70,6 +70,38 @@ defmodule KuiperCoordinator.Release do
     end)
   end
 
+  @doc """
+  Imports agents, tokens, admin users, API tokens and (with `config:`) forges from a Rust
+  coordinator (`KuiperCoordinator.RustImport`):
+
+      bin/kuiper_coordinator eval 'KuiperCoordinator.Release.import_rust("sqlite:///var/lib/kuiper/kuiper.db", config: "/etc/kuiper/config.toml", dry_run: true)'
+
+  Exits 1 on an error, 2 when something conflicted (the rest is imported, conflicts are left
+  as Phoenix has them).
+  """
+  def import_rust(from, opts \\ []) do
+    with_repo(fn ->
+      report = KuiperCoordinator.RustImport.cli([{:from, from} | opts], &fail/1)
+      if KuiperCoordinator.RustImport.conflicts?(report), do: System.halt(2)
+    end)
+  end
+
+  @doc """
+  `bin/import_rust`: `import_rust/2` from a command line, for a k8s Job or initContainer with
+  the Rust data volume mounted:
+
+      bin/import_rust --sqlite /data/kuiper.db [--config /data/config.toml] [--dry-run]
+
+  `--from sqlite://PATH|postgres://...` works too. The Rust `KUIPER_X__Y` environment applies
+  on top of `--config`, or alone without it. Exits as `import_rust/2` does.
+  """
+  def import_rust_cli(argv \\ System.argv()) do
+    case KuiperCoordinator.RustImport.parse_args(argv) do
+      {:ok, opts} -> import_rust(Keyword.fetch!(opts, :from), Keyword.delete(opts, :from))
+      {:error, msg} -> fail(msg)
+    end
+  end
+
   defp password! do
     case System.get_env("KUIPER_ADMIN_PASSWORD") do
       pw when pw in [nil, ""] -> fail("set KUIPER_ADMIN_PASSWORD")

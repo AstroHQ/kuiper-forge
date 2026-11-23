@@ -27,7 +27,7 @@ defmodule KuiperCoordinator.Forges.Settings do
     )
     |> validate_required([:idle_runner_timeout_s, :scan_lookback_hours])
     |> validate_number(:idle_runner_timeout_s, greater_than_or_equal_to: 0)
-    |> validate_number(:scan_lookback_hours, greater_than: 0)
+    |> validate_number(:scan_lookback_hours, greater_than_or_equal_to: 0)
     |> update_change(:idle_runner_timeout_s, &if(&1 > 0, do: max(&1, @min_idle_s), else: &1))
     |> update_change(:required_labels, fn l ->
       l |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))

@@ -163,7 +163,7 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLive do
         <.input
           field={@settings_form[:scan_lookback_hours]}
           type="number"
-          label="Forge scan lookback, hours"
+          label="Forge scan lookback, hours (0 scans every repository)"
         />
         <.input
           name="settings[required_labels]"

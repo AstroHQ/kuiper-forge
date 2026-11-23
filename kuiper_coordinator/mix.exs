@@ -79,6 +79,9 @@ defmodule KuiperCoordinator.MixProject do
       {:x509, "~> 0.9"},
       {:cloak_ecto, "~> 1.3"},
       {:argon2_elixir, "~> 4.1"},
+      # mix kuiper.import_rust reads the Rust coordinator's SQLite database and config.toml
+      {:exqlite, "~> 0.27"},
+      {:toml, "~> 0.7"},
       {:mox, "~> 1.2", only: :test}
     ]
   end

@@ -50,10 +50,10 @@ defmodule KuiperCoordinatorWeb.Admin.ProvisioningLiveTest do
 
     html =
       view
-      |> form("#settings-form", settings: %{scan_lookback_hours: "0", webhook_path: "hook"})
+      |> form("#settings-form", settings: %{scan_lookback_hours: "-1", webhook_path: "hook"})
       |> render_submit()
 
-    assert html =~ "must be greater than 0"
+    assert html =~ "must be greater than or equal to 0"
     assert html =~ "must start with /"
     assert Forges.get_settings().id == 1 and is_nil(Forges.get_settings().inserted_at)
 
