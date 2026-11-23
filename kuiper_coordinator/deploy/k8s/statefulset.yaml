@@ -51,7 +51,11 @@ spec:
             - name: KUIPER_DATABASE__PATH
               value: /data/kuiper.db
             # --- what Phoenix adds ---
+            # the admin UI's host (ingressroute.yaml's Host rule): GitHub App and webhook URLs
+            # are made from it. The agent host stays the server cert's name.
             - name: PHX_HOST
+              value: kuiper-admin.example.com
+            - name: KUIPER_SERVER_HOSTNAME
               value: kuiper.example.com
             - name: DATABASE_URL
               valueFrom:
@@ -72,7 +76,13 @@ spec:
               mountPath: /etc/kuiper
               readOnly: true
           readinessProbe:
-            httpGet: {path: /, port: http}
+            # prod force_ssl redirects plain HTTP to https:// unless the gateway says it was
+            # HTTPS, and the pod only serves plain HTTP: say so, as the gateway does
+            httpGet:
+              path: /
+              port: http
+              httpHeaders:
+                - {name: X-Forwarded-Proto, value: https}
             periodSeconds: 10
           livenessProbe:
             tcpSocket: {port: grpc}

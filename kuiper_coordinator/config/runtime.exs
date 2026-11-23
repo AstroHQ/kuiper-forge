@@ -285,6 +285,9 @@ if config_env() == :prod do
   # read here the way libpq reads it. DATABASE_CA_CERT (the provider's CA file) verifies the
   # server cert and hostname; sslmode=verify-ca/verify-full (or Ecto's ssl=true) verify against
   # the system CAs; sslmode=require/prefer/allow encrypt without verifying, as libpq does.
+  # Postgrex merges `ssl:` options over its own secure defaults (verify_peer, an https hostname
+  # check, SNI from the URL's host), so `ssl: true` and `[cacertfile: ca]` both verify; only an
+  # explicit verify_none doesn't. verify-ca checks the hostname too, stricter than libpq.
   ssl_mode = URI.decode_query(URI.parse(database_url).query || "")["sslmode"]
 
   database_ssl =

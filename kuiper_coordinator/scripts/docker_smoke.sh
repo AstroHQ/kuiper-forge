@@ -90,6 +90,13 @@ agent_tls() {
 echo "== first boot: default command migrates (creating the database) and serves"
 boot
 echo "HTTP on 9480 answers"
+# the k8s readiness probe (deploy/k8s/statefulset.yaml) hits the pod IP over plain HTTP: prod's
+# force_ssl redirects that, and X-Forwarded-Proto: https (the probe's header) gets a real answer
+probe() { curl -s -o /dev/null -w '%{http_code}' -H "Host: 10.244.0.7:9480" "$@" "http://127.0.0.1:$http_port/"; }
+[ "$(probe)" = 301 ] || { echo "plain HTTP by pod IP wasn't redirected: $(probe)"; exit 1; }
+code="$(probe -H 'X-Forwarded-Proto: https')"
+case "$code" in 2* | 302) ;; *) echo "probe with X-Forwarded-Proto got $code"; exit 1 ;; esac
+echo "readiness probe's X-Forwarded-Proto header gets $code, not the HTTPS redirect"
 docker logs "$id-app" 2>&1 | grep -q "KUIPER_GRPC__PROXY_PROTOCOL" || { echo "PROXY alias not used"; exit 1; }
 agent_tls || { echo "agent port 9443 didn't do TLS with a cert from /data/ca.crt"; exit 1; }
 echo "agent port 9443 does TLS from the CA made in /data"

@@ -96,7 +96,10 @@ with PROXY protocol on the agent port. Apply them in your gitops repo, not from 
 
 - `statefulset.yaml`: the Rust env block unchanged, plus `DATABASE_URL`, `DATABASE_CA_CERT`,
   `SECRET_KEY_BASE` and `KUIPER_ENCRYPTION_KEY` from a Secret; ports 9443 and 9480; the same
-  `volumeClaimTemplates` name so the pod gets the Rust coordinator's PVC.
+  `volumeClaimTemplates` name so the pod gets the Rust coordinator's PVC. `PHX_HOST` is the
+  admin route's host (GitHub App and webhook URLs are made from it); `KUIPER_SERVER_HOSTNAME`
+  stays the agents' host, the server cert's name. The readiness probe sends
+  `X-Forwarded-Proto: https` so prod's HTTPS redirect doesn't turn it away.
 - `service.yaml`: 9443 (agents) and 9480 (HTTP).
 - `ingressroute.yaml`: a Traefik `IngressRouteTCP` passing TLS through to 9443 with PROXY v2
   (as the Rust coordinator's), and an `IngressRoute` for `/admin`, `/webhook` and `/api` on 9480.
