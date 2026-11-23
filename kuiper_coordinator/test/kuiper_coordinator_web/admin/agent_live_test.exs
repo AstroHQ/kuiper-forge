@@ -228,5 +228,138 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
       send(view.pid, :tail)
       assert render(view) =~ "new line"
     end
+
+    test "lines sit in a following terminal box, every level colored and aligned, local times",
+         %{conn: conn} do
+      agent!("agent_mac")
+
+      for level <- 1..5,
+          do: log!("agent_mac", 1_763_840_000_000_000 + level, level, "msg #{level}")
+
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs")
+
+      # a bounded dark box with the follow-tail hook, and a control to jump back to the newest line
+      assert has_element?(view, "#log-view.log-view[phx-hook$='LogView']")
+      assert has_element?(view, "#log-jump")
+
+      for name <- ~w(error warn info debug trace) do
+        assert has_element?(view, "#log-view .log-level.log-#{name}"), name
+      end
+
+      # the level column is padded to five characters, like the Rust page's {:>5}
+      assert level_text(view, "info") == " INFO"
+      assert level_text(view, "warn") == " WARN"
+      assert level_text(view, "error") == "ERROR"
+
+      # times carry the raw instant for the hook to show in local time, full UTC on hover
+      assert has_element?(view, "#log-view time.log-time[data-us='1763840000000003']")
+      assert has_element?(view, ~s|#log-view time[title="2025-11-22 19:33:20.000003 UTC"]|)
+      assert has_element?(view, ".local-tz")
+    end
+
+    test "live tail appends lines as they're uploaded, at the chosen level", %{conn: conn} do
+      agent!("agent_mac")
+      log!("agent_mac", 1_000, 3, "old line")
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs?live=1&level=info")
+
+      record = fn ts, level, msg ->
+        %{timestamp_micros: ts, seq: 1, level: level, target: "agent", message: msg}
+      end
+
+      :ok =
+        Agents.insert_log_batch(
+          "agent_mac",
+          [record.(2_000, "INFO", "pushed line"), record.(2_001, "DEBUG", "too chatty")],
+          0
+        )
+
+      # appended after what was there, and the DEBUG line is below the chosen level
+      assert messages(view) == ["old line", "pushed line"]
+
+      # not following: an upload doesn't touch a page that isn't live
+      {:ok, still, _} = live(conn, ~p"/admin/agents/agent_mac/logs")
+      :ok = Agents.insert_log_batch("agent_mac", [record.(3_000, "INFO", "later line")], 0)
+      assert messages(still) == ["old line", "pushed line", "too chatty"]
+      assert messages(view) == ["old line", "pushed line", "later line"]
+    end
+
+    test "live tail and paging controls are hand-written Tailwind, not daisyUI btn",
+         %{conn: conn} do
+      agent!("agent_mac")
+      for i <- 1..501, do: log!("agent_mac", i, 3, "line #{i}")
+
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs")
+      refute has_element?(view, "#log-jump.btn")
+      assert has_element?(view, "#log-jump")
+      refute has_element?(view, "#older-logs.btn")
+      assert has_element?(view, "#older-logs")
+
+      view |> element("#older-logs") |> render_click()
+      refute has_element?(view, "#newest-logs.btn")
+      assert has_element?(view, "#newest-logs")
+    end
+
+    test "a batch stored right after the live page's snapshot query still shows up",
+         %{conn: conn} do
+      agent!("agent_mac")
+      log!("agent_mac", 1_000, 3, "old line")
+      test_pid = self()
+      once = :atomics.new(1, [])
+      handler = "race-#{System.unique_integer()}"
+
+      # runs in the LiveView process right after its snapshot query returns: the upload commits
+      # (and broadcasts) after the snapshot was read but before the page would have subscribed
+      :telemetry.attach(
+        handler,
+        [:kuiper_coordinator, :repo, :query],
+        &__MODULE__.store_mid_load/4,
+        %{test_pid: test_pid, once: once}
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs?live=1")
+      assert :atomics.get(once, 1) == 1
+      assert messages(view) == ["old line", "racing line"]
+    end
   end
+
+  # the message column of each line on the page, top to bottom
+  defp messages(view) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#log-view .log-line .log-message")
+    |> Enum.map(&LazyHTML.text/1)
+  end
+
+  defp level_text(view, name) do
+    view
+    |> element("#log-view .log-level.log-#{name}")
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.text()
+  end
+
+  def store_mid_load(_event, _measure, %{source: "agent_logs", query: q}, cfg) do
+    if self() != cfg.test_pid and q =~ "LIMIT" and q =~ "DESC" and
+         :atomics.compare_exchange(cfg.once, 1, 0, 1) == :ok do
+      :ok =
+        Agents.insert_log_batch(
+          "agent_mac",
+          [
+            %{
+              timestamp_micros: 5_000,
+              seq: 1,
+              level: "INFO",
+              target: "agent",
+              message: "racing line"
+            }
+          ],
+          0
+        )
+    end
+  end
+
+  def store_mid_load(_, _, _, _), do: :ok
 end

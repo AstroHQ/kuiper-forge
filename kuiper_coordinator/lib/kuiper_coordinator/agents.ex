@@ -314,7 +314,37 @@ defmodule KuiperCoordinator.Agents do
         :ok
       end)
 
+    # after the commit, so a live log page that hears this can read the new rows
+    Phoenix.PubSub.broadcast(KuiperCoordinator.PubSub, logs_topic(agent_id), :new_logs)
     :ok
+  end
+
+  defp logs_topic(agent_id), do: "agent_logs:" <> agent_id
+
+  @doc "Sends `:new_logs` to the caller whenever a batch for `agent_id` is stored."
+  def subscribe_logs(agent_id),
+    do: Phoenix.PubSub.subscribe(KuiperCoordinator.PubSub, logs_topic(agent_id))
+
+  def unsubscribe_logs(agent_id),
+    do: Phoenix.PubSub.unsubscribe(KuiperCoordinator.PubSub, logs_topic(agent_id))
+
+  @doc "The newest stored row id for `agent_id` (insertion order), or 0."
+  def last_log_id(agent_id) do
+    Repo.one(from(l in LogLine, where: l.agent_id == ^agent_id, select: max(l.id))) || 0
+  end
+
+  @doc """
+  Lines stored after row `after_id` at `min_level` or more severe, in insertion order, at most
+  `limit` (the newest ones when there are more): what a live log page appends.
+  """
+  def logs_after(agent_id, min_level, after_id, limit) do
+    from(l in LogLine,
+      where: l.agent_id == ^agent_id and l.level <= ^min_level and l.id > ^after_id,
+      order_by: [desc: l.id],
+      limit: ^limit
+    )
+    |> Repo.all()
+    |> Enum.reverse()
   end
 
   @doc """
