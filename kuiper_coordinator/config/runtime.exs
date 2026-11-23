@@ -34,12 +34,25 @@ rust_env_aliases = [
   {"KUIPER_METRICS_RETENTION_DAYS", "KUIPER_METRICS__RETENTION_DAYS"}
 ]
 
+# figment trims every env value before parsing it (so "true\n" from a ConfigMap built from a
+# file is true in Rust); Rust names are trimmed the same way, so they mean what they mean there
+rust_env = fn name ->
+  case System.get_env(name) do
+    nil -> nil
+    v -> String.trim(v)
+  end
+end
+
 env = fn name, default ->
   case List.keyfind(rust_env_aliases, name, 0) do
-    {^name, rust} -> System.get_env(name) || System.get_env(rust) || default
+    {^name, rust} -> System.get_env(name) || rust_env.(rust) || default
     nil -> System.get_env(name) || default
   end
 end
+
+# booleans and integers ignore stray whitespace, from either name
+env_bool = fn name, default -> String.trim(env.(name, default)) in ~w(true 1) end
+env_int = fn name, default -> String.to_integer(String.trim(env.(name, default))) end
 
 # Rust's Postgres settings (KUIPER_DATABASE__HOST/PORT/USER/PASSWORD/DATABASE) make a
 # DATABASE_URL when it's unset, for a new database on the same server (D75): Phoenix's own
@@ -47,20 +60,20 @@ end
 # the Rust database's name with _phoenix after it. Rust's SQLite (KUIPER_DATABASE__PATH) has
 # no server to share, so it isn't an alias.
 rust_database_url =
-  if (host = System.get_env("KUIPER_DATABASE__HOST")) && !System.get_env("DATABASE_URL") do
+  if (host = rust_env.("KUIPER_DATABASE__HOST")) && !System.get_env("DATABASE_URL") do
     userinfo =
       [
-        System.get_env("KUIPER_DATABASE__USER", "kuiper"),
-        System.get_env("KUIPER_DATABASE__PASSWORD")
+        rust_env.("KUIPER_DATABASE__USER") || "kuiper",
+        rust_env.("KUIPER_DATABASE__PASSWORD")
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.map_join(":", &URI.encode(&1, fn c -> URI.char_unreserved?(c) end))
 
     database =
       System.get_env("KUIPER_PHOENIX_DATABASE") ||
-        System.get_env("KUIPER_DATABASE__DATABASE", "kuiper_forge") <> "_phoenix"
+        (rust_env.("KUIPER_DATABASE__DATABASE") || "kuiper_forge") <> "_phoenix"
 
-    port = System.get_env("KUIPER_DATABASE__PORT", "5432")
+    port = rust_env.("KUIPER_DATABASE__PORT") || "5432"
     # an IPv6 literal goes in brackets, or its colons run into the port's (Codex)
     host =
       if String.contains?(host, ":") and not String.starts_with?(host, "["),
@@ -147,11 +160,11 @@ if config_env() != :test do
     server_cert: env.("KUIPER_SERVER_CERT", Path.join(data_dir, "server.crt")),
     server_key: env.("KUIPER_SERVER_KEY", Path.join(data_dir, "server.key")),
     server_ca_cert: env.("KUIPER_SERVER_CA_CERT", nil),
-    server_use_native_roots: env.("KUIPER_SERVER_USE_NATIVE_ROOTS", "false") in ~w(true 1),
+    server_use_native_roots: env_bool.("KUIPER_SERVER_USE_NATIVE_ROOTS", "false"),
     server_trust_mode: env.("KUIPER_SERVER_TRUST_MODE", "ca"),
     # optional PROXY v1/v2 header before TLS, for a TLS-passthrough balancer like Traefik's
     # TLSRoute (Rust grpc.proxy_protocol, A3); direct connections still work with it on
-    proxy_protocol: env.("KUIPER_AGENT_PROXY_PROTOCOL", "false") in ~w(true 1),
+    proxy_protocol: env_bool.("KUIPER_AGENT_PROXY_PROTOCOL", "false"),
     # the name agents and browsers use; the server cert is checked against it at startup
     server_hostname: System.get_env("KUIPER_SERVER_HOSTNAME") || System.get_env("PHX_HOST")
 
@@ -208,7 +221,7 @@ end
 # and KUIPER_ADMIN_PASSWORD set.
 if config_env() != :test do
   config :kuiper_coordinator, :admin,
-    session_timeout_secs: String.to_integer(env.("KUIPER_ADMIN_SESSION_TIMEOUT", "3600")),
+    session_timeout_secs: env_int.("KUIPER_ADMIN_SESSION_TIMEOUT", "3600"),
     # agent-facing URL in registration bundles (Rust [admin] coordinator_url); by default the
     # agent port's, wherever it came from (Codex P1)
     coordinator_url: env.("KUIPER_COORDINATOR_URL", "https://localhost:#{agent_port}"),
@@ -219,7 +232,7 @@ if config_env() != :test do
 
   # run history for the metrics page (parity C7/MX7: [metrics] retention_days 90)
   config :kuiper_coordinator, :metrics,
-    retention_days: String.to_integer(env.("KUIPER_METRICS_RETENTION_DAYS", "90"))
+    retention_days: env_int.("KUIPER_METRICS_RETENTION_DAYS", "90")
 end
 
 if config_env() == :dev do

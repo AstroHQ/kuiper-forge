@@ -259,6 +259,26 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     assert config()[:kuiper_coordinator][:env_aliases] == []
   end
 
+  test "Rust env values are trimmed as figment trims them: ' true\\n' turns PROXY on (F22)" do
+    put_prod_env(%{
+      "KUIPER_GRPC__PROXY_PROTOCOL" => " true\n",
+      "KUIPER_TLS__SERVER_USE_NATIVE_ROOTS" => "true ",
+      "KUIPER_ADMIN__SESSION_TIMEOUT_SECS" => " 900\n",
+      "KUIPER_METRICS__RETENTION_DAYS" => "30 ",
+      "KUIPER_TLS__CA_CERT" => "/data/ca.crt\n"
+    })
+
+    app = config(:prod)[:kuiper_coordinator]
+    assert app[:agent_grpc][:proxy_protocol] == true
+    assert app[:agent_grpc][:server_use_native_roots] == true
+    assert app[:agent_grpc][:ca_cert] == "/data/ca.crt"
+    assert app[:admin][:session_timeout_secs] == 900
+    assert app[:metrics][:retention_days] == 30
+
+    System.put_env("KUIPER_GRPC__PROXY_PROTOCOL", "false\n")
+    refute config(:prod)[:kuiper_coordinator][:agent_grpc][:proxy_protocol]
+  end
+
   test "Rust's Postgres settings make a DATABASE_URL for a new database beside Rust's (D75)" do
     put_prod_env(%{
       "DATABASE_URL" => nil,
