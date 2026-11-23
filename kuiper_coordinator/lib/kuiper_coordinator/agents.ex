@@ -15,6 +15,12 @@ defmodule KuiperCoordinator.Agents do
   def max_log_batch, do: @max_log_batch
 
   ## Registration tokens
+  #
+  # Tokens are bearer secrets (D65, D66): storage stays plaintext because Management ListTokens
+  # returns them (proto contract, Rust parity), but no query that carries one is logged, and the
+  # admin UI refers to a token by `token_handle/1` and shows only `token_prefix/1`.
+
+  @token_query_opts [log: false]
 
   @doc "A new single-use token, `reg_` + 32 alphanumerics, valid for `ttl_seconds` (proto default 1 h)."
   def create_registration_token(ttl_seconds \\ 3600, created_by \\ "admin") do
@@ -24,7 +30,22 @@ defmodule KuiperCoordinator.Agents do
       created_by: created_by
     }
 
-    Repo.insert(token)
+    Repo.insert(token, @token_query_opts)
+  end
+
+  @doc "A non-secret handle for a token (first 12 hex of its SHA-256), for DOM ids and events."
+  def token_handle(token) when is_binary(token),
+    do: :crypto.hash(:sha256, token) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+
+  @doc "What the admin UI shows of a token: `reg_` and 4 more characters, then an ellipsis."
+  def token_prefix(token) when is_binary(token), do: String.slice(token, 0, 8) <> "…"
+
+  @doc "Deletes the token whose `token_handle/1` is `handle`; true when one was there."
+  def delete_registration_token_by_handle(handle) when is_binary(handle) do
+    case Enum.find(list_registration_tokens(), &(token_handle(&1.token) == handle)) do
+      %RegistrationToken{token: token} -> delete_registration_token(token)
+      nil -> false
+    end
   end
 
   @doc """
@@ -101,17 +122,24 @@ defmodule KuiperCoordinator.Agents do
 
   @doc "Every registration token, oldest first, in plaintext (management.rs ListTokens, M2)."
   def list_registration_tokens do
-    Repo.all(from(t in RegistrationToken, order_by: [asc: t.inserted_at, asc: t.token]))
+    Repo.all(
+      from(t in RegistrationToken, order_by: [asc: t.inserted_at, asc: t.token]),
+      @token_query_opts
+    )
   end
 
   @doc "Deletes a registration token; true when one was there."
   def delete_registration_token(token) when is_binary(token) do
-    {count, _} = Repo.delete_all(from(t in RegistrationToken, where: t.token == ^token))
+    {count, _} =
+      Repo.delete_all(from(t in RegistrationToken, where: t.token == ^token), @token_query_opts)
+
     count == 1
   end
 
   defp consume_token(token) do
-    case Repo.delete_all(from(t in RegistrationToken, where: t.token == ^token, select: t)) do
+    query = from(t in RegistrationToken, where: t.token == ^token, select: t)
+
+    case Repo.delete_all(query, @token_query_opts) do
       {1, [reg]} -> {:ok, reg}
       _ -> :error
     end
