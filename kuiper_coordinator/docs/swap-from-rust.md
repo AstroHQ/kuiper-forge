@@ -121,7 +121,9 @@ The swap:
    ReadWriteOnce).
 2. Create the `kuiper-coordinator` Secret (database URL, CA cert, keys).
 3. Paste the Rust StatefulSet's env block (with its Secrets) into both import Jobs: an
-   env-configured install's forges are only there. The image's `import_rust` adds
+   env-configured install's forges are only there. When a forge's `private_key_path` or
+   `token_path` is outside `/data` (a Secret mounted at `/etc/secrets`, say), copy those
+   `volumeMounts` and `volumes` too: the import reads the files. The image's `import_rust` adds
    `--config /data/config.toml` when the volume has one, as the Rust image reads it. `kubectl apply -f import-dry-run-job.yaml` and read its log (`kubectl logs job/kuiper-import-rust-dry-run`);
    then `kubectl apply -f import-job.yaml` and read that one's. Each Job runs once: to run one
    again, `kubectl delete -f` it first.

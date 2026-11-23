@@ -20,7 +20,8 @@ spec:
           image: ghcr.io/astrohq/kuiper-coordinator:latest
           # the image adds --config /data/config.toml when the PVC has one, as the Rust image reads it
           args: [import_rust, --sqlite, /data/kuiper.db, --dry-run]
-          # Paste the Rust StatefulSet's env block here, with its Secrets: an env-configured
+          # Paste the Rust StatefulSet's env block here, with its Secrets (and any volumeMounts and
+          # volumes its private_key_path / token_path files come from, below): an env-configured
           # install's forges (KUIPER_GITHUB__*, KUIPER_PROVISIONING__*) are only
           # there, and without them the import copies agents and users but no forges (its report
           # lists none). Then Phoenix's own:
