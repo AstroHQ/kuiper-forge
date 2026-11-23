@@ -284,17 +284,24 @@ if config_env() == :prod do
   # so a provider's connection string ending in ?sslmode=require would try plain TCP: it's
   # read here the way libpq reads it. DATABASE_CA_CERT (the provider's CA file) verifies the
   # server cert and hostname; sslmode=verify-ca/verify-full (or Ecto's ssl=true) verify against
-  # the system CAs; sslmode=require/prefer/allow encrypt without verifying, as libpq does.
+  # the system CAs; sslmode=require encrypts without verifying, as libpq does; prefer/allow stop boot.
   # Postgrex merges `ssl:` options over its own secure defaults (verify_peer, an https hostname
   # check, SNI from the URL's host), so `ssl: true` and `[cacertfile: ca]` both verify; only an
   # explicit verify_none doesn't. verify-ca checks the hostname too, stricter than libpq.
   ssl_mode = URI.decode_query(URI.parse(database_url).query || "")["sslmode"]
 
+  unsupported_sslmode = fn mode ->
+    "DATABASE_URL has sslmode=#{mode}, which falls back between TLS and plain TCP in libpq; " <>
+      "Phoenix can't, so pick sslmode=require (or verify-full) or sslmode=disable"
+  end
+
   database_ssl =
     case {System.get_env("DATABASE_CA_CERT", ""), ssl_mode} do
       {"", mode} when mode in ["verify-ca", "verify-full"] -> [ssl: true]
-      {"", mode} when mode in ["require", "prefer", "allow"] -> [ssl: [verify: :verify_none]]
+      {"", "require"} -> [ssl: [verify: :verify_none]]
       {"", mode} when mode in [nil, "disable"] -> []
+      # libpq falls back between TLS and plain TCP for these; Postgrex can't, so say so
+      {_, mode} when mode in ["prefer", "allow"] -> raise unsupported_sslmode.(mode)
       {"", mode} -> raise "DATABASE_URL has an unknown sslmode: #{inspect(mode)}"
       {ca, _} -> [ssl: [cacertfile: ca]]
     end

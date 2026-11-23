@@ -38,8 +38,12 @@ services:
       KUIPER_DATABASE__DATABASE: kuiper_forge
 
 volumes:
+  # the Rust compose project's volumes (project "docker", from kuiper-forge/docker/): its Postgres
+  # data, so import_rust --from postgres://... finds the Rust tables, and /data, so the CA and
+  # agent certs carry over. Stop the whole Rust project first: one Postgres per volume.
   pgdata:
-  # the Rust compose project's volume, so the CA and agent certs carry over
+    external: true
+    name: docker_pgdata
   kuiper-data:
     external: true
     name: docker_kuiper-data

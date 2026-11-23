@@ -348,6 +348,13 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     assert repo.("ecto://u:p@h/db")[:ssl] == [cacertfile: "/data/do-ca.crt"]
     System.delete_env("DATABASE_CA_CERT")
 
+    # libpq's fallback modes: Postgrex can't fall back, so boot says so instead of guessing
+    for mode <- ["prefer", "allow"] do
+      assert_raise RuntimeError, ~r/sslmode=#{mode}.*sslmode=require/, fn ->
+        repo.("ecto://u:p@h/db?sslmode=#{mode}")
+      end
+    end
+
     assert_raise RuntimeError, ~r/unknown sslmode: "requre"/, fn ->
       repo.("ecto://u:p@h/db?sslmode=requre")
     end

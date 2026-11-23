@@ -76,7 +76,10 @@ error. Rerunning is safe. See the README's import section for what's copied.
 
 `deploy/docker-compose.yml` is the swap of `kuiper-forge/docker/docker-compose.yml`:
 
-1. `docker compose stop kuiper-forge` (the Rust service). Keep its volume.
+1. `docker compose stop` in `kuiper-forge/docker/` (the Rust project, its Postgres too). Keep its
+   volumes: the Phoenix file mounts them as external `docker_pgdata` and `docker_kuiper-data`
+   (the names Compose gave them from that folder; check with `docker volume ls`), so its Postgres
+   is the Rust one's, with the Rust tables for the import.
 2. Point the service at the Phoenix image, keep its `/data` volume and env, add `SECRET_KEY_BASE`,
    `KUIPER_ENCRYPTION_KEY`, `PHX_HOST` and `DATABASE_URL` (or keep `KUIPER_DATABASE__*`), and
    publish `9480` for the admin UI beside `9443`.
@@ -86,7 +89,8 @@ error. Rerunning is safe. See the README's import section for what's copied.
 5. Point the forges' webhook URL at the HTTP port (`https://<host>/webhook` through your proxy) and
    log in at `/admin` with the Rust admin users (their passwords carry over; TOTP is set again).
 
-Going back: stop it, start the Rust service.
+Going back: `docker compose -f deploy/docker-compose.yml stop`, then start the Rust project
+again. Phoenix's tables are in their own database (`kuiper_forge_phoenix`), apart from Rust's.
 
 ## Kubernetes
 
