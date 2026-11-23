@@ -66,9 +66,10 @@ rust_database_url =
 
 # Rust's agent listener, KUIPER_GRPC__LISTEN_ADDR (like 0.0.0.0:9443 or [::]:9443), gives the
 # agent port and address when KUIPER_AGENT_PORT is unset, so the published port stays the same
+# (only read when KUIPER_AGENT_PORT is unset, so Phoenix's own setting can override a stale one)
 {rust_grpc_ip, rust_grpc_port} =
-  case System.get_env("KUIPER_GRPC__LISTEN_ADDR") do
-    nil ->
+  case !System.get_env("KUIPER_AGENT_PORT") && System.get_env("KUIPER_GRPC__LISTEN_ADDR") do
+    v when v in [nil, false] ->
       {nil, nil}
 
     addr ->
@@ -85,6 +86,8 @@ rust_ca_dir =
     if ca = System.get_env("KUIPER_TLS__CA_CERT"), do: Path.dirname(ca)
   end
 
+agent_port = String.to_integer(System.get_env("KUIPER_AGENT_PORT") || rust_grpc_port || "9543")
+
 config :kuiper_coordinator,
        :env_aliases,
        for(
@@ -92,7 +95,7 @@ config :kuiper_coordinator,
          System.get_env(rust) && !System.get_env(phoenix),
          do: {rust, phoenix}
        ) ++
-         if(rust_grpc_port && !System.get_env("KUIPER_AGENT_PORT"),
+         if(rust_grpc_port,
            do: [{"KUIPER_GRPC__LISTEN_ADDR", "KUIPER_AGENT_PORT"}],
            else: []
          ) ++
@@ -138,8 +141,8 @@ if config_env() != :test do
     enabled: agent_grpc?,
     data_dir: data_dir,
     ca_org: System.get_env("KUIPER_CA_ORG", "Kuiper Forge"),
-    port: String.to_integer(System.get_env("KUIPER_AGENT_PORT") || rust_grpc_port || "9543"),
-    ip: (!System.get_env("KUIPER_AGENT_PORT") && rust_grpc_ip) || {0, 0, 0, 0},
+    port: agent_port,
+    ip: rust_grpc_ip || {0, 0, 0, 0},
     ca_cert: env.("KUIPER_CA_CERT", Path.join(data_dir, "ca.crt")),
     ca_key: env.("KUIPER_CA_KEY", Path.join(data_dir, "ca.key")),
     server_cert: env.("KUIPER_SERVER_CERT", Path.join(data_dir, "server.crt")),
@@ -207,8 +210,9 @@ end
 if config_env() != :test do
   config :kuiper_coordinator, :admin,
     session_timeout_secs: String.to_integer(env.("KUIPER_ADMIN_SESSION_TIMEOUT", "3600")),
-    # agent-facing URL in registration bundles (Rust [admin] coordinator_url)
-    coordinator_url: env.("KUIPER_COORDINATOR_URL", "https://localhost:9543"),
+    # agent-facing URL in registration bundles (Rust [admin] coordinator_url); by default the
+    # agent port's, wherever it came from (Codex P1)
+    coordinator_url: env.("KUIPER_COORDINATOR_URL", "https://localhost:#{agent_port}"),
     # flag agents behind the newest GitHub release (Rust [admin] update_check, #75)
     # (KuiperCoordinator.AgentUpdates.enabled_from_env/1)
     update_check:

@@ -233,7 +233,26 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     for bad <- ["9443", "localhost:9443", "0.0.0.0:http"] do
       System.put_env("KUIPER_GRPC__LISTEN_ADDR", bad)
       assert_raise RuntimeError, ~r/KUIPER_GRPC__LISTEN_ADDR/, fn -> config(:prod) end
+      # KUIPER_AGENT_PORT overrides a stale one, which isn't read then (Codex P2)
+      System.put_env("KUIPER_AGENT_PORT", "9544")
+      assert config(:prod)[:kuiper_coordinator][:agent_grpc][:port] == 9544
+      System.delete_env("KUIPER_AGENT_PORT")
     end
+  end
+
+  test "the default coordinator URL uses the agent port, Rust's listen address's too (Codex P1)" do
+    assert get_in(config(), [:kuiper_coordinator, :admin, :coordinator_url]) ==
+             "https://localhost:9543"
+
+    put_prod_env(%{"KUIPER_ADMIN__COORDINATOR_URL" => nil})
+
+    assert get_in(config(:prod), [:kuiper_coordinator, :admin, :coordinator_url]) ==
+             "https://localhost:9443"
+
+    System.put_env("KUIPER_AGENT_PORT", "9601")
+
+    assert get_in(config(:prod), [:kuiper_coordinator, :admin, :coordinator_url]) ==
+             "https://localhost:9601"
   end
 
   test "PROXY protocol is off unless asked for" do
