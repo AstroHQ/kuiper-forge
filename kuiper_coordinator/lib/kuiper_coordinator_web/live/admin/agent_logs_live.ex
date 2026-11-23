@@ -213,6 +213,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
         const us = Number(el.dataset.us)
         if (!Number.isFinite(us) || el.dataset.local) return
         const d = new Date(Math.floor(us / 1000))
+        // out of Date's range (a broken agent clock): keep the server's raw fallback
+        if (Number.isNaN(d.getTime())) return
         el.textContent = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
           `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
         el.title = `${d.toString()}\n${el.title}`
@@ -230,7 +232,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
           this.onScroll = () => {
             const atBottom = this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < 8
             if (this.el.dataset.follow === "true") this.following = atBottom
-            this.jump.classList.toggle("hidden", atBottom)
+            // Jump means "to the newest line": only on the newest page, never on an Older one
+            this.jump.classList.toggle("hidden", atBottom || this.el.dataset.follow !== "true")
           }
           this.el.addEventListener("scroll", this.onScroll, {passive: true})
           this.jump.addEventListener("click", () => { this.following = true; this.toBottom() })
