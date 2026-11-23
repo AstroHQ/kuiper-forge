@@ -59,8 +59,8 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
 
   def handle_event("close_register", _params, socket), do: {:noreply, close_register(socket)}
 
-  def handle_event("delete_token", %{"token" => token}, socket) do
-    Agents.delete_registration_token(token)
+  def handle_event("delete_token", %{"handle" => handle}, socket) do
+    Agents.delete_registration_token_by_handle(handle)
     {:noreply, load(socket)}
   end
 
@@ -130,15 +130,15 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLive do
               </tr>
             </thead>
             <tbody>
-              <tr :for={t <- @dash.tokens} id={"token-#{t.token}"}>
-                <td><code>{t.token}</code></td>
+              <tr :for={t <- @dash.tokens} id={"token-#{Agents.token_handle(t.token)}"}>
+                <td><code>{Agents.token_prefix(t.token)}</code></td>
                 <td>{t.created_by}</td>
                 <td>{Calendar.strftime(t.expires_at, "%Y-%m-%d %H:%M UTC")}</td>
                 <td>
                   <button
                     class="btn btn-error btn-xs"
                     phx-click="delete_token"
-                    phx-value-token={t.token}
+                    phx-value-handle={Agents.token_handle(t.token)}
                     data-confirm="Delete this token?"
                   >
                     Delete

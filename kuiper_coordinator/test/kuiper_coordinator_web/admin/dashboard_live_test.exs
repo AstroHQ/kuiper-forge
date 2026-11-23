@@ -207,7 +207,8 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     assert :sys.get_state(view.pid).socket.assigns.new_bundle == nil
 
     [%{token: token}] = Agents.list_registration_tokens()
-    assert has_element?(view, "#token-#{token}")
+    handle = Agents.token_handle(token)
+    assert has_element?(view, "#token-#{handle}")
 
     # reopening makes a fresh token; the old bundle never comes back
     view |> element("#register-agent") |> render_click()
@@ -216,8 +217,8 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardLiveTest do
     view |> element("#register-modal") |> render_keydown(%{"key" => "Escape"})
     refute has_element?(view, "#register-modal")
 
-    view |> element("#token-#{token} button") |> render_click()
-    refute has_element?(view, "#token-#{token}")
+    view |> element("#token-#{handle} button") |> render_click()
+    refute has_element?(view, "#token-#{handle}")
   end
 
   test "the availability switch marks an agent unavailable and back", %{conn: conn} do
