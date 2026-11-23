@@ -151,7 +151,8 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
   @tag :no_server
   test "the Rust coordinator's prod env block boots the agent port behind a PROXY balancer",
        ctx do
-    # the Rust image's /data volume: its CA and server cert, nothing else set for the data dir
+    # the Rust image's /data volume with its CA; KUIPER_DATA_DIR=/data comes from the Phoenix
+    # image's own ENV (milestone 9), not the Rust env block
     data = Path.join(ctx.dir, "data")
     File.mkdir_p!(data)
     File.cp!(ctx.certs.ca_cert, Path.join(data, "ca.crt"))
@@ -168,6 +169,7 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
       "KUIPER_GRPC__PROXY_PROTOCOL" => "true",
       "KUIPER_ADMIN__COORDINATOR_URL" => "https://localhost:#{ctx.port}",
       "KUIPER_DATABASE__PATH" => "/data/kuiper.db",
+      "KUIPER_DATA_DIR" => data,
       "PHX_HOST" => "localhost",
       "DATABASE_URL" => "ecto://kuiper:pw@pg/kuiper_phoenix",
       "SECRET_KEY_BASE" => String.duplicate("s", 64),
@@ -175,7 +177,7 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
     }
 
     # nothing of Phoenix's own set
-    for name <- ~w(KUIPER_DATA_DIR KUIPER_AGENT_PORT KUIPER_CA_CERT),
+    for name <- ~w(KUIPER_AGENT_PORT KUIPER_CA_CERT),
         do: assert(System.get_env(name) == nil)
 
     saved = Map.new(rust_env, fn {k, _} -> {k, System.get_env(k)} end)

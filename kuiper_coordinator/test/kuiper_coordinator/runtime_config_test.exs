@@ -174,9 +174,8 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     # Rust's listen address keeps the agent port the deployment publishes (Codex P1)
     assert grpc[:port] == 9443
     assert grpc[:ip] == {0, 0, 0, 0}
-    # the Rust image's writable volume, where its CA is, is the data dir (Codex P1)
-    assert grpc[:data_dir] == "/data"
-    assert app[:management][:socket] == "/data/phoenix-coordinator.sock"
+    # the data dir isn't derived from the TLS paths, which may be read-only mounts (Codex P1)
+    assert grpc[:data_dir] == "/var/lib/kuiper-forge"
     assert app[:admin][:coordinator_url] == "https://kuiper.example.com"
     assert app[:admin][:session_timeout_secs] == 7200
     assert app[:admin][:update_check] == false
@@ -185,9 +184,9 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
 
     assert {"KUIPER_TLS__SERVER_TRUST_MODE", "KUIPER_SERVER_TRUST_MODE"} in app[:env_aliases]
     assert {"KUIPER_GRPC__PROXY_PROTOCOL", "KUIPER_AGENT_PROXY_PROTOCOL"} in app[:env_aliases]
-    # every name in the block that has a Phoenix name (no server CA cert in it), the listen
-    # address, and the CA's directory as the data dir
-    assert length(app[:env_aliases]) == 13
+    # every name in the block that has a Phoenix name (no server CA cert in it), and the listen
+    # address
+    assert length(app[:env_aliases]) == 12
   end
 
   test "Phoenix's own env names win over the Rust aliases" do
@@ -206,11 +205,9 @@ defmodule KuiperCoordinator.RuntimeConfigTest do
     assert app[:admin][:coordinator_url] == "https://phx.example.com"
     refute List.keymember?(app[:env_aliases], "KUIPER_TLS__CA_CERT", 0)
     assert List.keymember?(app[:env_aliases], "KUIPER_TLS__CA_KEY", 0)
-    # Phoenix's own CA path keeps the default data dir
-    assert app[:agent_grpc][:data_dir] == "/var/lib/kuiper-forge"
   end
 
-  test "KUIPER_AGENT_PORT and KUIPER_DATA_DIR win over Rust's listen address and CA dir" do
+  test "KUIPER_AGENT_PORT wins over Rust's listen address" do
     put_prod_env(%{
       "KUIPER_AGENT_PORT" => "9544",
       "KUIPER_DATA_DIR" => "/srv/kc",

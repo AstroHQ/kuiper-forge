@@ -81,11 +81,6 @@ rust_database_url =
       end
   end
 
-rust_ca_dir =
-  if !System.get_env("KUIPER_DATA_DIR") && !System.get_env("KUIPER_CA_CERT") do
-    if ca = System.get_env("KUIPER_TLS__CA_CERT"), do: Path.dirname(ca)
-  end
-
 agent_port = String.to_integer(System.get_env("KUIPER_AGENT_PORT") || rust_grpc_port || "9543")
 
 config :kuiper_coordinator,
@@ -99,7 +94,6 @@ config :kuiper_coordinator,
            do: [{"KUIPER_GRPC__LISTEN_ADDR", "KUIPER_AGENT_PORT"}],
            else: []
          ) ++
-         if(rust_ca_dir, do: [{"KUIPER_TLS__CA_CERT's directory", "KUIPER_DATA_DIR"}], else: []) ++
          if(rust_database_url, do: [{"KUIPER_DATABASE__*", "DATABASE_URL"}], else: [])
 
 if System.get_env("PHX_SERVER") do
@@ -128,12 +122,11 @@ if config_env() != :test do
       do: Path.expand("../.kuiper-data", __DIR__),
       else: "/var/lib/kuiper-forge"
 
-  # a Rust deployment keeps its CA on its writable volume (/data in its image) and has no data
-  # dir setting, so that volume is the data dir there (not /var/lib, which its user can't write)
-  data_dir =
-    System.get_env("KUIPER_DATA_DIR") ||
-      if(rust_ca_dir, do: rust_ca_dir, else: default_data_dir)
-
+  # KUIPER_DATA_DIR must be writable (first-launch certs, the Management socket). Rust takes its
+  # data dir as a CLI flag, not env, and its TLS files may be read-only mounts (cert-manager),
+  # so it isn't derived from them; the Phoenix Docker image sets KUIPER_DATA_DIR=/data, the
+  # Rust image's volume.
+  data_dir = System.get_env("KUIPER_DATA_DIR", default_data_dir)
   # on unless KUIPER_AGENT_GRPC is false or 0 (D58)
   agent_grpc? = System.get_env("KUIPER_AGENT_GRPC", "true") not in ~w(false 0)
 
