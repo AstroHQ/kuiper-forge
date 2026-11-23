@@ -237,16 +237,18 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
           // stream inserts don't always re-run updated() on the container, so watch the children
           this.observer = new MutationObserver(() => {
             this.localize()
-            if (this.following) this.toBottom()
+            if (this.following && this.el.dataset.follow === "true") this.toBottom()
             else this.onScroll()
           })
           this.observer.observe(this.el, {childList: true})
         },
         updated() {
           this.localize()
-          // paging back to Newest patches data-follow on this same hook: resume following there
+          // paging patches data-follow on this same hook: follow again on Newest, and open an
+          // Older page at its top instead of carrying the newest page's follow over
           const follow = this.el.dataset.follow === "true"
           if (follow && !this.followMode) { this.following = true; this.toBottom() }
+          if (!follow && this.followMode) { this.following = false; this.el.scrollTop = 0 }
           this.followMode = follow
         },
         destroyed() { this.observer && this.observer.disconnect() },
