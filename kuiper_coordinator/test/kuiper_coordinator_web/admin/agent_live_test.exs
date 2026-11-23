@@ -228,5 +228,61 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
       send(view.pid, :tail)
       assert render(view) =~ "new line"
     end
+
+    test "lines sit in a following terminal box, every level colored and aligned, local times",
+         %{conn: conn} do
+      agent!("agent_mac")
+
+      for level <- 1..5,
+          do: log!("agent_mac", 1_763_840_000_000_000 + level, level, "msg #{level}")
+
+      {:ok, view, html} = live(conn, ~p"/admin/agents/agent_mac/logs")
+
+      # a bounded dark box with the follow-tail hook, and a control to jump back to the newest line
+      assert has_element?(view, "#log-view.log-view[phx-hook$='LogView']")
+      assert has_element?(view, "#log-jump")
+
+      for name <- ~w(error warn info debug trace) do
+        assert has_element?(view, "#log-view .log-level.log-#{name}"), name
+      end
+
+      # the level column is padded to five characters, like the Rust page's {:>5}
+      assert html =~ ~r{<span class="log-level[^"]* log-info[^"]*">\s?INFO</span>}
+      assert html =~ ~r{<span class="log-level[^"]* log-warn[^"]*">\s?WARN</span>}
+
+      # times carry the raw instant for the hook to show in local time, full UTC on hover
+      assert has_element?(view, "#log-view time.log-time[data-us='1763840000000003']")
+      assert has_element?(view, ~s|#log-view time[title="2025-11-22 19:33:20.000003 UTC"]|)
+      assert has_element?(view, ".local-tz")
+    end
+
+    test "live tail appends lines as they're uploaded, at the chosen level", %{conn: conn} do
+      agent!("agent_mac")
+      log!("agent_mac", 1_000, 3, "old line")
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs?live=1&level=info")
+
+      record = fn ts, level, msg ->
+        %{timestamp_micros: ts, seq: 1, level: level, target: "agent", message: msg}
+      end
+
+      :ok =
+        Agents.insert_log_batch(
+          "agent_mac",
+          [record.(2_000, "INFO", "pushed line"), record.(2_001, "DEBUG", "too chatty")],
+          0
+        )
+
+      html = render(view)
+      assert html =~ "pushed line"
+      refute html =~ "too chatty"
+      [_, a, b] = Regex.run(~r/(old line).*(pushed line)/s, html)
+      assert {a, b} == {"old line", "pushed line"}
+
+      # not following: an upload doesn't touch a page that isn't live
+      {:ok, still, _} = live(conn, ~p"/admin/agents/agent_mac/logs")
+      :ok = Agents.insert_log_batch("agent_mac", [record.(3_000, "INFO", "later line")], 0)
+      refute render(still) =~ "later line"
+      assert render(view) =~ "later line"
+    end
   end
 end
