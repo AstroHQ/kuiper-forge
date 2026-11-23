@@ -53,7 +53,8 @@ defmodule KuiperCoordinator.Forges do
 
   defp save(cs, opts) do
     with {:ok, cs} <- cs |> one_fixed_capacity() |> live_check(opts) do
-      cs |> Repo.insert_or_update() |> notify()
+      # the query log would print the secrets in plaintext (D79), so this write isn't logged
+      cs |> Repo.insert_or_update(log: false) |> notify()
     end
   end
 
