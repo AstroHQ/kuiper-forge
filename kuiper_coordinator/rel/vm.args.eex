@@ -1,0 +1,7 @@
+## Extra flags for the release's VM (Mix's default vm.args is empty).
+
+## The BEAM sizes its port table from the open-file limit, and Docker on a systemd 257 host
+## (Debian 13) gives containers nofile = 1073741816: the VM then reserves gigabytes at boot and
+## a memory-limited pod is OOM-killed before it logs anything (Nye's F24). 65536 ports is far
+## more than the coordinator's agents, runners and DB pool use.
++Q 65536

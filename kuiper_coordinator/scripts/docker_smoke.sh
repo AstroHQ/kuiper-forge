@@ -63,9 +63,15 @@ app_env=(
   -e PHX_HOST=localhost
 )
 
+# the open-file limit Docker on a systemd 257 host (Debian 13) gives containers is the kernel's
+# fs.nr_open (1073741816 there): the BEAM sized its port table from it and was OOM-killed in a
+# small pod (F24). Boot with this host's highest limit in 512 MiB.
+nofile="$(cat /proc/sys/fs/nr_open)"
+
 boot() {
   docker rm -f "$id-app" >/dev/null 2>&1 || true
   docker run -d --name "$id-app" --network "$net" -v "$vol:/data" -p 127.0.0.1::9480 -p 127.0.0.1::9443 \
+    --memory 512m --ulimit "nofile=$nofile:$nofile" \
     "${app_env[@]}" "$IMAGE" >/dev/null
   http_port="$(docker port "$id-app" 9480 | head -1 | cut -d: -f2)"
   agent_port="$(docker port "$id-app" 9443 | head -1 | cut -d: -f2)"
@@ -74,7 +80,8 @@ boot() {
     [ "$(docker inspect -f '{{.State.Running}}' "$id-app")" = true ] || break
     sleep 1
   done
-  echo "HTTP never answered"; docker logs "$id-app" 2>&1 | tail -40; return 1
+  echo "HTTP never answered ($(docker inspect -f 'exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}}' "$id-app"))"
+  docker logs "$id-app" 2>&1 | tail -40; return 1
 }
 
 ca_fingerprint() {
