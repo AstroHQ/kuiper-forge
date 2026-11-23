@@ -194,3 +194,30 @@ jobs:
         env:
           DATABASE_URL: ecto://postgres:postgres@localhost:5432/kuiper_coordinator_smoke
         run: bash scripts/release_smoke.sh
+
+  docker:
+    # The image boots as a drop-in for the Rust image (kuiper_coordinator/docs/swap-from-rust.md):
+    # the Rust env names, the /data volume, agent port 9443, TLS-only Postgres via sslmode=require.
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: kuiper_coordinator
+          file: kuiper_coordinator/Dockerfile
+          load: true
+          tags: kuiper-coordinator:ci
+          cache-from: type=gha,scope=phoenix-ci
+          cache-to: type=gha,mode=max,scope=phoenix-ci
+
+      - name: Boot it with the Rust image's env
+        env:
+          IMAGE: kuiper-coordinator:ci
+        run: bash scripts/docker_smoke.sh

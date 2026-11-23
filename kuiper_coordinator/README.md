@@ -8,6 +8,9 @@ Proxmox and libvirt agents unchanged.
 
 ## Running it
 
+To run it in place of the Rust coordinator (Docker image, k8s, manual installs), see
+[docs/swap-from-rust.md](docs/swap-from-rust.md).
+
 Tool versions are pinned in `mise.toml` (Erlang/OTP 28, Elixir 1.19). You also
 need Postgres (the dev and test configs expect `postgres`/`postgres` on
 `localhost:5432`) and `protoc` if you regenerate the protos.

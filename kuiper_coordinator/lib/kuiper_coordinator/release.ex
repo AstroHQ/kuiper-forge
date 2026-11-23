@@ -97,9 +97,12 @@ defmodule KuiperCoordinator.Release do
       bin/kuiper_coordinator eval 'KuiperCoordinator.Release.import_rust("sqlite:///var/lib/kuiper/kuiper.db", config: "/etc/kuiper/config.toml", dry_run: true)'
 
   Exits 1 on an error, 2 when something conflicted (the rest is imported, conflicts are left
-  as Phoenix has them).
+  as Phoenix has them). It migrates first, as `bin/migrate` does (creating the database when
+  it's missing), since a swap imports before Phoenix has ever started.
   """
   def import_rust(from, opts \\ []) do
+    migrate()
+
     with_repo(fn ->
       report = KuiperCoordinator.RustImport.cli([{:from, from} | opts], &fail/1)
       if KuiperCoordinator.RustImport.conflicts?(report), do: System.halt(2)

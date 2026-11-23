@@ -36,3 +36,6 @@ npm-debug.log
 /assets/node_modules/
 
 /.kuiper-data/
+
+# deploy/docker-compose.yml secrets (from deploy/phoenix.env.sample)
+/deploy/phoenix.env

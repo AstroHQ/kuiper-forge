@@ -280,13 +280,41 @@ if config_env() == :prod do
   maybe_ipv6 =
     if System.get_env("ECTO_IPV6") in ~w(true 1) or ipv6_host?, do: [:inet6], else: []
 
-  config :kuiper_coordinator, KuiperCoordinator.Repo,
-    # ssl: true,
-    url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    # For machines with several cores, consider starting multiple pools of `pool_size`
-    # pool_count: 4,
-    socket_options: maybe_ipv6
+  # TLS to Postgres (managed servers like DigitalOcean's, D77). Ecto ignores libpq's sslmode,
+  # so a provider's connection string ending in ?sslmode=require would try plain TCP: it's
+  # read here the way libpq reads it. DATABASE_CA_CERT (the provider's CA file) verifies the
+  # server cert and hostname; sslmode=verify-ca/verify-full (or Ecto's ssl=true) verify against
+  # the system CAs; sslmode=require encrypts without verifying, as libpq does; prefer/allow stop boot.
+  # Postgrex merges `ssl:` options over its own secure defaults (verify_peer, an https hostname
+  # check, SNI from the URL's host), so `ssl: true` and `[cacertfile: ca]` both verify; only an
+  # explicit verify_none doesn't. verify-ca checks the hostname too, stricter than libpq.
+  ssl_mode = URI.decode_query(URI.parse(database_url).query || "")["sslmode"]
+
+  unsupported_sslmode = fn mode ->
+    "DATABASE_URL has sslmode=#{mode}, which falls back between TLS and plain TCP in libpq; " <>
+      "Phoenix can't, so pick sslmode=require (or verify-full) or sslmode=disable"
+  end
+
+  database_ssl =
+    case {System.get_env("DATABASE_CA_CERT", ""), ssl_mode} do
+      {"", mode} when mode in ["verify-ca", "verify-full"] -> [ssl: true]
+      {"", "require"} -> [ssl: [verify: :verify_none]]
+      {"", mode} when mode in [nil, "disable"] -> []
+      # libpq falls back between TLS and plain TCP for these; Postgrex can't, so say so
+      {_, mode} when mode in ["prefer", "allow"] -> raise unsupported_sslmode.(mode)
+      {"", mode} -> raise "DATABASE_URL has an unknown sslmode: #{inspect(mode)}"
+      {ca, _} -> [ssl: [cacertfile: ca]]
+    end
+
+  config :kuiper_coordinator,
+         KuiperCoordinator.Repo,
+         [
+           url: database_url,
+           pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
+           # For machines with several cores, consider starting multiple pools of `pool_size`
+           # pool_count: 4,
+           socket_options: maybe_ipv6
+         ] ++ database_ssl
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

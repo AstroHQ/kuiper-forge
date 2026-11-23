@@ -1,0 +1,52 @@
+# The Phoenix swap of kuiper-forge/docker/docker-compose.yml (see docs/swap-from-rust.md):
+# the same Postgres, /data volume and Rust env, plus Phoenix's secrets and its HTTP port.
+#   docker compose -f deploy/docker-compose.yml run --rm kuiper-coordinator import_rust --from postgres://kuiper:kuiper@postgres/kuiper_forge --dry-run
+#   docker compose -f deploy/docker-compose.yml up -d
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: kuiper
+      POSTGRES_PASSWORD: kuiper
+      POSTGRES_DB: kuiper_forge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kuiper -d kuiper_forge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kuiper-coordinator:
+    image: ghcr.io/astrohq/kuiper-coordinator:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9443:9443"   # agents, unchanged
+      - "9480:9480"   # admin UI, webhooks: put TLS in front of it
+    volumes:
+      - kuiper-data:/data
+    env_file:
+      # the Rust service's, where it is (paths are from this file's folder)
+      - ../../kuiper-forge/docker/.env
+      # Phoenix's own: copy phoenix.env.sample to phoenix.env and fill it in
+      - phoenix.env
+    environment:
+      # Rust's Postgres settings: Phoenix makes DATABASE_URL for kuiper_forge_phoenix beside it
+      KUIPER_DATABASE__HOST: postgres
+      KUIPER_DATABASE__PORT: "5432"
+      KUIPER_DATABASE__USER: kuiper
+      KUIPER_DATABASE__PASSWORD: kuiper
+      KUIPER_DATABASE__DATABASE: kuiper_forge
+
+volumes:
+  # the Rust compose project's volumes (project "docker", from kuiper-forge/docker/): its Postgres
+  # data, so import_rust --from postgres://... finds the Rust tables, and /data, so the CA and
+  # agent certs carry over. Stop the whole Rust project first: one Postgres per volume.
+  pgdata:
+    external: true
+    name: docker_pgdata
+  kuiper-data:
+    external: true
+    name: docker_kuiper-data

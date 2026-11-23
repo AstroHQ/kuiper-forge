@@ -1,0 +1,56 @@
+# The one-time import from the Rust coordinator's SQLite on its PVC, after
+# import-dry-run-job.yaml's log looks right (stop the Rust pod first: the PVC is
+# ReadWriteOnce). It migrates the Phoenix database first. Rerunning is safe: `kubectl delete -f`
+# this file, then `apply -f` it again.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kuiper-import-rust
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: import
+          image: ghcr.io/astrohq/kuiper-coordinator:latest
+          # the image adds --config /data/config.toml when the PVC has one, as the Rust image reads it.
+          # A Rust coordinator on Postgres: replace `--sqlite, /data/kuiper.db` with
+          # `--from, postgres://USER:PASS@HOST:PORT/DB` (its KUIPER_DATABASE__* values).
+          args: [import_rust, --sqlite, /data/kuiper.db]
+          # Paste the Rust StatefulSet's env block here, with its Secrets (and any volumeMounts and
+          # volumes its private_key_path / token_path files come from, below): an env-configured
+          # install's forges (KUIPER_GITHUB__*, KUIPER_PROVISIONING__*) are only
+          # there, and without them the import copies agents and users but no forges (its report
+          # lists none). Then Phoenix's own:
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: database-url}
+            - name: DATABASE_CA_CERT
+              value: /etc/kuiper/db-ca.crt
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: secret-key-base}
+            - name: KUIPER_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: {name: kuiper-coordinator, key: encryption-key}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: db-ca
+              mountPath: /etc/kuiper
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-kuiper-forge-0
+        - name: db-ca
+          secret:
+            secretName: kuiper-coordinator
+            items:
+              - {key: db-ca.crt, path: db-ca.crt}
