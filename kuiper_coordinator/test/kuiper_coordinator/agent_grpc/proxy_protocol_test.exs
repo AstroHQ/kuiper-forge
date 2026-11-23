@@ -114,22 +114,28 @@ defmodule KuiperCoordinator.AgentGrpc.ProxyProtocolTest do
     end
   end
 
-  test "dropped connections don't leave processes behind", ctx do
-    # warm up, then count
-    sock = raw_connect(ctx)
-    :ok = :gen_tcp.send(sock, "PROXY BOGUS\r\n")
-    {:error, :closed} = :gen_tcp.recv(sock, 0, 2_000)
-    Process.sleep(100)
-    before = length(Process.list())
+  # a dropped connection never starts TLS; its ssl and Cowboy processes must still go (its
+  # socket goes with them; each acceptor's next pending accept is a new gen_tcp_socket, so
+  # those aren't counted)
+  @conn_procs [:tls_dyn_connection_sup, :tls_sender, :ssl_gen_statem, :cowboy_tls]
 
-    for _ <- 1..50 do
+  test "dropped connections don't leave processes behind", ctx do
+    before = Process.list()
+
+    for _ <- 1..20 do
       sock = raw_connect(ctx)
       :ok = :gen_tcp.send(sock, "PROXY BOGUS\r\n")
       {:error, :closed} = :gen_tcp.recv(sock, 0, 2_000)
+      :gen_tcp.close(sock)
     end
 
-    Process.sleep(300)
-    assert length(Process.list()) <= before + 5
+    left =
+      for pid <- Process.list() -- before,
+          {mod, _, _} <- [:proc_lib.initial_call(pid)],
+          mod in @conn_procs,
+          do: {pid, Process.monitor(pid)}
+
+    for {pid, ref} <- left, do: assert_receive({:DOWN, ^ref, :process, ^pid, _}, 5_000)
   end
 
   test "a PROXY header that stalls is dropped after the header timeout", ctx do
