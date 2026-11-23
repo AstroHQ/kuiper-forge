@@ -38,9 +38,12 @@ defmodule KuiperCoordinatorWeb.Admin.DashboardTokenRedactionTest do
     refute render(view) =~ secret(t.token)
     refute render(view) =~ secret(other.token)
 
-    table = view |> element("#tokens") |> render()
-    assert table =~ "<code>#{String.slice(t.token, 0, 8)}…</code>"
-    assert table =~ "<code>#{String.slice(other.token, 0, 8)}…</code>"
+    for tok <- [t, other] do
+      row = "#tokens #token-#{Agents.token_handle(tok.token)}"
+      assert has_element?(view, row)
+      assert has_element?(view, "#{row} code", String.slice(tok.token, 0, 8) <> "…")
+      refute has_element?(view, "#{row} code", tok.token)
+    end
 
     # register: the modal holds the new token's bundle, the page never holds the raw token
     html = view |> element("#register-agent") |> render_click()
