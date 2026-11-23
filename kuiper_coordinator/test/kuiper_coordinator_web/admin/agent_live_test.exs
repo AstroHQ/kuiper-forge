@@ -236,7 +236,7 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
       for level <- 1..5,
           do: log!("agent_mac", 1_763_840_000_000_000 + level, level, "msg #{level}")
 
-      {:ok, view, html} = live(conn, ~p"/admin/agents/agent_mac/logs")
+      {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs")
 
       # a bounded dark box with the follow-tail hook, and a control to jump back to the newest line
       assert has_element?(view, "#log-view.log-view[phx-hook$='LogView']")
@@ -247,8 +247,9 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
       end
 
       # the level column is padded to five characters, like the Rust page's {:>5}
-      assert html =~ ~r{<span class="log-level[^"]* log-info[^"]*">\s?INFO</span>}
-      assert html =~ ~r{<span class="log-level[^"]* log-warn[^"]*">\s?WARN</span>}
+      assert level_text(view, "info") == " INFO"
+      assert level_text(view, "warn") == " WARN"
+      assert level_text(view, "error") == "ERROR"
 
       # times carry the raw instant for the hook to show in local time, full UTC on hover
       assert has_element?(view, "#log-view time.log-time[data-us='1763840000000003']")
@@ -272,17 +273,14 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
           0
         )
 
-      html = render(view)
-      assert html =~ "pushed line"
-      refute html =~ "too chatty"
-      [_, a, b] = Regex.run(~r/(old line).*(pushed line)/s, html)
-      assert {a, b} == {"old line", "pushed line"}
+      # appended after what was there, and the DEBUG line is below the chosen level
+      assert messages(view) == ["old line", "pushed line"]
 
       # not following: an upload doesn't touch a page that isn't live
       {:ok, still, _} = live(conn, ~p"/admin/agents/agent_mac/logs")
       :ok = Agents.insert_log_batch("agent_mac", [record.(3_000, "INFO", "later line")], 0)
-      refute render(still) =~ "later line"
-      assert render(view) =~ "later line"
+      assert messages(still) == ["old line", "pushed line", "too chatty"]
+      assert messages(view) == ["old line", "pushed line", "later line"]
     end
 
     test "live tail and paging controls are hand-written Tailwind, not daisyUI btn",
@@ -322,8 +320,25 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLiveTest do
 
       {:ok, view, _} = live(conn, ~p"/admin/agents/agent_mac/logs?live=1")
       assert :atomics.get(once, 1) == 1
-      assert render(view) =~ "racing line"
+      assert messages(view) == ["old line", "racing line"]
     end
+  end
+
+  # the message column of each line on the page, top to bottom
+  defp messages(view) do
+    view
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#log-view .log-line .log-message")
+    |> Enum.map(&LazyHTML.text/1)
+  end
+
+  defp level_text(view, name) do
+    view
+    |> element("#log-view .log-level.log-#{name}")
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.text()
   end
 
   def store_mid_load(_event, _measure, %{source: "agent_logs", query: q}, cfg) do

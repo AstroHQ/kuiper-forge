@@ -190,7 +190,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
               title={utc(l.ts, "%Y-%m-%d %H:%M:%S.%f") <> " UTC"}
             >{utc(l.ts, "%Y-%m-%d %H:%M:%S.%3f")}</time>
             <span class={["log-level shrink-0 whitespace-pre", level_class(l.level)]}>{label(l)}</span>
-            <span class="min-w-0 whitespace-pre-wrap break-words"><span class="log-target text-neutral-400">{l.target}</span> {l.message}</span>
+            <span class="min-w-0 whitespace-pre-wrap break-words"><span class="log-target text-neutral-400">{l.target}</span>
+            <span class="log-message">{l.message}</span></span>
           </div>
         </div>
         <div id="log-jump-wrap" phx-update="ignore">
@@ -220,7 +221,8 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
       export default {
         mounted() {
           this.jump = document.getElementById("log-jump")
-          this.following = this.el.dataset.follow === "true"
+          this.followMode = this.el.dataset.follow === "true"
+          this.following = this.followMode
           const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
           if (zone) for (const z of document.querySelectorAll(".local-tz")) z.textContent = zone
           this.localize()
@@ -240,7 +242,13 @@ defmodule KuiperCoordinatorWeb.Admin.AgentLogsLive do
           })
           this.observer.observe(this.el, {childList: true})
         },
-        updated() { this.localize() },
+        updated() {
+          this.localize()
+          // paging back to Newest patches data-follow on this same hook: resume following there
+          const follow = this.el.dataset.follow === "true"
+          if (follow && !this.followMode) { this.following = true; this.toBottom() }
+          this.followMode = follow
+        },
         destroyed() { this.observer && this.observer.disconnect() },
         localize() { for (const t of this.el.querySelectorAll("time[data-us]")) localTime(t) },
         toBottom() { this.el.scrollTop = this.el.scrollHeight; this.jump.classList.add("hidden") }
