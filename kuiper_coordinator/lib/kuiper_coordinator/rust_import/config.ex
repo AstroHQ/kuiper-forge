@@ -61,54 +61,11 @@ defmodule KuiperCoordinator.RustImport.Config do
   end
 
   @doc """
-  The Rust coordinator's environment overrides as a TOML-shaped map: `KUIPER_` stripped, the
-  rest lowercased and split on `__` into nested keys, values parsed the way figment does
-  (`true`/`false`, integers, floats, `[a, b]` arrays, else the string as it is).
+  The Rust coordinator's environment overrides as a TOML-shaped map, read the way figment's
+  `Env::prefixed("KUIPER_").split("__")` reads them (see `KuiperCoordinator.RustImport.FigmentValue`).
   """
   @spec env_overrides(%{String.t() => String.t()}) :: map()
-  def env_overrides(env) do
-    env
-    |> Enum.filter(fn {k, _} -> String.starts_with?(k, "KUIPER_") end)
-    |> Enum.sort()
-    |> Enum.reduce(%{}, fn {"KUIPER_" <> key, value}, acc ->
-      path = key |> String.downcase() |> String.split("__")
-
-      if Enum.any?(path, &(&1 == "")),
-        do: acc,
-        else: put_path(acc, path, env_value(value))
-    end)
-  end
-
-  defp put_path(acc, [k], v), do: Map.put(acc, k, v)
-
-  defp put_path(acc, [k | rest], v) do
-    inner = if is_map(acc[k]), do: acc[k], else: %{}
-    Map.put(acc, k, put_path(inner, rest, v))
-  end
-
-  defp env_value(v) do
-    t = String.trim(v)
-
-    cond do
-      t == "true" -> true
-      t == "false" -> false
-      Regex.match?(~r/\A[-+]?\d+\z/, t) -> String.to_integer(String.trim_leading(t, "+"))
-      Regex.match?(~r/\A[-+]?\d+\.\d+\z/, t) -> String.to_float(String.trim_leading(t, "+"))
-      String.starts_with?(t, "[") and String.ends_with?(t, "]") -> env_array(t, v)
-      quoted?(t) -> String.slice(t, 1..-2//1)
-      true -> v
-    end
-  end
-
-  defp env_array(t, raw) do
-    case Toml.decode("v = " <> t) do
-      {:ok, %{"v" => list}} -> list
-      _ -> raw
-    end
-  end
-
-  defp quoted?(t),
-    do: String.length(t) >= 2 and String.first(t) == "\"" and String.last(t) == "\""
+  def env_overrides(env), do: KuiperCoordinator.RustImport.FigmentValue.env(env)
 
   # figment's merge: the later source wins, tables merge key by key
   defp deep_merge(a, b) do

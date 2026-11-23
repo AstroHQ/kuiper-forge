@@ -322,7 +322,9 @@ defmodule KuiperCoordinator.RustImportTest do
 
     assert [gh] = Forges.list_forges()
     assert gh.name == "github" and gh.type == :github and gh.app_id == 4242
-    assert gh.private_key == pem
+    # figment trims env values, so Rust reads the PEM without its trailing newlines
+    assert gh.private_key == String.trim(pem)
+    assert {:ok, _} = X509.PrivateKey.from_pem(gh.private_key)
     assert gh.mode == :webhook and gh.webhook_secret == @webhook_secret
     assert Repo.get!(Agent, "agent-live").hostname == "mac-mini-1"
     assert Agents.valid_agent?("agent-live")
