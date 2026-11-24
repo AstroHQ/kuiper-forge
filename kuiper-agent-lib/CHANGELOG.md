@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## v0.7.1 - 2026-11-24
+#### Bug Fixes
+- **(agent-lib)** time out the coordinator connect - (f984ca6) - *jfro*
+
+- - -
 ## v0.7.0 - 2026-10-31
 #### Features
 - **(metrics)** show where each runner install came from - (158f52b) - *jfro*
