@@ -124,8 +124,10 @@ jobs:
         with:
           workspaces: kuiper_coordinator/test/rust_agent_probe
 
+      # no `--locked`: the probe has its own lock and release-plz doesn't bump the path deps in it, so a release PR
+      # would fail here. the lock still fixes the third-party versions
       - name: Build the agent and management probes
-        run: cargo build --locked --manifest-path test/rust_agent_probe/Cargo.toml
+        run: cargo build --manifest-path test/rust_agent_probe/Cargo.toml
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
