@@ -1,7 +1,11 @@
 use crate::{AgentCertStore, Error, Result};
 use kuiper_agent_proto::{AgentServiceClient, RegisterRequest, RegistrationServiceClient};
+use std::time::Duration;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{debug, info, warn};
+
+/// Limit for one connect attempt: tcp connect, tls handshake and h2 handshake together.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration for connecting to the coordinator.
 ///
@@ -186,13 +190,18 @@ impl AgentConnector {
             &self.config.coordinator_hostname,
         )?;
 
-        let channel = Channel::from_shared(self.config.coordinator_url.clone())
+        let endpoint = Channel::from_shared(self.config.coordinator_url.clone())
             .map_err(|e| Error::Certificate(format!("Invalid URL: {e}")))?
-            .tls_config(tls)?
-            .connect()
-            .await?;
+            .tls_config(tls)?;
 
-        Ok(channel)
+        // tonic has no limit on the handshakes by default. a proxy that accepts the socket while the coordinator is
+        // down never answers the tls hello, so without this the connect waits forever and the reconnect loop stops
+        match tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect()).await {
+            Ok(channel) => Ok(channel?),
+            Err(_) => Err(Error::Connection(format!(
+                "timed out connecting to coordinator after {CONNECT_TIMEOUT:?}"
+            ))),
+        }
     }
 }
 
@@ -261,5 +270,41 @@ mod hostname {
     #[cfg(not(any(unix, windows)))]
     pub fn get() -> std::io::Result<OsString> {
         Ok(OsString::from("unknown"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_times_out_when_the_peer_never_answers_tls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // accept and hold the socket open without sending anything
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let cert_store = AgentCertStore::new(dir.path().to_path_buf());
+        cert_store.save_server_trust_mode("chain").unwrap();
+        let connector = AgentConnector::new(
+            AgentConfig {
+                coordinator_url: format!("https://127.0.0.1:{port}"),
+                coordinator_hostname: "localhost".to_string(),
+                registration_token: None,
+                agent_type: "tart".to_string(),
+            },
+            cert_store,
+        );
+
+        let err = connector.connect_channel(None).await.unwrap_err();
+        assert!(matches!(err, Error::Connection(_)), "got {err:?}");
     }
 }
