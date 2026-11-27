@@ -56,7 +56,16 @@ node = "pve"
 # Create via Proxmox UI: Datacenter → Permissions → API Tokens
 token_id = "ci-runner@pve!runner"
 
-# API token secret (generated when creating the API token)
+# API token secret (generated when creating the API token). Set one of these three; if more
+# than one is set, the first in this order wins: token_secret_env, token_secret_path, token_secret.
+#
+# Option 1: the name of an environment variable holding the secret (keeps it out of this file)
+# token_secret_env = "KUIPER_PROXMOX_TOKEN_SECRET"
+#
+# Option 2: a file holding the secret (supports ~ expansion; surrounding whitespace is trimmed)
+# token_secret_path = "/etc/kuiper-proxmox-agent/token-secret"
+#
+# Option 3: the secret itself, inline
 token_secret = "your-token-secret-here"
 
 # Accept invalid/self-signed TLS certificates (default: false)
