@@ -469,7 +469,8 @@ WantedBy=multi-user.target
 
 /// Create the Proxmox API client from configuration.
 fn create_proxmox_client(config: &Config) -> Result<ProxmoxVEAPI> {
-    let auth = ProxmoxAuth::api_token(&config.proxmox.token_id, &config.proxmox.token_secret);
+    let token_secret = config.proxmox.token_secret_content()?;
+    let auth = ProxmoxAuth::api_token(&config.proxmox.token_id, &token_secret);
 
     // The username is derived from token_id (format: user@realm!tokenname)
     let username = config

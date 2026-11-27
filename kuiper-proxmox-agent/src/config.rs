@@ -62,11 +62,55 @@ pub struct ProxmoxConfig {
     pub node: String,
     /// API token ID (e.g., "ci-runner@pve!runner")
     pub token_id: String,
-    /// API token secret
+    /// API token secret, inline. Prefer `token_secret_env` or `token_secret_path`, which keep
+    /// the secret out of this file.
+    #[serde(default)]
     pub token_secret: String,
+    /// Path to a file holding the API token secret (supports ~ expansion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret_path: Option<PathBuf>,
+    /// Name of an environment variable holding the API token secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret_env: Option<String>,
     /// Accept invalid TLS certificates (for self-signed Proxmox certs)
     #[serde(default)]
     pub accept_invalid_certs: bool,
+}
+
+impl ProxmoxConfig {
+    /// Resolve the API token secret from `token_secret_env`, `token_secret_path` or
+    /// `token_secret`, in that order.
+    pub fn token_secret_content(&self) -> Result<String, ConfigError> {
+        self.token_secret_content_with(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::token_secret_content`], reading environment variables through `env`.
+    fn token_secret_content_with(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<String, ConfigError> {
+        let secret = if let Some(ref var) = self.token_secret_env {
+            env(var).ok_or_else(|| {
+                ConfigError::ValidationError(format!("proxmox.token_secret_env '{var}' is not set"))
+            })?
+        } else if let Some(ref path) = self.token_secret_path {
+            std::fs::read_to_string(path).map_err(|e| {
+                ConfigError::IoError(format!(
+                    "Failed to read proxmox.token_secret_path {}: {e}",
+                    path.display()
+                ))
+            })?
+        } else {
+            self.token_secret.clone()
+        };
+        let secret = secret.trim().to_string();
+        if secret.is_empty() {
+            return Err(ConfigError::ValidationError(
+                "Proxmox API token secret is empty".to_string(),
+            ));
+        }
+        Ok(secret)
+    }
 }
 
 /// A label-to-template mapping rule for selecting VM templates based on job labels.
@@ -304,8 +348,12 @@ impl Config {
         config.tls.ca_cert = config.tls.ca_cert.map(|p| expand_tilde(&p));
         config.tls.certs_dir = expand_tilde(&config.tls.certs_dir);
         config.ssh.private_key_path = config.ssh.private_key_path.map(|p| expand_tilde(&p));
+        config.proxmox.token_secret_path =
+            config.proxmox.token_secret_path.map(|p| expand_tilde(&p));
 
         config.validate()?;
+        // Fail at startup, not at the first clone, when the secret can't be read
+        config.proxmox.token_secret_content()?;
 
         Ok(config)
     }
@@ -408,6 +456,8 @@ impl Config {
                 node: "pve".to_string(),
                 token_id: String::new(),     // User must set
                 token_secret: String::new(), // User must set
+                token_secret_path: None,
+                token_secret_env: None,
                 accept_invalid_certs: false,
             },
             vm: VmConfig {
@@ -478,8 +528,13 @@ impl Config {
             errors.push("proxmox.token_id: API token ID (e.g., \"ci-runner@pve!runner\")");
         }
 
-        if self.proxmox.token_secret.is_empty() {
-            errors.push("proxmox.token_secret: API token secret");
+        if self.proxmox.token_secret.is_empty()
+            && self.proxmox.token_secret_path.is_none()
+            && self.proxmox.token_secret_env.is_none()
+        {
+            errors.push(
+                "proxmox.token_secret_env, proxmox.token_secret_path or proxmox.token_secret: API token secret",
+            );
         }
 
         // Check SSH authentication
@@ -767,5 +822,158 @@ username = "vagrant"
             error_msg.contains("ssh.private_key_path or ssh.password"),
             "Expected error message about SSH auth, got: {error_msg}"
         );
+    }
+
+    /// A config whose [proxmox] section is `proxmox`, with everything else valid.
+    fn config_with_proxmox(proxmox: &str) -> Config {
+        let toml = format!(
+            r#"
+[coordinator]
+url = "https://coordinator.example.com:9443"
+hostname = "coordinator.example.com"
+
+[tls]
+certs_dir = "/etc/kuiper-proxmox-agent/certs"
+
+[agent]
+labels = ["self-hosted"]
+
+[proxmox]
+api_url = "https://proxmox.local:8006"
+node = "pve"
+token_id = "ci-runner@pve!runner"
+{proxmox}
+
+[vm]
+template_vmid = 9000
+storage = "local-lvm"
+
+[ssh]
+private_key_path = "/etc/kuiper-proxmox-agent/id_ed25519"
+"#
+        );
+        toml::from_str(&toml).expect("Failed to parse config")
+    }
+
+    #[test]
+    fn test_token_secret_inline() {
+        let config = config_with_proxmox(r#"token_secret = "inline-secret""#);
+        config.validate().expect("valid");
+        let secret = config
+            .proxmox
+            .token_secret_content_with(|_| None)
+            .expect("resolves");
+        assert_eq!(secret, "inline-secret");
+    }
+
+    #[test]
+    fn test_token_secret_env_wins_over_path_and_inline() {
+        let config = config_with_proxmox(
+            r#"token_secret = "inline-secret"
+token_secret_path = "/nonexistent/secret"
+token_secret_env = "KUIPER_TEST_PVE_SECRET""#,
+        );
+        let secret = config
+            .proxmox
+            .token_secret_content_with(|name| {
+                (name == "KUIPER_TEST_PVE_SECRET").then(|| " env-secret\n".to_string())
+            })
+            .expect("resolves");
+        assert_eq!(secret, "env-secret");
+    }
+
+    #[test]
+    fn test_token_secret_env_unset_is_an_error() {
+        let config = config_with_proxmox(r#"token_secret_env = "KUIPER_TEST_PVE_SECRET""#);
+        config
+            .validate()
+            .expect("valid: the env var is checked when resolving");
+        let error = config
+            .proxmox
+            .token_secret_content_with(|_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("KUIPER_TEST_PVE_SECRET"), "{error}");
+    }
+
+    #[test]
+    fn test_token_secret_path_wins_over_inline() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        std::io::Write::write_all(&mut file, b"file-secret\n").expect("write");
+        let config = config_with_proxmox(&format!(
+            "token_secret = \"inline-secret\"\ntoken_secret_path = {:?}",
+            file.path()
+        ));
+        let secret = config
+            .proxmox
+            .token_secret_content_with(|_| None)
+            .expect("resolves");
+        assert_eq!(secret, "file-secret");
+    }
+
+    #[test]
+    fn test_token_secret_path_missing_is_an_error() {
+        let config = config_with_proxmox(r#"token_secret_path = "/nonexistent/kuiper/secret""#);
+        let error = config
+            .proxmox
+            .token_secret_content_with(|_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("token_secret_path"), "{error}");
+    }
+
+    #[test]
+    fn test_token_secret_empty_after_trimming_is_an_error() {
+        let config = config_with_proxmox(r#"token_secret_env = "KUIPER_TEST_PVE_SECRET""#);
+        let error = config
+            .proxmox
+            .token_secret_content_with(|_| Some(" \n".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("empty"), "{error}");
+    }
+
+    #[test]
+    fn test_validation_fails_without_any_token_secret() {
+        let config = config_with_proxmox("");
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "proxmox.token_secret_env, proxmox.token_secret_path or proxmox.token_secret"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_token_secret_sources_are_not_serialized_when_unset() {
+        let config = config_with_proxmox(r#"token_secret = "inline-secret""#);
+        let content = toml::to_string_pretty(&config).expect("serialize");
+        assert!(!content.contains("token_secret_path"), "{content}");
+        assert!(!content.contains("token_secret_env"), "{content}");
+    }
+
+    #[test]
+    fn test_load_resolves_the_token_secret_from_a_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let secret_path = dir.path().join("pve-secret");
+        std::fs::write(&secret_path, "file-secret\n").expect("write secret");
+        let config = config_with_proxmox(&format!("token_secret_path = {secret_path:?}"));
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            toml::to_string_pretty(&config).expect("serialize"),
+        )
+        .expect("write config");
+
+        let loaded = Config::load(&config_path).expect("loads");
+        assert_eq!(
+            loaded.proxmox.token_secret_content().expect("resolves"),
+            "file-secret"
+        );
+
+        std::fs::remove_file(&secret_path).expect("remove secret");
+        let error = Config::load(&config_path).unwrap_err().to_string();
+        assert!(error.contains("token_secret_path"), "{error}");
     }
 }
