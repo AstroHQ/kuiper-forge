@@ -3,6 +3,11 @@ All notable changes to this project will be documented in this file. See [conven
 
 - - -
 
+## v0.6.3 - 2026-11-27
+#### Features
+- **(proxmox-agent)** read the Proxmox token secret from an env var or a file - (afcf924) - *coreyx*
+
+- - -
 ## v0.6.1 - 2026-11-03
 #### Bug Fixes
 - lack of packaging of libvirt agent - (1896055) - *jfro*
